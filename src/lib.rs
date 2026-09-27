@@ -4,8 +4,8 @@
 //!
 //! * safe, VapourSynth-free algorithm modules ([`histogram`], [`peaks`],
 //!   [`gray_shades`], [`levels`], [`posterize`]) that hold all of the behaviour,
-//!   so they can be tested without a core;
-//! * the filter layer, which is the only place that touches the API.
+//!   so they can be tested without a core
+//! * the filter layer, which is the only place that touches the API
 //!
 //! The filter layer is still a scaffolding spike: a pass-through filter that
 //! proves the registration and frame lifecycle work end to end.

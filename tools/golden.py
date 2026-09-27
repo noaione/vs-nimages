@@ -33,9 +33,10 @@ import json
 import math
 import sys
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
+import scipy
 from PIL import Image
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -44,6 +45,10 @@ FRAMES = FIXTURES / "frames"
 
 DEFAULT_NMANGA_PATH = REPO_ROOT.parent / "nao-manga-rls"
 SEED = 20240607
+
+#: Name of the provenance file, which `--check` reports on but does not compare
+#: as data: it records the interpreter and library versions a run used.
+MANIFEST = "manifest.json"
 
 # Pixel counts above this are kept as pure histograms: they still exercise the
 # algorithm and the u64 arithmetic, but no image is synthesized to validate
@@ -169,9 +174,7 @@ def reference_gamma(black_level: int) -> float:
     return round(1 / internal, 2)
 
 
-def reference_shades(
-    hist: np.ndarray, total_pixels: int, threshold: float
-) -> list[dict[str, float]]:
+def reference_shades(hist: np.ndarray, total_pixels: int, threshold: float) -> list[dict[str, float]]:
     """Reference ``analyze_gray_shades`` over the fixed ``0..=255`` binning.
 
     ``nmanga`` omits ``range=(0, 256)`` when calling ``np.histogram``, so NumPy
@@ -183,10 +186,7 @@ def reference_shades(
     included = [(shade, int(hist[shade])) for shade in range(256) if int(hist[shade]) > pixel_threshold]
     # Stable descending sort by count keeps ascending shade order on ties.
     included.sort(key=lambda item: item[1], reverse=True)
-    return [
-        {"shade": shade, "percentage": (count / total_pixels) * 100.0}
-        for shade, count in included
-    ]
+    return [{"shade": shade, "percentage": (count / total_pixels) * 100.0} for shade, count in included]
 
 
 def nmanga_shades(nmanga: Nmanga, image: Image.Image, threshold: float) -> list[dict[str, float]]:
@@ -211,7 +211,7 @@ class Nmanga:
             raise SystemExit(f"cannot find {module_path}; pass --nmanga-path")
         sys.path.insert(0, str(path))
         try:
-            import nmanga.autolevel  # noqa: PLC0415
+            import nmanga.autolevel  # ruff: ignore[unused-import]
         except ImportError as error:  # pragma: no cover - depends on the checkout
             raise SystemExit(
                 f"cannot import nmanga.autolevel from {path}: {error}\n"
@@ -291,13 +291,37 @@ def peak_parameters() -> list[dict[str, Any]]:
     """The parameter sets every peak histogram case is evaluated under."""
     return [
         {"label": "default", "upper_limit": 60, "peak_percentage": 0.25, "peak_prominence": None, "skip_white": False},
-        {"label": "no-height", "upper_limit": 60, "peak_percentage": None, "peak_prominence": None, "skip_white": False},
-        {"label": "prominence", "upper_limit": 60, "peak_percentage": 0.25, "peak_prominence": 0.1, "skip_white": False},
-        {"label": "skip-white", "upper_limit": 60, "peak_percentage": 0.25, "peak_prominence": None, "skip_white": True},
+        {
+            "label": "no-height",
+            "upper_limit": 60,
+            "peak_percentage": None,
+            "peak_prominence": None,
+            "skip_white": False,
+        },
+        {
+            "label": "prominence",
+            "upper_limit": 60,
+            "peak_percentage": 0.25,
+            "peak_prominence": 0.1,
+            "skip_white": False,
+        },
+        {
+            "label": "skip-white",
+            "upper_limit": 60,
+            "peak_percentage": 0.25,
+            "peak_prominence": None,
+            "skip_white": True,
+        },
         {"label": "narrow", "upper_limit": 1, "peak_percentage": 0.25, "peak_prominence": None, "skip_white": False},
         {"label": "wide", "upper_limit": 255, "peak_percentage": 0.25, "peak_prominence": None, "skip_white": False},
         {"label": "zero-pct", "upper_limit": 60, "peak_percentage": 0.0, "peak_prominence": None, "skip_white": False},
-        {"label": "full-pct", "upper_limit": 60, "peak_percentage": 100.0, "peak_prominence": None, "skip_white": False},
+        {
+            "label": "full-pct",
+            "upper_limit": 60,
+            "peak_percentage": 100.0,
+            "peak_prominence": None,
+            "skip_white": False,
+        },
     ]
 
 
@@ -419,27 +443,23 @@ def build_peak_fixtures(nmanga: Nmanga) -> dict[str, Any]:
                     skip_white_check=params["skip_white"],
                 )
                 if (want[0], want[1]) != (black, white):
-                    raise AssertionError(
-                        f"{case_name}: nmanga={want[:2]} reference={(black, white)}"
-                    )
+                    raise AssertionError(f"{case_name}: nmanga={want[:2]} reference={(black, white)}")
 
-            cases.append(
-                {
-                    "name": case_name,
-                    "histogram": name,
-                    "total_pixels": total,
-                    "upper_limit": params["upper_limit"],
-                    "peak_percentage": params["peak_percentage"],
-                    "peak_prominence": params["peak_prominence"],
-                    "skip_white": params["skip_white"],
-                    "expect": {
-                        "black": black,
-                        "white": white,
-                        "black_found": black_found,
-                        "white_found": white_found,
-                    },
-                }
-            )
+            cases.append({
+                "name": case_name,
+                "histogram": name,
+                "total_pixels": total,
+                "upper_limit": params["upper_limit"],
+                "peak_percentage": params["peak_percentage"],
+                "peak_prominence": params["peak_prominence"],
+                "skip_white": params["skip_white"],
+                "expect": {
+                    "black": black,
+                    "white": white,
+                    "black_found": black_found,
+                    "white_found": white_found,
+                },
+            })
 
     return {
         "histograms": histograms,
@@ -568,15 +588,14 @@ def build_level_fixtures(nmanga: Nmanga) -> dict[str, Any]:
     source = ramp()
 
     for params in levels_parameters():
-        table = np.asarray(
-            nmanga.apply_levels(source, params["black"], params["white"], params["gamma"])
-        ).ravel().tolist()
+        table = (
+            np.asarray(nmanga.apply_levels(source, params["black"], params["white"], params["gamma"])).ravel().tolist()
+        )
         assert len(table) == 256
         cases.append({**params, "expect": [int(value) for value in table]})
 
     gamma_cases = [
-        {"black_level": black, "expect": reference_gamma(black)}
-        for black in (0, 1, 5, 12, 37, 60, 100, 127)
+        {"black_level": black, "expect": reference_gamma(black)} for black in (0, 1, 5, 12, 37, 60, 100, 127)
     ]
     for case in gamma_cases:
         if case["expect"] != nmanga.gamma_correction(case["black_level"]):
@@ -609,14 +628,12 @@ def build_posterize_fixtures(nmanga: Nmanga) -> dict[str, Any]:
         levels = sorted(set(int(value) for value in table))
         if len(levels) != colors:
             raise AssertionError(f"bits={bits}: expected {colors} levels, got {len(levels)}")
-        cases.append(
-            {
-                "bits": bits,
-                "colors": colors,
-                "levels": levels,
-                "expect": [int(value) for value in table],
-            }
-        )
+        cases.append({
+            "bits": bits,
+            "colors": colors,
+            "levels": levels,
+            "expect": [int(value) for value in table],
+        })
 
     return {"cases": cases}
 
@@ -692,22 +709,20 @@ def build_frame_fixtures(nmanga: Nmanga) -> dict[str, Any]:
             )
             if (want[0], want[1]) != (black, white):
                 raise AssertionError(f"frame {name}/{params['label']}: nmanga={want[:2]} reference={(black, white)}")
-            peak_cases.append(
-                {
-                    "name": f"{name}/{params['label']}",
-                    "frame": name,
-                    "upper_limit": params["upper_limit"],
-                    "peak_percentage": params["peak_percentage"],
-                    "peak_prominence": params["peak_prominence"],
-                    "skip_white": params["skip_white"],
-                    "expect": {
-                        "black": black,
-                        "white": white,
-                        "black_found": black_found,
-                        "white_found": white_found,
-                    },
-                }
-            )
+            peak_cases.append({
+                "name": f"{name}/{params['label']}",
+                "frame": name,
+                "upper_limit": params["upper_limit"],
+                "peak_percentage": params["peak_percentage"],
+                "peak_prominence": params["peak_prominence"],
+                "skip_white": params["skip_white"],
+                "expect": {
+                    "black": black,
+                    "white": white,
+                    "black_found": black_found,
+                    "white_found": white_found,
+                },
+            })
 
     shade_cases: list[dict[str, Any]] = []
     for name, image in frame_images():
@@ -774,6 +789,18 @@ def write(path: Path, payload: Any) -> bytes:
     return data
 
 
+def manifest_matches(manifest: dict[str, Any]) -> bool:
+    """Whether the committed manifest records this run's provenance."""
+    path = FIXTURES / MANIFEST
+    if not path.is_file():
+        return False
+    try:
+        committed = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return False
+    return committed.get("versions") == manifest["versions"]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--nmanga-path", type=Path, default=DEFAULT_NMANGA_PATH)
@@ -801,15 +828,21 @@ def main() -> int:
         "versions": {
             "python": sys.version.split()[0],
             "numpy": np.__version__,
+            "scipy": scipy.__version__,
             "pillow": Image.__version__,
         },
         "files": sorted(outputs),
     }
-    outputs["manifest.json"] = manifest
+    outputs[MANIFEST] = manifest
 
     if args.check:
+        # The manifest records the interpreter and library versions a run used,
+        # so it differs between machines even when the data is current. Compare
+        # the data files, then report the manifest separately.
         stale = []
         for name, payload in sorted(outputs.items()):
+            if name == MANIFEST:
+                continue
             path = FIXTURES / name
             text = json.dumps(payload, indent=2, sort_keys=False, ensure_ascii=False) + "\n"
             if not path.is_file() or path.read_text(encoding="utf-8") != text:
@@ -817,7 +850,13 @@ def main() -> int:
         if stale:
             print(f"stale fixtures: {', '.join(stale)}", file=sys.stderr)
             return 1
+
         print("fixtures are up to date")
+        if not manifest_matches(manifest):
+            print(
+                f"note: {MANIFEST} records a different interpreter or library "
+                "version than this run; the data is unaffected"
+            )
         return 0
 
     for name, payload in sorted(outputs.items()):

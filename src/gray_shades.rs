@@ -5,9 +5,9 @@
 //! [`FINDINGS.md`] §5 and `IMPLEMENTATIONS.md` §4.2:
 //!
 //! * the histogram is binned over the fixed range `0..=255` rather than over
-//!   the frame's observed `min..max`, so `shade` is a real gray value;
+//!   the frame's observed `min..max`, so `shade` is a real gray value
 //! * the shade/percentage pair is returned as a value instead of being written
-//!   into a frame property by the caller.
+//!   into a frame property by the caller
 //!
 //! A shade is included only when its count is *strictly* greater than
 //! `ceil(total_pixels * threshold / 100)`, and the result is sorted by

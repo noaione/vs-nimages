@@ -47,6 +47,13 @@ dev-tests = [
     "natsort>=8.4.0",
     "vapoursynth-imageseqs>=0.1.0",
 ]
+# `tools/golden.py` only. it imports `nmanga.autolevel` from a sibling checkout,
+# which needs numpy, scipy and pillow to run the reference implementation.
+golden = [
+    "numpy>=2.0",
+    "scipy>=1.14",
+    "pillow>=12",
+]
 
 [build-system]
 requires = ["hatchling>=1.27", "packaging"]

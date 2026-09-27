@@ -1,18 +1,18 @@
 //! Peak detection over a [`Histogram`], a dependency-free replacement for
 //! `scipy.signal.find_peaks` as used by `nmanga.autolevel.find_local_peak`.
 //!
-//! The rules in [`IMPLEMENTATIONS.md`] §7 are reproduced exactly:
+//! Reproduce [`IMPLEMENTATIONS.md`] §7 exactly:
 //!
 //! * a plateau is one peak, placed at its centre with an even-length plateau
-//!   rounded down;
+//!   rounded down
 //! * the region of interest is padded with one virtual zero bin at each end, so
 //!   a peak on a region boundary is still detected — without that padding the
-//!   equivalent of `find_peaks` never reports an array edge;
-//! * the minimum height and minimum prominence are both inclusive;
-//! * the tallest qualifying candidate wins, and a tie keeps the lowest bin;
-//! * if nothing qualifies the search repeats with no thresholds at all;
+//!   equivalent of `find_peaks` never reports an array edge
+//! * the minimum height and minimum prominence are both inclusive
+//! * the tallest qualifying candidate wins, and a tie keeps the lowest bin
+//! * if nothing qualifies the search repeats with no thresholds at all
 //! * an all-zero region yields nothing, because a peak must be strictly higher
-//!   than both neighbours.
+//!   than both neighbours
 //!
 //! [`IMPLEMENTATIONS.md`]: ../../docs/IMPLEMENTATIONS.md
 
