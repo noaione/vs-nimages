@@ -503,6 +503,7 @@ dev = [
 ]
 dev-tests = [
     { name = "natsort" },
+    { name = "numpy" },
     { name = "vapoursynth-imageseqs" },
 ]
 golden = [
@@ -516,6 +517,7 @@ requires-dist = [
     { name = "build", marker = "extra == 'dev'", specifier = ">=1.2" },
     { name = "hatchling", marker = "extra == 'dev'", specifier = ">=1.27" },
     { name = "natsort", marker = "extra == 'dev-tests'", specifier = ">=8.4.0" },
+    { name = "numpy", marker = "extra == 'dev-tests'", specifier = ">=2.0" },
     { name = "numpy", marker = "extra == 'golden'", specifier = ">=2.0" },
     { name = "packaging", marker = "extra == 'dev'", specifier = ">=26.3" },
     { name = "pillow", marker = "extra == 'golden'", specifier = ">=12" },

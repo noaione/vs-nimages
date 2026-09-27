@@ -478,20 +478,38 @@ Verified: `cargo test` 58 passed (48 unit, 10 integration),
 `cargo build --release --locked` produces `vs_nimages.dll`, and that release
 artifact still loads and serves frames in VapourSynth R80.
 
-### M3 — Plugin filters
+### M3 — Plugin filters — **done**
 
-- `src/filters/{peak_stats,peak_gray_shades,levels,posterize}.rs`.
-- `GRAY8` only, validated at construction from `node.info()`.
-- Per-frame dimensions read from the frame, never assumed from the node.
-- Iterate `width` samples per row; stride padding never enters the histogram or output.
-- Analysis filters `core.copy_frame` + `properties_mut()`; levels/posterize allocate
-  and copy properties.
-- `Parallel` filter mode; static levels/posterize LUTs in instance data.
-- Python integration tests: odd widths, 1×1, repeated/out-of-order/concurrent
-  requests, `ImgSeqPath` preservation, `vspipe` multithread determinism, invalid
-  arguments.
-- Requires adding `pytest` + `numpy` to the `dev-tests` extra (currently only
-  `natsort` + `vapoursynth-imageseqs`).
+- `src/error.rs` holds `NImagesError`, the type that crosses the boundary.
+- `src/filters/mod.rs` holds the shared layer: reading a clip, refusing anything
+  but `GRAY8`, reading optional arguments, registering the node, building a
+  frame's histogram, and applying a lookup table to a plane.
+- `src/filters/{peak_stats,peak_gray_shades,levels,posterize}.rs` are the four
+  filters, all `Parallel`, all with a strict spatial dependency on their input.
+- Dimensions come from the frame, never from the node, and every row walk stops
+  after `width` samples, so stride padding is neither read nor written.
+- The analysis filters `core.copy_frame`, which keeps pixels and properties, and
+  then write their own properties. The mapping filters allocate from the input
+  frame's format and pass it as `prop_src`, which copies the properties onto the
+  output.
+- `Levels` keeps its table inline in the instance data when the parameters are
+  constant, and rebuilds one per frame when `use_props=True`.
+- `tests/check-nimages.py` is the integration validator. It replays the golden
+  vectors through the built plugin, including 248 histogram peak cases and 60
+  histogram shade cases materialised as real frames, and then checks geometry,
+  per-frame independence, repeated and out-of-order and concurrent requests,
+  property preservation, determinism and the error messages.
+
+Verified: `cargo test` 61 passed (51 unit, 10 integration),
+`cargo clippy --all-targets` clean, `cargo fmt --check` clean,
+`cargo build --release --locked` loads in VapourSynth R80 with all four filters
+registered, and `tests/check-nimages.py` reports **1826 checks passed**.
+
+Two things the plan called for that are not here: `dev-tests` gained `numpy`
+rather than `pytest`, because the validator is a plain script in the style of
+`vs-imageseqs` rather than a pytest suite, and there is no `vspipe` run because the
+concurrent-request and determinism checks cover the same ground without needing an
+encoder.
 
 ### M4 — `nmanga` integration — **deferred, out of scope**
 

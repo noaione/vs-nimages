@@ -10,12 +10,14 @@ levels or posterization from either fixed parameters or per-frame statistics.
 
 ## status
 
-the analysis and mapping algorithms are implemented and replayed against
-committed golden vectors: the histogram, the peak finder, the gray-shade
-analyzer, the level table and the posterization table. the four plugin filters
-that expose them are the next milestone; `src/lib.rs` currently registers only a
-scaffolding `PassThrough` filter. see `docs/FINDINGS.md` for what is verified and
-`docs/IMPLEMENTATIONS.md` for the full plan.
+all four filters are implemented for `GRAY8` and verified against the reference
+python implementation. the analysis and mapping algorithms are replayed against
+committed golden vectors, and `tests/check-nimages.py` replays the same vectors
+through the built plugin. see `docs/FINDINGS.md` for what was verified and
+`docs/IMPLEMENTATIONS.md` for the plan the interface comes from.
+
+the first release is `GRAY8` only. 9 to 16 bit integer input and float input are
+later milestones.
 
 ## features
 
@@ -267,6 +269,14 @@ vectors come from the reference python implementation and are regenerated with
 
 ```powershell
 uv run --extra golden tools\golden.py --nmanga-path ..\nao-manga-rls
+```
+
+to exercise the built plugin itself, sync the test extras and run the validator,
+which replays the same vectors through the real filters:
+
+```powershell
+uv sync --extra dev --extra dev-tests
+.venv\Scripts\python.exe tests\check-nimages.py
 ```
 
 `AGENTS.md` documents the repository layout, the crate's pitfalls and the

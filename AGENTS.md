@@ -25,10 +25,10 @@ crate gets wrong, and which decisions are already locked.
 
 ## status
 
-the algorithms (`src/histogram.rs`, `peaks.rs`, `gray_shades.rs`, `levels.rs`,
-`posterize.rs`) are implemented and replayed against committed golden vectors.
-`src/lib.rs` still registers one scaffolding `PassThrough` filter. writing the
-four real filters is the next milestone; `docs/FINDINGS.md` §8 tracks it.
+the four filters are implemented for `GRAY8` and covered by
+`tests/check-nimages.py`. `docs/FINDINGS.md` §8 tracks the milestones: M1, M2 and
+M3 are done, M4 is deferred because it touches the sibling checkout, and M5 is
+distribution work.
 
 ## where the behaviour comes from
 
@@ -53,14 +53,20 @@ carries a `parity` of `nmanga`, `diverges` or `reference-only` plus the
   one. ask before adding it.
 - treat `tests/fixtures/` as generated. change it by running `tools/golden.py`,
   never by editing the json or the `.bin` files.
-- keep `src/` free of VapourSynth types outside `lib.rs` and the future
-  `src/filters/`. the algorithms must stay testable without a core.
+- keep `src/` free of VapourSynth types outside `lib.rs` and `src/filters/`. the
+  algorithms must stay testable without a core.
 - pass `--locked` to cargo so the committed lockfile is what gets built.
 
 ## source layout
 
-- `src/lib.rs`: plugin declaration through `declare_plugin!`, and the filter
+- `src/lib.rs`: plugin declaration through `declare_plugin!`, and the four filter
   registrations.
+- `src/error.rs`: `NImagesError`, the type that crosses the boundary.
+- `src/filters/mod.rs`: the shared filter layer. reading a clip, refusing
+  anything but `GRAY8`, reading optional arguments, registering the node,
+  building a frame's histogram, and applying a lookup table to a plane.
+- `src/filters/{peak_stats,peak_gray_shades,levels,posterize}.rs`: the four
+  filters. all `Parallel`, all with a strict spatial dependency on their input.
 - `src/histogram.rs`: the stride-aware `[u64; 256]` histogram every analyzer
   shares. `from_plane` refuses rows that do not fit instead of reading past them.
 - `src/peaks.rs`: `find_local_peak`, a dependency-free replacement for
@@ -70,9 +76,13 @@ carries a `parity` of `nmanga`, `diverges` or `reference-only` plus the
 - `src/levels.rs`: the level lookup table, `automatic_gamma`, and `validate`.
 - `src/posterize.rs`: the posterization lookup table.
 - `src/round.rs`: the ties-to-even helper `levels` and `posterize` share.
-- `tests/test_golden.rs`: replays every fixture. frame fixtures are rebuilt into
-  a stride-padded buffer whose padding byte is not a shade value, so a histogram
-  that over-reads a row cannot pass.
+- `tests/test_golden.rs`: replays every fixture through the algorithms. frame
+  fixtures are rebuilt into a stride-padded buffer whose padding byte is not a
+  shade value, so a histogram that over-reads a row cannot pass.
+- `tests/check-nimages.py`: the integration validator. replays the same fixtures
+  through the built plugin, then checks geometry, per-frame independence,
+  repeated and out-of-order and concurrent requests, property preservation,
+  determinism and the error messages.
 - `tools/golden.py`: the golden-vector generator. see below.
 - `hatch_build.py`: cargo build, plugin staging, wheel tagging, license
   inclusion.
@@ -112,14 +122,46 @@ cargo clippy --all-targets
 cargo fmt --check
 ```
 
-the development python is `.venv\Scripts\python.exe` (3.12, VapourSynth R80).
-install the built plugin into its plugin tree to exercise it by hand:
+the development python is `.venv\Scripts\python.exe` (3.12, VapourSynth R80). the
+test extras add numpy, which the validator needs:
+
+```powershell
+uv sync --extra dev --extra dev-tests
+.venv\Scripts\python.exe tests\check-nimages.py
+```
+
+run the validator after any change to `src/filters/`, `src/lib.rs` or a fixture.
+`uv sync` builds the wheel, which runs cargo and installs the plugin into the
+venv, so the validator always sees the current source.
+
+to install a hand-built plugin instead:
 
 ```powershell
 cargo build --release
 copy target\release\vs_nimages.dll .venv\Lib\site-packages\vapoursynth\plugins\nimages\
 .venv\Scripts\python.exe -c "import vapoursynth as vs; print([p.identifier for p in vs.core.plugins()])"
 ```
+
+## filter contract
+
+things worth knowing before touching `src/filters/`. `README.md` has the full
+argument and property tables.
+
+- every filter refuses anything but a constant `Gray` 8 bit clip, at creation.
+- `PeakStats` and `PeakGrayShades` copy the input frame, so pixels and properties
+  both survive, and then attach their own properties.
+- `Levels` and `Posterize` allocate from the input frame's format and pass the
+  input as `prop_src`, which is what carries the properties onto the output.
+- `NImagesGrayShades` and `NImagesGrayShadePercentages` are always both present
+  and always the same length. a zero-length array is a valid property, so the
+  empty case writes both rather than omitting them.
+- `Levels(use_props=True)` reads `NImagesBlackLevel` and `NImagesWhiteLevel` per
+  frame, so it fails at frame time, not at creation, when they are missing.
+- `peak_offset` is a code value, added to the black point before the curve is
+  built. it is not a percentage point, which is the `nmanga` cli bug recorded in
+  `docs/FINDINGS.md` §7.
+- `auto_gamma` refuses a black point of 128 or more, because the expression is
+  undefined there.
 
 ## golden vectors
 
