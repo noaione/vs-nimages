@@ -1,0 +1,17 @@
+{
+  "generator": "tools/golden.py",
+  "reference": "nao-manga-rls/nmanga/autolevel.py",
+  "seed": 20240607,
+  "versions": {
+    "python": "3.13.9",
+    "numpy": "2.5.3",
+    "pillow": "12.3.0"
+  },
+  "files": [
+    "frames.json",
+    "levels.json",
+    "peaks.json",
+    "posterize.json",
+    "shades.json"
+  ]
+}

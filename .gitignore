@@ -16,6 +16,9 @@ out/
 build/
 .venv/
 sandbox/
+# The plugin tree hatch_build.py stages into, then removes in finalize(); only
+# visible if a build is interrupted.
+/vapoursynth/plugins/
 # The standalone plugin bundle and the Linux relinking sources, both staged by
 # the build scripts and uploaded as release artifacts.
 native/
