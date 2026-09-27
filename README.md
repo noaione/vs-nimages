@@ -292,6 +292,13 @@ uv sync --extra dev --extra dev-tests
 .venv\Scripts\python.exe tests\check-nimages.py
 ```
 
+`docs/BENCH.md` records what the filters cost against the python pipeline they
+replace, measured on the same pages:
+
+```powershell
+uv run --extra golden --extra dev-tests tools\bench.py
+```
+
 `AGENTS.md` documents the repository layout, the crate's pitfalls and the
 commands in more detail.
 

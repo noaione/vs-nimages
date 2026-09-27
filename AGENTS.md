@@ -85,8 +85,23 @@ carries a `parity` of `nmanga`, `diverges` or `reference-only` plus the
   repeated and out-of-order and concurrent requests, property preservation,
   determinism and the error messages.
 - `tools/golden.py`: the golden-vector generator. see below.
+- `tools/bench.py`: times the python reference against the plugin on the same
+  pages. see below.
+- `docs/BENCH.md`: the method and the measured results.
 - `hatch_build.py`: cargo build, plugin staging, wheel tagging, license
   inclusion.
+
+## sandbox
+
+`sandbox/level-check` and `sandbox/posterize-check` hold real manga pages for
+manual and benchmark runs. they are a private working tree: read them, run them
+through the plugin, and name the directories where a command needs a path, but do
+not commit them, copy them anywhere else, or quote their contents. `.gitignore`
+already excludes `sandbox/`.
+
+`posterize-check` is the useful one for dimension handling, because its pages are
+four different sizes including a 5806x4128 spread and two widths that differ by a
+single pixel.
 
 ## hard constraints from the crate
 
@@ -191,6 +206,23 @@ reported as a note rather than a failure. the generator self-checks the peak
 reference against `scipy.signal.find_peaks` on every run and aborts on any
 disagreement with `nmanga`, so a failure there means the reference moved, not
 that the fixtures need accepting.
+
+## benchmarks
+
+`tools/bench.py` times the python reference against the plugin on the same pages,
+one pipeline per process so peak resident memory is comparable, and reports the
+per-stage split. it needs numpy, scipy and pillow, so it runs with both extras:
+
+```powershell
+uv run --extra golden --extra dev-tests tools\bench.py
+uv run --extra golden --extra dev-tests tools\bench.py --write docs\BENCH.md
+```
+
+`--write` replaces the block between the `<!-- bench:start -->` and
+`<!-- bench:end -->` markers in `docs/BENCH.md`. run it before changing anything
+that affects per-page cost, and keep the prose around the block honest about what
+is and is not comparable: decoding differs by library, and the plugin side does
+not write files because no VapourSynth writer is installed.
 
 ## writing style
 
