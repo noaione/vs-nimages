@@ -1,0 +1,118 @@
+from __future__ import annotations
+
+import shutil
+import subprocess
+import sys
+import sysconfig
+from pathlib import Path
+
+from hatchling.builders.hooks.plugin.interface import BuildHookInterface
+from packaging import tags
+
+PLUGIN_FILENAME_BY_PLATFORM = {
+    "win32": "vs_nimages.dll",
+    "darwin": "libvs_nimages.dylib",
+}
+
+
+def plugin_filename(environment: dict[str, str]) -> str:
+    target = environment.get("CARGO_BUILD_TARGET", "").lower()
+    if "windows" in target or "mingw" in target:
+        return "vs_nimages.dll"
+    if "darwin" in target or "apple" in target:
+        return "libvs_nimages.dylib"
+    return PLUGIN_FILENAME_BY_PLATFORM.get(sys.platform, "libvs_nimages.so")
+
+
+def release_directory(root: Path, environment: dict[str, str]) -> Path:
+    target_dir = Path(environment.get("CARGO_TARGET_DIR", root / "target"))
+    if not target_dir.is_absolute():
+        target_dir = root / target_dir
+
+    cargo_target = environment.get("CARGO_BUILD_TARGET")
+    if cargo_target:
+        target_dir /= cargo_target
+    return target_dir / "release"
+
+
+def build_plugin(root: Path, environment: dict[str, str]) -> Path:
+    cargo = environment.get("CARGO", "cargo")
+    try:
+        subprocess.run(
+            [cargo, "build", "--release", "--locked"],
+            cwd=root,
+            env=environment,
+            check=True,
+        )
+    except FileNotFoundError as error:
+        raise RuntimeError("Cargo is required to build the VapourSynth plugin") from error
+    except subprocess.CalledProcessError as error:
+        raise RuntimeError("Cargo failed while building the VapourSynth plugin") from error
+
+    artifact = release_directory(root, environment) / plugin_filename(environment)
+    if not artifact.is_file():
+        raise RuntimeError(f"Cargo completed but did not produce {artifact}")
+    return artifact
+
+
+def wheel_platform_tag() -> str:
+    if sys.platform == "linux":
+        # A build host's supported tags do not certify the plugin's ABI or
+        # external libraries. Only auditwheel may give Linux release wheels
+        # their manylinux tag, after checking and bundling those dependencies.
+        return sysconfig.get_platform().replace("-", "_").replace(".", "_")
+    return next(tags.platform_tags())
+
+
+# Do not subscript ``BuildHookInterface``: hatchling 1.27-1.32.2 declare it
+# with one type parameter and 1.32.3 added a second one, so any fixed
+# subscript makes the hook unloadable for the other releases. The plain class
+# is accepted by every version and the hook never needs the specialization.
+class NativePluginHook(BuildHookInterface):  # type: ignore[type-arg]
+    """Build the Cargo plugin and place it in VapourSynth's plugin tree."""
+
+    plugin_directory = Path("vapoursynth") / "plugins" / "nimages"
+
+    def initialize(self, version: str, build_data: dict[str, object]) -> None:
+        root = Path(self.root)
+        environment = {}
+        artifact = build_plugin(root, environment)
+
+        destination_directory = root / self.plugin_directory
+        destination_directory.mkdir(parents=True, exist_ok=True)
+        staged_plugin = destination_directory / artifact.name
+        shutil.copy2(artifact, staged_plugin)
+        manifest = destination_directory / "manifest.vs"
+        manifest.write_text(
+            f"[VapourSynth Manifest V1]\n{artifact.stem}\n", encoding="utf-8", newline="\n"
+        )
+
+        force_include = build_data.setdefault("force_include", {})
+        if not isinstance(force_include, dict):
+            raise TypeError("Hatch build data force_include must be a mapping")
+        force_include[str(staged_plugin)] = str(
+            self.plugin_directory / artifact.name
+        )
+        force_include[str(manifest)] = str(self.plugin_directory / manifest.name)
+
+        # Keep the license and attribution files beside the native artifact in
+        # every wheel. Hatch's normal package selection does not include
+        # repository-level files or arbitrary license directories.
+        force_include[str(root / "LICENSE")] = "LICENSE"
+
+        # The wheel contains a native plugin, so it must not be tagged as a
+        # universal pure-Python wheel.
+        build_data["pure_python"] = False
+        build_data["tag"] = f"py3-none-{wheel_platform_tag()}"
+
+    def finalize(
+        self,
+        version: str,
+        build_data: dict[str, object],
+        artifact_path: str,
+    ) -> None:
+        del version, build_data, artifact_path
+        shutil.rmtree(
+            Path(self.root) / self.plugin_directory,
+            ignore_errors=True,
+        )

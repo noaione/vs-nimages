@@ -1,0 +1,26 @@
+/target
+/build/
+/dist/
+*.egg-info/
+__pycache__/
+*.py[cod]
+# vcpkg generated files
+vcpkg_installed/
+buildtrees/
+packages/
+downloads/
+
+__pycache__
+dist/
+out/
+build/
+.venv/
+sandbox/
+# The standalone plugin bundle and the Linux relinking sources, both staged by
+# the build scripts and uploaded as release artifacts.
+native/
+source-bundle/
+
+docs/HANDOFF*
+
+CHANGELOG-GENERATED.md

@@ -1,0 +1,35 @@
+[package]
+name = "vs-nimages"
+version = "0.1.0"
+edition = "2024"
+authors = ["noaione <noaione@n4o.xyz>"]
+license = "MPL-2.0"
+readme = "./README.md"
+keywords = ["vapoursynth", "image-manipulation", "image-analyzer"]
+description = "A collection of analyzer and tooling to manipulate images with VapourSynth"
+repository = "https://github.com/noaione/vs-nimages"
+homepage = "https://github.com/noaione/vs-nimages"
+rust-version = "1.88.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+vapoursynth4-rs = { version = "0.5.1", default-features = false, features = [
+    "vs-42", # >=R74
+    "vsscript-43" # >=R79
+] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
+panic = "abort"
+incremental = false
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
