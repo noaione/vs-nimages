@@ -1,6 +1,8 @@
 //! `PeakGrayShades`: the significant gray shades of a frame, as frame properties.
 
 use std::ffi::{CStr, c_void};
+use std::sync::atomic::AtomicBool;
+use std::time::Instant;
 
 use vapoursynth4_rs::frame::{Frame, FrameContext, VideoFrame};
 use vapoursynth4_rs::map::MapRef;
@@ -11,8 +13,8 @@ use crate::error::{NImagesError, Result};
 use crate::gray_shades::analyze_gray_shades;
 
 use super::{
-    Accept, add_filter, check_frame_format, checked_info, input_failed, plane_histogram, read_clip,
-    read_float,
+    Accept, FrameTrace, add_filter, check_frame_format, checked_info, describe_frame, input_failed,
+    plane_histogram, read_clip, read_float, read_int, report_settings_once,
 };
 
 /// Default `threshold`, matching `nmanga`.
@@ -26,6 +28,9 @@ const DEFAULT_THRESHOLD: f64 = 0.01;
 pub struct PeakGrayShades {
     source: VideoNode,
     threshold: f64,
+    debug: bool,
+    /// Set once the settings line has been written for this instance.
+    reported: AtomicBool,
 }
 
 impl Filter for PeakGrayShades {
@@ -34,7 +39,7 @@ impl Filter for PeakGrayShades {
     type FilterData = ();
 
     const NAME: &'static CStr = c"PeakGrayShades";
-    const ARGS: &'static CStr = c"clip:vnode;threshold:float:opt;";
+    const ARGS: &'static CStr = c"clip:vnode;threshold:float:opt;debug:int:opt;";
     const RETURN_TYPE: &'static CStr = c"clip:vnode;";
 
     fn create(
@@ -52,6 +57,7 @@ impl Filter for PeakGrayShades {
                 "PeakGrayShades: threshold must be a finite number of percent, got {threshold}"
             )));
         }
+        let debug = read_int(&input, key!(c"debug"))?.unwrap_or(0) != 0;
 
         let dependency = source.as_ptr();
         add_filter(
@@ -59,7 +65,12 @@ impl Filter for PeakGrayShades {
             output,
             Self::NAME,
             &info,
-            Self { source, threshold },
+            Self {
+                source,
+                threshold,
+                debug,
+                reported: AtomicBool::new(false),
+            },
             dependency,
         );
         Ok(())
@@ -71,7 +82,7 @@ impl Filter for PeakGrayShades {
         activation_reason: ffi::VSActivationReason,
         _frame_data: *mut *mut c_void,
         mut frame_ctx: FrameContext,
-        core: CoreRef,
+        mut core: CoreRef,
     ) -> Result<Option<Self::FrameType>> {
         match activation_reason {
             ffi::VSActivationReason::Initial => {
@@ -79,11 +90,31 @@ impl Filter for PeakGrayShades {
                 Ok(None)
             }
             ffi::VSActivationReason::AllFramesReady => {
+                let mut trace = FrameTrace::new(self.debug, "PeakGrayShades");
+
                 let input = self.source.get_frame_filter(n, &mut frame_ctx);
                 check_frame_format(&input, "PeakGrayShades", Accept::Gray8)?;
-                let histogram = plane_histogram(&input)?;
-                let shades = analyze_gray_shades(&histogram, self.threshold);
 
+                let settings = describe_frame(&input);
+                report_settings_once(
+                    self.debug,
+                    &self.reported,
+                    &mut core,
+                    format_args!(
+                        "PeakGrayShades: threshold={} input={settings}",
+                        self.threshold
+                    ),
+                );
+
+                let mark = Instant::now();
+                let histogram = plane_histogram(&input)?;
+                trace.mark("histogram", mark);
+
+                let mark = Instant::now();
+                let shades = analyze_gray_shades(&histogram, self.threshold);
+                trace.mark("shades", mark);
+
+                let mark = Instant::now();
                 let values: Vec<i64> = shades.iter().map(|shade| i64::from(shade.shade)).collect();
                 let percentages: Vec<f64> = shades.iter().map(|shade| shade.percentage).collect();
 
@@ -103,6 +134,9 @@ impl Filter for PeakGrayShades {
                             NImagesError::property("NImagesGrayShadePercentages", error)
                         })?;
                 }
+                trace.mark("copy", mark);
+
+                trace.emit(&mut core, n, format_args!("shades={} ", values.len()));
 
                 Ok(Some(output))
             }

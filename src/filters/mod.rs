@@ -28,7 +28,10 @@ pub use peak_gray_shades::PeakGrayShades;
 pub use peak_stats::PeakStats;
 pub use posterize::Posterize;
 
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
+use std::fmt::{Display, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use vapoursynth4_rs::frame::{VideoFormat, VideoFrame};
 use vapoursynth4_rs::map::{KeyStr, MapPropertyError, MapRef};
@@ -40,6 +43,9 @@ use crate::histogram::Histogram;
 
 /// The bit depth every filter in this release accepts.
 const GRAY8_BITS: i32 = 8;
+
+/// Stages one frame can report under `debug`.
+const TRACE_STAGES: usize = 4;
 
 /// What a filter accepts as input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -317,4 +323,126 @@ pub(super) fn map_frame(
 /// Reports a frame whose input failed to generate.
 pub(super) fn input_failed(function: &str) -> NImagesError {
     NImagesError::new(format!("{function}: failed to generate the input frame"))
+}
+
+// ---------------------------------------------------------------------------
+// debug reporting
+//
+// Every filter takes `debug:int:opt`. When it is set, the create call logs the
+// arguments it resolved and each frame logs how long its stages took, both
+// through `core.log` so a host can collect them with `add_log_handler` instead
+// of reading stderr. `tools/bench.py` measures the same work from outside; this
+// is for looking at one clip, or one frame, from inside a graph.
+// ---------------------------------------------------------------------------
+
+/// Writes one debug line to the VapourSynth log.
+pub(super) fn log_debug(core: &mut CoreRef<'_>, message: impl Display) {
+    let Ok(message) = CString::new(format!("[nimages][debug] {message}")) else {
+        return;
+    };
+    core.log(ffi::VSMessageType::Information, &message);
+}
+
+/// Formats a duration the way `vapoursynth-imageseqs` does.
+pub(super) fn format_duration(duration: Duration) -> String {
+    format!("{:.3} ms", duration.as_secs_f64() * 1000.0)
+}
+
+/// Names the format and size of one frame, for the settings line.
+///
+/// The frame is used rather than the node because a clip whose dimensions or
+/// format vary has nothing useful to say at the node level.
+///
+/// The name is built from the format's own fields rather than from
+/// `Core::get_video_format_name`. That helper hands back the API's fixed 32 byte
+/// buffer minus its last byte, so the string keeps the NUL padding behind the
+/// name, and any log line built from it is dropped because `CString::new`
+/// refuses it. See docs/FINDINGS.md §2.5.
+pub(super) fn describe_frame(frame: &VideoFrame) -> String {
+    let format = frame.get_video_format();
+    format!(
+        "{:?} {} bit {}x{}",
+        format.color_family,
+        format.bits_per_sample,
+        frame.frame_width(0),
+        frame.frame_height(0)
+    )
+}
+
+/// Whether this frame is the first one this filter instance was asked for.
+///
+/// VapourSynth drops a message logged from a filter's create function before it
+/// reaches a host's log handler, so the settings line is written from the first
+/// frame instead. `swap` returns the previous value, so exactly one frame of a
+/// filter that VapourSynth calls concurrently reports it.
+pub(super) fn report_settings_once(
+    enabled: bool,
+    reported: &AtomicBool,
+    core: &mut CoreRef<'_>,
+    detail: impl Display,
+) {
+    if enabled && !reported.swap(true, Ordering::Relaxed) {
+        log_debug(core, detail);
+    }
+}
+
+/// Times the stages of one frame and reports them when the filter was created
+/// with `debug=1`.
+pub(super) struct FrameTrace {
+    enabled: bool,
+    function: &'static str,
+    started: Instant,
+    stages: [(&'static str, Duration); TRACE_STAGES],
+    used: usize,
+}
+
+impl FrameTrace {
+    /// Starts a frame. The clock is read even when `debug` is off, because one
+    /// `Instant::now` costs nothing next to the megapixel scan that follows.
+    pub(super) fn new(enabled: bool, function: &'static str) -> Self {
+        Self {
+            enabled,
+            function,
+            started: Instant::now(),
+            stages: [("", Duration::ZERO); TRACE_STAGES],
+            used: 0,
+        }
+    }
+
+    /// Records the time since `since` under `name`.
+    pub(super) fn mark(&mut self, name: &'static str, since: Instant) {
+        if !self.enabled || self.used >= self.stages.len() {
+            return;
+        }
+        self.stages[self.used] = (name, since.elapsed());
+        self.used += 1;
+    }
+
+    /// Writes the frame's line, with `detail` between the frame number and the
+    /// timings.
+    pub(super) fn emit(&self, core: &mut CoreRef<'_>, n: i32, detail: impl Display) {
+        if !self.enabled {
+            return;
+        }
+
+        let mut stages = String::new();
+        for (index, (name, elapsed)) in self.stages[..self.used].iter().enumerate() {
+            if index > 0 {
+                stages.push(' ');
+            }
+            let _ = write!(stages, "{name}={}", format_duration(*elapsed));
+        }
+        if !stages.is_empty() {
+            stages.push(' ');
+        }
+
+        log_debug(
+            core,
+            format_args!(
+                "{} frame {n}: {detail}{stages}total={}",
+                self.function,
+                format_duration(self.started.elapsed())
+            ),
+        );
+    }
 }

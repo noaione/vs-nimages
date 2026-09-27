@@ -9,8 +9,10 @@ Two pipelines are timed on one image list:
 * ``vapoursynth`` - ``imgseqs.Read(..., mismatch=True)`` through
                   ``resize.Bicubic``, ``PeakStats``, ``Levels`` and ``Posterize``
 
-Both run in their own process so peak resident memory is comparable. Pass
-``--write`` to refresh the results block of ``docs/BENCH.md``.
+Both run in their own process so peak resident memory is comparable. The plugin
+side runs with a 512 MiB frame cache, which is what a caller would set for a
+manga volume and what `--cache` changes. Pass ``--write`` to refresh the results
+block of ``docs/BENCH.md``.
 
 ``sandbox/`` is a private working tree and is not committed.
 
@@ -22,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import time
@@ -40,9 +43,15 @@ POSTERIZE_BITS = 4
 
 IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp", ".avif", ".jxl", ".tif", ".tiff", ".bmp")
 
+# Frame cache the plugin side runs with, in MiB. The core default is far larger
+# than a caller needs; this is enough to hold a whole manga volume of SD to
+# HD-ish pages as GRAY8, which is what a real script would set.
+DEFAULT_CACHE_MB = 512
+
 #: Suites under `sandbox/`, and the workflows that make sense for each.
 SUITES = {
     "levels": (REPO_ROOT / "sandbox" / "level-check", ("levels",)),
+    "webp": (REPO_ROOT / "sandbox" / "level-webp-check", ("levels",)),
     "posterize": (REPO_ROOT / "sandbox" / "posterize-check", ("shades", "posterize")),
 }
 
@@ -119,6 +128,75 @@ class Stages:
 def image_files(directory: Path, limit: int | None) -> list[Path]:
     files = sorted(path for path in directory.iterdir() if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES)
     return files[:limit] if limit else files
+
+
+# ---------------------------------------------------------------------------
+# reading the plugin's own timings
+# ---------------------------------------------------------------------------
+
+#: One line the plugin writes per frame under debug=1, for example
+#: `[nimages][debug] PeakStats frame 3: black=12 white=245 histogram=2.101 ms
+#: peaks=0.081 ms copy=2.130 ms total=4.315 ms`. The detail between the colon
+#: and `total=` is whatever that filter chose to report, so only the
+#: `name=value ms` pairs are read out of it.
+DEBUG_LINE = re.compile(r"\[nimages\]\[debug\] (?P<function>\w+) frame \d+: (?P<body>.*)$")
+DEBUG_STAGE = re.compile(r"(\w+)=([0-9.]+) ms")
+
+#: `vapoursynth-imageseqs` writes one of these per frame under debug=1, and its
+#: nested `(open=... read=...)` group is already part of `decode=`, so only the
+#: outer `total=` can be summed. Its create line has no frame number and is
+#: skipped by the pattern.
+IMGSEQS_TOTAL = re.compile(
+    r"\[imgseqs\]\[debug\] frame \d+ '.*?' \(\w+\): .* total=(?P<total>[0-9.]+) ms"
+)
+
+#: Which report column a filter's stages belong to.
+ANALYZERS = ("PeakStats", "PeakGrayShades")
+
+#: The stage columns every result row carries, in report order.
+STAGE_COLUMNS = ("decode", "resize", "analyze", "apply")
+
+
+class DebugLog:
+    """Collects both plugins' debug lines and adds up the stages they hold.
+
+    `decode` comes from `vapoursynth-imageseqs`, which times its own frame build
+    including the container read and the colour conversion. `analyze` and `apply`
+    come from this plugin. Whatever is left of the wall time after those three is
+    `resize`, which covers `resize.Bicubic` and the frame plumbing around it.
+    """
+
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+
+    def __call__(self, message_type: int, message: str) -> None:
+        del message_type
+        text = message.strip()
+        if text.startswith(("[nimages][debug]", "[imgseqs][debug]")):
+            self.lines.append(text)
+
+    def take_stages(self) -> dict[str, float]:
+        """Seconds per report column for the lines collected so far."""
+        columns = {"decode": 0.0, "analyze": 0.0, "apply": 0.0}
+        for line in self.lines:
+            source = IMGSEQS_TOTAL.search(line)
+            if source is not None:
+                columns["decode"] += float(source["total"]) / 1000.0
+                continue
+
+            match = DEBUG_LINE.search(line)
+            if match is None:
+                continue
+            column = "analyze" if match["function"] in ANALYZERS else "apply"
+            for name, value in DEBUG_STAGE.findall(match["body"]):
+                if name == "total":
+                    continue
+                columns[column] += float(value) / 1000.0
+        self.lines.clear()
+        return columns
+
+
+log = DebugLog()
 
 
 # ---------------------------------------------------------------------------
@@ -208,73 +286,131 @@ def run_nmanga(images: list[Path], workflow: str, nmanga_path: Path, warmup: int
 # ---------------------------------------------------------------------------
 
 
-def run_vapoursynth(images: list[Path], workflow: str, cache_mb: int | None, warmup: int) -> dict:
+def to_gray8(source, vs, core):
+    """Normalises a sequence to a constant `GRAY8` the way a caller should.
+
+    An RGB source, which is what `vapoursynth-imageseqs` hands out for a JPEG or
+    a PNG, converts straight to Gray with the `470bg` luma the reference uses.
+
+    A YUV source, which is what it hands out for a lossy WebP, goes through RGB
+    first. Taking the luma plane directly is cheaper but wrong for this
+    comparison: the decoder's Y is limited range, so a page whose luma sits at 32
+    arrives as 43, and the reference is analysing the full range 32 that Pillow
+    computed from the RGB. The round trip matches the reference to within 0.01 of
+    a code value.
+
+    The odd edge comes off first, because zimg cannot convert an odd sized 4:2:0
+    frame. That and the per-frame form below are the workaround
+    `vapoursynth-imageseqs` documents; it uses `FrameEval` because a clip whose
+    format varies cannot be judged at the node, and a clip whose format does not
+    can be trimmed once instead.
+    """
+    if source.format.color_family == vs.RGB:
+        return core.resize.Bicubic(source, format=vs.GRAY8, matrix_s="470bg", range_s="full")
+    if source.format.color_family == vs.YUV:
+        return trim_and_convert(source, vs, core, source, source.width, source.height)
+
+    # The clip varies, so the node reports an Undefined format and cannot say
+    # whether its frames are RGB. One probe answers it, and a single resize is
+    # both enough and cheaper than the per-frame form when the answer is yes.
+    probe = source.get_frame(0)
+    if probe.format.color_family == vs.RGB:
+        return core.resize.Bicubic(source, format=vs.GRAY8, matrix_s="470bg", range_s="full")
+
+    # A sequence mixing RGB and YUV frames has to be converted one frame at a
+    # time. What comes back has to be one format, so every branch returns Gray8
+    # and a final resize declares it.
+    plain_gray = core.resize.Bicubic(source, format=vs.GRAY8, matrix_s="470bg", range_s="full")
+
+    def convert(n=0, **_):
+        frame = source.get_frame(n)
+        if frame.format.color_family == vs.RGB:
+            return plain_gray
+        return trim_and_convert(source, vs, core, source, frame.width, frame.height)
+
+    gray = core.std.FrameEval(source, convert)
+    return core.resize.Bicubic(gray, format=vs.GRAY8)
+
+
+def trim_and_convert(source, vs, core, clip, width: int, height: int):
+    """Converts one YUV clip or sub-clip to `GRAY8` through RGB, trimming an odd
+    edge off first and putting it back as black."""
+    right = width % 2 if clip.format.subsampling_w else 0
+    bottom = height % 2 if clip.format.subsampling_h else 0
+    region = clip
+    if right or bottom:
+        region = core.std.CropAbs(clip, width=width - right, height=height - bottom)
+
+    # No matrix or range arguments: the frame properties carry both, and they are
+    # what make the round trip match the reference.
+    rgb = core.resize.Bicubic(region, format=vs.RGB24)
+    gray = core.resize.Bicubic(rgb, format=vs.GRAY8, matrix_s="470bg", range_s="full")
+    if right or bottom:
+        gray = core.std.AddBorders(gray, right=right, bottom=bottom)
+    return gray
+
+
+def run_vapoursynth(images: list[Path], workflow: str, cache_mb: int, warmup: int) -> dict:
     import vapoursynth as vs
 
     core = vs.core
-    if cache_mb is not None:
-        core.max_cache_size = cache_mb
+    core.max_cache_size = cache_mb
+    core.add_log_handler(log)
 
     # `mismatch=True` is what lets one clip hold pages of different sizes, which
     # is why the filters have to read every dimension from the frame.
-    source = core.imgseqs.Read(files=[str(path) for path in images], mismatch=True, prefetch=0)
-    # The documented normalisation: bring the sequence to a constant format.
-    # Dimensions still vary, so the clip stays variable sized.
-    gray = core.resize.Bicubic(source, format=vs.GRAY8, matrix_s="470bg", range_s="full")
+    source = core.imgseqs.Read(
+        files=[str(path) for path in images], mismatch=True, prefetch=0, debug=1
+    )
+    gray = to_gray8(source, vs, core)
 
+    # Every filter reports its own stage times when `debug=1`. VapourSynth does
+    # not keep an intermediate frame between two external requests, so pulling
+    # `head` and then `tail` would analyse every page twice and count it twice.
+    # Pulling only the last node and reading the stages from its own clock is
+    # exact: the total is this process's wall time, and the stages are the
+    # filters' own.
     if workflow == "levels":
         head = core.nimages.PeakStats(
             gray,
             upper_limit=UPPER_LIMIT,
             peak_percentage=PEAK_PERCENTAGE,
             skip_white=1,
+            debug=1,
         )
-        tail = core.nimages.Levels(head, use_props=True, peak_offset=0, auto_gamma=True)
+        final = core.nimages.Levels(head, use_props=True, peak_offset=0, auto_gamma=True, debug=1)
     elif workflow == "shades":
-        head = core.nimages.PeakGrayShades(gray, threshold=SHADE_THRESHOLD)
-        tail = None
+        final = core.nimages.PeakGrayShades(gray, threshold=SHADE_THRESHOLD, debug=1)
     elif workflow == "posterize":
-        head = core.nimages.Posterize(gray, bits=POSTERIZE_BITS)
-        tail = None
+        final = core.nimages.Posterize(gray, bits=POSTERIZE_BITS, debug=1)
     else:
         raise SystemExit(f"unknown workflow {workflow}")
 
-    def process(index: int) -> tuple[dict[str, float], int, int]:
-        """One page, with the wall time of each stage it runs."""
-        stage: dict[str, float] = {}
+    for index in range(min(warmup, len(images))):
+        final.get_frame(index)
+
+    stages = Stages()
+    for index in range(len(images)):
+        log.lines.clear()
 
         start = time.perf_counter()
-        gray.get_frame(index)
-        stage["decode"] = time.perf_counter() - start
+        frame = final.get_frame(index)
+        elapsed = time.perf_counter() - start
 
-        start = time.perf_counter()
-        frame = head.get_frame(index)
-        stage["analyze" if workflow != "posterize" else "apply"] = time.perf_counter() - start
+        # The filters report their own stages and imgseqs reports the decode,
+        # so what is left of the wall time is the resize and the frame plumbing.
+        reported = log.take_stages()
+        stages.add("resize", max(elapsed - sum(reported.values()), 0.0))
+        for name, seconds in reported.items():
+            stages.add(name, seconds)
 
         black = 0
         white = 0
         if workflow == "levels":
-            black = int(frame.props["NImagesBlackLevel"])
-            white = int(frame.props["NImagesWhiteLevel"])
+            black = int(frame.props["NImagesBlackLevel"])  # pyright: ignore[reportArgumentType]
+            white = int(frame.props["NImagesWhiteLevel"])  # pyright: ignore[reportArgumentType]
         elif workflow == "shades":
-            black = len(frame.props["NImagesGrayShades"])
-        frame = None
-
-        if tail is not None:
-            start = time.perf_counter()
-            tail.get_frame(index)
-            stage["apply"] = time.perf_counter() - start
-
-        return stage, black, white
-
-    for index in range(min(warmup, len(images))):
-        process(index)
-
-    stages = Stages()
-    for index in range(len(images)):
-        stage, black, white = process(index)
-        for name, elapsed in stage.items():
-            stages.add(name, elapsed)
+            black = len(frame.props["NImagesGrayShades"])  # pyright: ignore[reportArgumentType]
         stages.levels.append((images[index].name, black, white))
 
     return stages.as_json(
@@ -298,7 +434,7 @@ def run_in_worker(
     workflow: str,
     suite: str,
     limit: int | None,
-    cache_mb: int | None,
+    cache_mb: int,
     warmup: int,
     nmanga_path: Path,
 ) -> dict:
@@ -377,8 +513,14 @@ def report(rows: list[dict]) -> str:
     for row in rows:
         grouped.setdefault((row["suite"], row["workflow"]), {})[row["pipeline"]] = row
 
-    lines.append("| pages | workflow | pipeline | decode | analyze | apply | total | per page | peak rss |")
-    lines.append("| ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |")
+    lines.append(
+        "| pages | workflow | pipeline | "
+        + " | ".join(STAGE_COLUMNS)
+        + " | total | per page | peak rss |"
+    )
+    lines.append(
+        "| ---: | --- | --- | " + " | ".join("---:" for _ in STAGE_COLUMNS) + " | ---: | ---: | ---: |"
+    )
     for (suite, workflow), pipelines in grouped.items():
         order = ["nmanga", "vapoursynth"]
         for pipeline in order:
@@ -386,20 +528,11 @@ def report(rows: list[dict]) -> str:
             if row is None:
                 continue
             stage = row["seconds"]
+            cells = " | ".join(f"{seconds(stage.get(name, 0.0))} s" for name in STAGE_COLUMNS)
             lines.append(
-                "| {pages} | {workflow} ({suite}) | {pipeline} | {decode} s | {analyze} s | "
-                "{apply} s | **{total} s** | {per_page} ms | {rss} MiB |".format(
-                    pages=row["pages"],
-                    workflow=workflow,
-                    suite=suite,
-                    pipeline=pipeline,
-                    decode=seconds(stage.get("decode", 0.0)),
-                    analyze=seconds(stage.get("analyze", 0.0)),
-                    apply=seconds(stage.get("apply", 0.0)),
-                    total=seconds(row["total"]),
-                    per_page=f"{row['total'] / max(row['pages'], 1) * 1000:.1f}",
-                    rss=mib(row["peak_rss"]),
-                )
+                f"| {row['pages']} | {workflow} ({suite}) | {pipeline} | {cells} | "
+                f"**{seconds(row['total'])} s** | "
+                f"{row['total'] / max(row['pages'], 1) * 1000:.1f} ms | {mib(row['peak_rss'])} MiB |"
             )
 
     lines.append("")
@@ -440,7 +573,12 @@ def main() -> int:
     parser.add_argument("--suite", choices=sorted(SUITES), action="append")
     parser.add_argument("--workflow", action="append")
     parser.add_argument("--limit", type=int)
-    parser.add_argument("--cache", type=int, help="VapourSynth frame cache in MiB")
+    parser.add_argument(
+        "--cache",
+        type=int,
+        default=DEFAULT_CACHE_MB,
+        help=f"VapourSynth frame cache in MiB (default {DEFAULT_CACHE_MB})",
+    )
     parser.add_argument("--warmup", type=int, default=1, help="pages to process before timing")
     parser.add_argument("--nmanga-path", type=Path, default=DEFAULT_NMANGA_PATH)
     parser.add_argument("--json", help="worker only: where to write the measurement")

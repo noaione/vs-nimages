@@ -7,6 +7,8 @@
 //! caller that wants the grayscale behaviour converts first.
 
 use std::ffi::{CStr, c_void};
+use std::sync::atomic::AtomicBool;
+use std::time::Instant;
 
 use vapoursynth4_rs::frame::{FrameContext, VideoFrame};
 use vapoursynth4_rs::map::MapRef;
@@ -17,14 +19,18 @@ use crate::error::{NImagesError, Result};
 use crate::posterize::{MAX_BITS, MIN_BITS, posterize_lut};
 
 use super::{
-    Accept, add_filter, check_frame_format, checked_info, input_failed, map_frame, read_clip,
-    read_int,
+    Accept, FrameTrace, add_filter, check_frame_format, checked_info, describe_frame, input_failed,
+    map_frame, read_clip, read_int, report_settings_once,
 };
 
 /// Maps each frame to `2^bits` evenly spaced gray values, without dithering.
 pub struct Posterize {
     source: VideoNode,
     table: [u8; 256],
+    bits: u8,
+    debug: bool,
+    /// Set once the settings line has been written for this instance.
+    reported: AtomicBool,
 }
 
 impl Filter for Posterize {
@@ -33,7 +39,7 @@ impl Filter for Posterize {
     type FilterData = ();
 
     const NAME: &'static CStr = c"Posterize";
-    const ARGS: &'static CStr = c"clip:vnode;bits:int;";
+    const ARGS: &'static CStr = c"clip:vnode;bits:int;debug:int:opt;";
     const RETURN_TYPE: &'static CStr = c"clip:vnode;";
 
     fn create(
@@ -50,14 +56,15 @@ impl Filter for Posterize {
                 "Posterize: bits is required, and must be between {MIN_BITS} and {MAX_BITS}"
             ))
         })?;
-        let table = u8::try_from(bits)
-            .ok()
-            .and_then(posterize_lut)
-            .ok_or_else(|| {
-                NImagesError::new(format!(
+        let (bits, table) = match u8::try_from(bits).ok().and_then(posterize_lut) {
+            Some(table) => (bits as u8, table),
+            None => {
+                return Err(NImagesError::new(format!(
                     "Posterize: bits must be between {MIN_BITS} and {MAX_BITS}, got {bits}"
-                ))
-            })?;
+                )));
+            }
+        };
+        let debug = read_int(&input, key!(c"debug"))?.unwrap_or(0) != 0;
 
         let dependency = source.as_ptr();
         add_filter(
@@ -65,7 +72,13 @@ impl Filter for Posterize {
             output,
             Self::NAME,
             &info,
-            Self { source, table },
+            Self {
+                source,
+                table,
+                bits,
+                debug,
+                reported: AtomicBool::new(false),
+            },
             dependency,
         );
         Ok(())
@@ -77,7 +90,7 @@ impl Filter for Posterize {
         activation_reason: ffi::VSActivationReason,
         _frame_data: *mut *mut c_void,
         mut frame_ctx: FrameContext,
-        core: CoreRef,
+        mut core: CoreRef,
     ) -> Result<Option<Self::FrameType>> {
         match activation_reason {
             ffi::VSActivationReason::Initial => {
@@ -85,9 +98,29 @@ impl Filter for Posterize {
                 Ok(None)
             }
             ffi::VSActivationReason::AllFramesReady => {
+                let mut trace = FrameTrace::new(self.debug, "Posterize");
+
                 let input = self.source.get_frame_filter(n, &mut frame_ctx);
                 check_frame_format(&input, "Posterize", Accept::Integer8)?;
+
+                let settings = describe_frame(&input);
+                report_settings_once(
+                    self.debug,
+                    &self.reported,
+                    &mut core,
+                    format_args!(
+                        "Posterize: bits={} colors={} input={settings}",
+                        self.bits,
+                        1u32 << self.bits
+                    ),
+                );
+
+                let mark = Instant::now();
                 let output = map_frame(&core, &input, &self.table)?;
+                trace.mark("map", mark);
+
+                trace.emit(&mut core, n, format_args!("bits={} ", self.bits));
+
                 Ok(Some(output))
             }
             ffi::VSActivationReason::Error => Err(input_failed("Posterize")),

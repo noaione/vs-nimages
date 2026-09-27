@@ -93,19 +93,21 @@ carries a `parity` of `nmanga`, `diverges` or `reference-only` plus the
 
 ## sandbox
 
-`sandbox/level-check` and `sandbox/posterize-check` hold real manga pages for
-manual and benchmark runs. they are a private working tree: read them, run them
-through the plugin, and name the directories where a command needs a path, but do
-not commit them, copy them anywhere else, or quote their contents. `.gitignore`
-already excludes `sandbox/`.
+`sandbox/level-check`, `sandbox/level-webp-check` and `sandbox/posterize-check`
+hold real manga pages for manual and benchmark runs. they are a private working
+tree: read them, run them through the plugin, and name the directories where a
+command needs a path, but do not commit them, copy them anywhere else, or quote
+their contents. `.gitignore` already excludes `sandbox/`.
 
 `posterize-check` is the useful one for dimension handling, because its pages are
 four different sizes including a 5806x4128 spread and two widths that differ by a
-single pixel.
+single pixel. `level-webp-check` is the useful one for conversion, because a
+lossy webp arrives as limited range YUV420P8 at an odd width, which `resize`
+refuses; `docs/BENCH.md` has the detail.
 
 ## hard constraints from the crate
 
-`vapoursynth4-rs` 0.5.1 has four traps. `docs/FINDINGS.md` §2 has the detail.
+`vapoursynth4-rs` 0.5.1 has six traps. `docs/FINDINGS.md` §2 has the detail.
 
 - register the output with `core.create_video_filter(...)`. do not use
   `VideoNode::new`, whose null check is inverted and hands back a node with a
@@ -187,6 +189,13 @@ argument and property tables.
   `docs/FINDINGS.md` §7.
 - `auto_gamma` refuses a black point of 128 or more, because the expression is
   undefined there.
+- every filter takes `debug:int:opt`. it writes a settings line on the first
+  frame it is asked for and a stage timing line per frame, both through
+  `core.log`, so a host collects them with `add_log_handler`. `tools/bench.py`
+  parses those lines, so changing their shape means changing `DebugLog` too.
+- do not build a log line from `Core::get_video_format_name`. see
+  `docs/FINDINGS.md` §2.5: the name carries NUL padding and silently kills the
+  line.
 
 ## golden vectors
 
@@ -219,10 +228,12 @@ uv run --extra golden --extra dev-tests tools\bench.py --write docs\BENCH.md
 ```
 
 `--write` replaces the block between the `<!-- bench:start -->` and
-`<!-- bench:end -->` markers in `docs/BENCH.md`. run it before changing anything
-that affects per-page cost, and keep the prose around the block honest about what
-is and is not comparable: decoding differs by library, and the plugin side does
-not write files because no VapourSynth writer is installed.
+`<!-- bench:end -->` markers in `docs/BENCH.md`. every run uses a 512 MiB frame
+cache, which is what a caller would set for a manga volume and far below the
+core's default; `--cache MB` moves it. run it before changing anything that
+affects per-page cost, and keep the prose around the block honest about what is
+and is not comparable: decoding differs by library, and the plugin side does not
+write files because no VapourSynth writer is installed.
 
 ## writing style
 

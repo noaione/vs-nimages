@@ -459,7 +459,7 @@ def check_errors() -> None:
         lambda: core.nimages.Levels(core.std.BlankClip(width=8, height=8, format=vs.RGBS)),
         contains="8 bit integer",
     )
-    expect_error("PeakStats without a clip", lambda: core.nimages.PeakStats())
+    expect_error("PeakStats without a clip", lambda: core.nimages.PeakStats())  # type: ignore
     expect_error("PeakStats upper_limit 0", lambda: core.nimages.PeakStats(gray, upper_limit=0))
     expect_error("PeakStats upper_limit 256", lambda: core.nimages.PeakStats(gray, upper_limit=256))
     expect_error(
@@ -473,7 +473,7 @@ def check_errors() -> None:
         contains="between 0 and 100",
     )
     expect_error("PeakGrayShades threshold -1", lambda: core.nimages.PeakGrayShades(gray, threshold=-1.0))
-    expect_error("Posterize without bits", lambda: core.nimages.Posterize(gray), contains="bits is required")
+    expect_error("Posterize without bits", lambda: core.nimages.Posterize(gray), contains="bits is required")  # type: ignore
     expect_error("Posterize bits 0", lambda: core.nimages.Posterize(gray, bits=0), contains="between 1 and 8")
     expect_error("Posterize bits 9", lambda: core.nimages.Posterize(gray, bits=9), contains="between 1 and 8")
     expect_error(
@@ -642,6 +642,84 @@ def check_dynamic_dimensions(posterize: dict) -> None:
     shutil.rmtree(scratch, ignore_errors=True)
 
 
+def check_debug_logging() -> None:
+    section("debug logging")
+    captured: list[str] = []
+    handle = core.add_log_handler(lambda message_type, message: captured.append(message.strip()))
+
+    def ours() -> list[str]:
+        return [line for line in captured if line.startswith("[nimages][debug]")]
+
+    try:
+        page = np.full((9, 9), 100, dtype=np.uint8)
+        clip = clip_of(page, length=2)
+
+        # nothing is written unless asked for
+        captured.clear()
+        core.nimages.Posterize(clip, bits=4).get_frame(0)
+        same(ours(), [], "silent without debug")
+
+        # each filter reports its settings once, on the first frame it is asked
+        # for, because VapourSynth drops a message logged from `create`
+        stats = core.nimages.PeakStats(clip, debug=1)
+        shades = core.nimages.PeakGrayShades(clip, debug=1)
+        levels = core.nimages.Levels(stats, use_props=True, auto_gamma=True, debug=1)
+        posterize = core.nimages.Posterize(levels, bits=4, debug=1)
+        fixed = core.nimages.Levels(clip, black=10, white=200, gamma=1.0, debug=1)
+
+        settings = (
+            ("PeakStats", stats, "upper_limit=60"),
+            ("PeakGrayShades", shades, "threshold=0.01"),
+            ("Levels", levels, "use_props=true"),
+            ("Posterize", posterize, "bits=4 colors=16"),
+            ("Levels-constant", fixed, "resolved black=10 white=200"),
+        )
+        for label, node, argument in settings:
+            captured.clear()
+            with node.get_frame(1):
+                pass
+            function = label.split("-")[0]
+            check(
+                any(f"[nimages][debug] {function}: " in line and argument in line for line in ours()),
+                f"{label}: a settings line naming {argument}",
+            )
+            check(
+                any(
+                    f"[nimages][debug] {function}: " in line and "Gray 8 bit 9x9" in line
+                    for line in ours()
+                ),
+                f"{label}: a settings line naming the input",
+            )
+            check(
+                any(f"{function} frame 1:" in line and "total=" in line for line in ours()),
+                f"{label}: a per-frame timing line for frame 1",
+            )
+
+        # the settings line is written once, not once per frame
+        captured.clear()
+        with stats.get_frame(0):
+            pass
+        same(
+            [line for line in ours() if line.startswith("[nimages][debug] PeakStats: ")],
+            [],
+            "PeakStats: settings are not repeated on a later frame",
+        )
+        # the lines carry the frame number the caller asked for
+        captured.clear()
+        with posterize.get_frame(0):
+            pass
+        check(
+            any("Posterize frame 0:" in line for line in ours()),
+            "Posterize: names frame 0",
+        )
+        check(
+            not any("Posterize frame 1:" in line for line in ours()),
+            "Posterize: does not name a frame that was not asked for",
+        )
+    finally:
+        core.remove_log_handler(handle)
+
+
 def check_determinism() -> None:
     section("determinism")
     rng = np.random.default_rng(13)
@@ -679,6 +757,7 @@ def main() -> int:
     check_errors()
     check_color_families(posterize)
     check_dynamic_dimensions(posterize)
+    check_debug_logging()
     check_determinism()
 
     print()

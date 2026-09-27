@@ -128,6 +128,7 @@ with stats.get_frame(n) as frame:
 | `peak_percentage` | `0.25` | minimum share of the frame a peak covers, in percent |
 | `peak_prominence` | none | minimum prominence of a peak, in percent; unset disables it |
 | `skip_white` | `false` | skip the white analysis and report 255 |
+| `debug` | `false` | log the resolved arguments and each frame's stage timings |
 
 | property | type | meaning |
 | --- | --- | --- |
@@ -160,6 +161,7 @@ with shades.get_frame(n) as frame:
 | argument | default | meaning |
 | --- | --- | --- |
 | `threshold` | `0.01` | minimum share of the frame a shade needs, in percent |
+| `debug` | `false` | log the resolved arguments and each frame's stage timings |
 
 | property | type | meaning |
 | --- | --- | --- |
@@ -193,6 +195,7 @@ leveled = core.nimages.Levels(stats, use_props=True, peak_offset=0, auto_gamma=T
 | `use_props` | `false` | read `NImagesBlackLevel` and `NImagesWhiteLevel` from each input frame instead |
 | `peak_offset` | `0` | added to the black point, in source sample units |
 | `auto_gamma` | `false` | derive gamma from the effective black point, ignoring `gamma` |
+| `debug` | `false` | log the resolved curve and each frame's stage timings |
 
 for an input `x`, black `b`, white `w` and output maximum `255`:
 
@@ -226,6 +229,7 @@ first, as in [use](#use) above.
 | argument | default | meaning |
 | --- | --- | --- |
 | `bits` | required | number of bits, from 1 to 8 |
+| `debug` | `false` | log the resolved depth and each frame's stage timings |
 
 `bits=8` is the identity. the mapping is
 
@@ -238,6 +242,31 @@ out    = round(level * 255 / (colors - 1))
 the pillow path follows this with `quantize(colors, dither=NONE)`, which is
 provably redundant here: the mapping already produces exactly `colors` distinct
 values, and pillow's quantized output is byte-identical to its input.
+
+### debug
+
+every filter takes `debug`. when it is set, the first frame the filter is asked
+for logs the arguments it resolved and the input it accepted, and each frame logs
+its stage timings and total, both through the VapourSynth log:
+
+```text
+[nimages][debug] PeakStats: upper_limit=60 peak_percentage=Some(0.25) peak_prominence=None skip_white=true input=Gray 8 bit 1404x2000
+[nimages][debug] PeakStats frame 3: black=12 white=245 histogram=2.104 ms peaks=0.081 ms copy=2.130 ms total=4.315 ms
+[nimages][debug] Levels frame 3: black=12 white=245 gamma=1.07 curve=0.014 ms map=6.902 ms total=6.916 ms
+```
+
+collect them with a log handler:
+
+```python
+import vapoursynth as vs
+
+vs.core.add_log_handler(lambda kind, message: print(message))
+```
+
+the settings line comes from the first frame rather than from creation, because
+VapourSynth drops a message logged from a filter's create function.
+`docs/FINDINGS.md` §2.5 and §2.6 record that, and `tools/bench.py` reads these
+same lines to split a workflow into stages.
 
 ## differences from the pillow pipeline
 

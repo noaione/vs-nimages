@@ -129,6 +129,40 @@ cannot outlive the statement (it is only accepted because `&Dependencies` is
 `Copy`-ish through the raw pointer cast). Use `Dependencies::new(&array)`
 instead, as the spike does.
 
+### 2.5 `Core::get_video_format_name` returns NUL padding
+
+`vapoursynth4-rs-0.5.1/src/frame/format.rs` builds the name with
+
+```rust
+CStr::from_bytes_with_nul_unchecked(&self.buffer).to_bytes()
+```
+
+over the API's fixed `[u8; 32]` buffer. `CStr::to_bytes` returns
+`inner.len() - 1` bytes, so a name VapourSynth wrote as `Gray8\0` comes back as
+`Gray8` followed by the 25 remaining padding zeros, and `str::from_utf8_unchecked`
+turns that into a `&str` with interior NULs. `CString::new` then refuses it.
+
+The failure is silent and confusing: `format!` renders the string fine, so a
+message built from it looks correct in a debugger, but the `CString::new` guard
+in `log_debug` returns early and **the whole log line disappears**. It cost an
+afternoon of probing to find, because every other line in the same function was
+delivered normally.
+
+**Workaround:** build the description from the format's own fields. This is what
+`describe_frame` in `src/filters/mod.rs` does.
+
+### 2.6 VapourSynth drops a message logged from a filter's `create`
+
+`core.log` works from `get_frame` and reaches a host's `add_log_handler`
+callback. The same call from `Filter::create` is never delivered, so a settings
+line written there is invisible to the only consumer that would read it.
+
+**Workaround:** write it from the first frame the filter is asked for, guarded by
+an `AtomicBool` whose `swap` returns the previous value, so exactly one frame of
+a filter that the core calls concurrently reports it. `report_settings_once` in
+`src/filters/mod.rs` does this. The input format is named from the frame rather
+than the node, which is also more accurate for a clip whose dimensions vary.
+
 ---
 
 ## 3. Algorithm semantics pinned against SciPy 1.18.1

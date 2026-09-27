@@ -5,6 +5,8 @@
 //! and leaves the choice of family and matrix to the caller.
 
 use std::ffi::{CStr, c_void};
+use std::sync::atomic::AtomicBool;
+use std::time::Instant;
 
 use vapoursynth4_rs::frame::{Frame, FrameContext, VideoFrame};
 use vapoursynth4_rs::map::{KeyStr, MapRef};
@@ -15,8 +17,8 @@ use crate::error::{NImagesError, Result};
 use crate::levels::{automatic_gamma, levels_lut};
 
 use super::{
-    Accept, add_filter, check_frame_format, checked_info, input_failed, map_frame, read_clip,
-    read_float, read_int,
+    Accept, FrameTrace, add_filter, check_frame_format, checked_info, describe_frame, input_failed,
+    map_frame, read_clip, read_float, read_int, report_settings_once,
 };
 
 /// Default black point.
@@ -25,6 +27,16 @@ const DEFAULT_BLACK: i64 = 0;
 const DEFAULT_WHITE: i64 = 255;
 /// Default gamma.
 const DEFAULT_GAMMA: f64 = 1.0;
+
+/// One frame's curve, with the parameters it was resolved from so `debug` can
+/// report what a page was actually leveled with.
+#[derive(Clone, Copy)]
+struct Resolved {
+    table: [u8; 256],
+    black: i64,
+    white: i64,
+    gamma: f64,
+}
 
 /// A level operation, either fixed at creation or read from each input frame's
 /// properties.
@@ -36,7 +48,7 @@ const DEFAULT_GAMMA: f64 = 1.0;
 #[allow(clippy::large_enum_variant)]
 enum Curve {
     /// One table, built once and shared by every frame.
-    Constant([u8; 256]),
+    Constant(Resolved),
     /// Built per frame from `NImagesBlackLevel` and `NImagesWhiteLevel`.
     FromProperties {
         gamma: f64,
@@ -49,6 +61,9 @@ enum Curve {
 pub struct Levels {
     source: VideoNode,
     curve: Curve,
+    debug: bool,
+    /// Set once the settings line has been written for this instance.
+    reported: AtomicBool,
 }
 
 impl Filter for Levels {
@@ -57,7 +72,7 @@ impl Filter for Levels {
     type FilterData = ();
 
     const NAME: &'static CStr = c"Levels";
-    const ARGS: &'static CStr = c"clip:vnode;black:int:opt;white:int:opt;gamma:float:opt;use_props:int:opt;peak_offset:int:opt;auto_gamma:int:opt;";
+    const ARGS: &'static CStr = c"clip:vnode;black:int:opt;white:int:opt;gamma:float:opt;use_props:int:opt;peak_offset:int:opt;auto_gamma:int:opt;debug:int:opt;";
     const RETURN_TYPE: &'static CStr = c"clip:vnode;";
 
     fn create(
@@ -83,14 +98,9 @@ impl Filter for Levels {
             let black = read_int(&input, key!(c"black"))?.unwrap_or(DEFAULT_BLACK);
             let white = read_int(&input, key!(c"white"))?.unwrap_or(DEFAULT_WHITE);
             let gamma = read_float(&input, key!(c"gamma"))?.unwrap_or(DEFAULT_GAMMA);
-            Curve::Constant(build_constant(
-                black,
-                white,
-                gamma,
-                peak_offset,
-                auto_gamma,
-            )?)
+            Curve::Constant(resolve(black, white, gamma, peak_offset, auto_gamma)?)
         };
+        let debug = read_int(&input, key!(c"debug"))?.unwrap_or(0) != 0;
 
         let dependency = source.as_ptr();
         add_filter(
@@ -98,7 +108,12 @@ impl Filter for Levels {
             output,
             Self::NAME,
             &info,
-            Self { source, curve },
+            Self {
+                source,
+                curve,
+                debug,
+                reported: AtomicBool::new(false),
+            },
             dependency,
         );
         Ok(())
@@ -110,7 +125,7 @@ impl Filter for Levels {
         activation_reason: ffi::VSActivationReason,
         _frame_data: *mut *mut c_void,
         mut frame_ctx: FrameContext,
-        core: CoreRef,
+        mut core: CoreRef,
     ) -> Result<Option<Self::FrameType>> {
         match activation_reason {
             ffi::VSActivationReason::Initial => {
@@ -118,17 +133,59 @@ impl Filter for Levels {
                 Ok(None)
             }
             ffi::VSActivationReason::AllFramesReady => {
+                let mut trace = FrameTrace::new(self.debug, "Levels");
+
                 let input = self.source.get_frame_filter(n, &mut frame_ctx);
                 check_frame_format(&input, "Levels", Accept::Integer8)?;
-                let table = match &self.curve {
-                    Curve::Constant(table) => *table,
+
+                if self.debug {
+                    let settings = describe_frame(&input);
+                    let source = match &self.curve {
+                        Curve::Constant(resolved) => format!(
+                            "use_props=false resolved black={} white={} gamma={}",
+                            resolved.black, resolved.white, resolved.gamma
+                        ),
+                        Curve::FromProperties {
+                            gamma,
+                            peak_offset,
+                            auto_gamma,
+                        } => format!(
+                            "use_props=true peak_offset={peak_offset} \
+                             auto_gamma={auto_gamma} gamma={gamma}"
+                        ),
+                    };
+                    report_settings_once(
+                        self.debug,
+                        &self.reported,
+                        &mut core,
+                        format_args!("Levels: {source} input={settings}"),
+                    );
+                }
+
+                let mark = Instant::now();
+                let resolved = match &self.curve {
+                    Curve::Constant(resolved) => *resolved,
                     Curve::FromProperties {
                         gamma,
                         peak_offset,
                         auto_gamma,
-                    } => table_from_properties(&input, *gamma, *peak_offset, *auto_gamma)?,
+                    } => resolve_from_properties(&input, *gamma, *peak_offset, *auto_gamma)?,
                 };
-                let output = map_frame(&core, &input, &table)?;
+                trace.mark("curve", mark);
+
+                let mark = Instant::now();
+                let output = map_frame(&core, &input, &resolved.table)?;
+                trace.mark("map", mark);
+
+                trace.emit(
+                    &mut core,
+                    n,
+                    format_args!(
+                        "black={} white={} gamma={:.2} ",
+                        resolved.black, resolved.white, resolved.gamma
+                    ),
+                );
+
                 Ok(Some(output))
             }
             ffi::VSActivationReason::Error => Err(input_failed("Levels")),
@@ -136,15 +193,14 @@ impl Filter for Levels {
     }
 }
 
-/// Resolves the constant parameter set, folding in `peak_offset` and
-/// `auto_gamma` exactly once.
-fn build_constant(
+/// Resolves one parameter set, folding in `peak_offset` and `auto_gamma`.
+fn resolve(
     black: i64,
     white: i64,
     gamma: f64,
     peak_offset: i64,
     auto_gamma: bool,
-) -> Result<[u8; 256]> {
+) -> Result<Resolved> {
     let black = black + peak_offset;
     check_endpoints(black, white)?;
     let gamma = if auto_gamma {
@@ -152,24 +208,30 @@ fn build_constant(
     } else {
         gamma
     };
-    levels_lut(black as f64, white as f64, gamma)
-        .map_err(|error| NImagesError::new(format!("Levels: {}", error.message())))
+    let table = levels_lut(black as f64, white as f64, gamma)
+        .map_err(|error| NImagesError::new(format!("Levels: {}", error.message())))?;
+    Ok(Resolved {
+        table,
+        black,
+        white,
+        gamma,
+    })
 }
 
-/// Builds the table for one frame from the properties `PeakStats` wrote.
-fn table_from_properties(
+/// Resolves the curve for one frame from the properties `PeakStats` wrote.
+fn resolve_from_properties(
     frame: &VideoFrame,
     gamma: f64,
     peak_offset: i64,
     auto_gamma: bool,
-) -> Result<[u8; 256]> {
+) -> Result<Resolved> {
     let properties = frame
         .properties()
         .ok_or_else(|| NImagesError::new("Levels: the input frame holds no properties"))?;
 
     let black = read_peak(&properties, c"NImagesBlackLevel")?;
     let white = read_peak(&properties, c"NImagesWhiteLevel")?;
-    build_constant(black, white, gamma, peak_offset, auto_gamma)
+    resolve(black, white, gamma, peak_offset, auto_gamma)
 }
 
 /// Reads one level property written by `PeakStats`.

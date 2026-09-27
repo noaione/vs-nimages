@@ -1,6 +1,8 @@
 //! `PeakStats`: the black and white levels of a frame, as frame properties.
 
 use std::ffi::{CStr, c_void};
+use std::sync::atomic::AtomicBool;
+use std::time::Instant;
 
 use vapoursynth4_rs::frame::{Frame, FrameContext, VideoFrame};
 use vapoursynth4_rs::map::{AppendMode, KeyStr, MapRef, Value};
@@ -11,8 +13,8 @@ use crate::error::{NImagesError, Result};
 use crate::peaks::{PeakOptions, find_local_peak};
 
 use super::{
-    Accept, add_filter, check_frame_format, checked_info, input_failed, plane_histogram, read_clip,
-    read_float, read_int, validate_percentage,
+    Accept, FrameTrace, add_filter, check_frame_format, checked_info, describe_frame, input_failed,
+    plane_histogram, read_clip, read_float, read_int, report_settings_once, validate_percentage,
 };
 
 /// Lower bound of `upper_limit`, matching the `nmanga` cli and orchestrator.
@@ -30,6 +32,9 @@ const DEFAULT_PEAK_PERCENTAGE: f64 = 0.25;
 pub struct PeakStats {
     source: VideoNode,
     options: PeakOptions,
+    debug: bool,
+    /// Set once the settings line has been written for this instance.
+    reported: AtomicBool,
 }
 
 impl Filter for PeakStats {
@@ -38,7 +43,7 @@ impl Filter for PeakStats {
     type FilterData = ();
 
     const NAME: &'static CStr = c"PeakStats";
-    const ARGS: &'static CStr = c"clip:vnode;upper_limit:int:opt;peak_percentage:float:opt;peak_prominence:float:opt;skip_white:int:opt;";
+    const ARGS: &'static CStr = c"clip:vnode;upper_limit:int:opt;peak_percentage:float:opt;peak_prominence:float:opt;skip_white:int:opt;debug:int:opt;";
     const RETURN_TYPE: &'static CStr = c"clip:vnode;";
 
     fn create(
@@ -77,6 +82,7 @@ impl Filter for PeakStats {
             peak_prominence,
             skip_white: read_int(&input, key!(c"skip_white"))?.unwrap_or(0) != 0,
         };
+        let debug = read_int(&input, key!(c"debug"))?.unwrap_or(0) != 0;
 
         let dependency = source.as_ptr();
         add_filter(
@@ -84,7 +90,12 @@ impl Filter for PeakStats {
             output,
             Self::NAME,
             &info,
-            Self { source, options },
+            Self {
+                source,
+                options,
+                debug,
+                reported: AtomicBool::new(false),
+            },
             dependency,
         );
         Ok(())
@@ -96,7 +107,7 @@ impl Filter for PeakStats {
         activation_reason: ffi::VSActivationReason,
         _frame_data: *mut *mut c_void,
         mut frame_ctx: FrameContext,
-        core: CoreRef,
+        mut core: CoreRef,
     ) -> Result<Option<Self::FrameType>> {
         match activation_reason {
             ffi::VSActivationReason::Initial => {
@@ -104,11 +115,31 @@ impl Filter for PeakStats {
                 Ok(None)
             }
             ffi::VSActivationReason::AllFramesReady => {
+                let mut trace = FrameTrace::new(self.debug, "PeakStats");
+
                 let input = self.source.get_frame_filter(n, &mut frame_ctx);
                 check_frame_format(&input, "PeakStats", Accept::Gray8)?;
-                let histogram = plane_histogram(&input)?;
-                let peaks = find_local_peak(&histogram, &self.options);
+                let settings = describe_frame(&input);
+                let options = &self.options;
+                let line = format!(
+                    "PeakStats: upper_limit={} peak_percentage={:?} peak_prominence={:?} \
+                     skip_white={} input={settings}",
+                    options.upper_limit,
+                    options.peak_percentage,
+                    options.peak_prominence,
+                    options.skip_white,
+                );
+                report_settings_once(self.debug, &self.reported, &mut core, line);
 
+                let mark = Instant::now();
+                let histogram = plane_histogram(&input)?;
+                trace.mark("histogram", mark);
+
+                let mark = Instant::now();
+                let peaks = find_local_peak(&histogram, &self.options);
+                trace.mark("peaks", mark);
+
+                let mark = Instant::now();
                 let mut output = core.copy_frame(&input);
                 {
                     let mut properties = output.properties_mut().ok_or_else(|| {
@@ -127,6 +158,13 @@ impl Filter for PeakStats {
                         u8::from(peaks.white_found),
                     )?;
                 }
+                trace.mark("copy", mark);
+
+                trace.emit(
+                    &mut core,
+                    n,
+                    format_args!("black={} white={} ", peaks.black, peaks.white),
+                );
 
                 Ok(Some(output))
             }
