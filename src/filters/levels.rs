@@ -1,4 +1,8 @@
-//! `Levels`: the ImageMagick `-level` curve as a `GRAY8` lookup table.
+//! `Levels`: the ImageMagick `-level` curve as a 256-entry lookup table.
+//!
+//! The curve applies per sample, so any 8 bit integer format is accepted and
+//! every plane is rewritten. That covers Gray, RGB and YUV, subsampled or not,
+//! and leaves the choice of family and matrix to the caller.
 
 use std::ffi::{CStr, c_void};
 
@@ -10,7 +14,10 @@ use vapoursynth4_rs::{core::CoreRef, ffi, key};
 use crate::error::{NImagesError, Result};
 use crate::levels::{automatic_gamma, levels_lut};
 
-use super::{add_filter, input_failed, map_frame, read_clip, read_float, read_int, require_gray8};
+use super::{
+    Accept, add_filter, check_frame_format, checked_info, input_failed, map_frame, read_clip,
+    read_float, read_int,
+};
 
 /// Default black point.
 const DEFAULT_BLACK: i64 = 0;
@@ -60,7 +67,7 @@ impl Filter for Levels {
         mut core: CoreRef,
     ) -> Result<()> {
         let source = read_clip(&input, "Levels")?;
-        let info = require_gray8(&source, "Levels")?;
+        let info = checked_info(&source, "Levels", Accept::Integer8)?;
 
         let peak_offset = read_int(&input, key!(c"peak_offset"))?.unwrap_or(0);
         let auto_gamma = read_int(&input, key!(c"auto_gamma"))?.unwrap_or(0) != 0;
@@ -112,6 +119,7 @@ impl Filter for Levels {
             }
             ffi::VSActivationReason::AllFramesReady => {
                 let input = self.source.get_frame_filter(n, &mut frame_ctx);
+                check_frame_format(&input, "Levels", Accept::Integer8)?;
                 let table = match &self.curve {
                     Curve::Constant(table) => *table,
                     Curve::FromProperties {

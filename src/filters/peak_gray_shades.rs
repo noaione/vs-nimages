@@ -10,7 +10,10 @@ use vapoursynth4_rs::{core::CoreRef, ffi, key};
 use crate::error::{NImagesError, Result};
 use crate::gray_shades::analyze_gray_shades;
 
-use super::{add_filter, input_failed, plane_histogram, read_clip, read_float, require_gray8};
+use super::{
+    Accept, add_filter, check_frame_format, checked_info, input_failed, plane_histogram, read_clip,
+    read_float,
+};
 
 /// Default `threshold`, matching `nmanga`.
 const DEFAULT_THRESHOLD: f64 = 0.01;
@@ -41,7 +44,7 @@ impl Filter for PeakGrayShades {
         mut core: CoreRef,
     ) -> Result<()> {
         let source = read_clip(&input, "PeakGrayShades")?;
-        let info = require_gray8(&source, "PeakGrayShades")?;
+        let info = checked_info(&source, "PeakGrayShades", Accept::Gray8)?;
 
         let threshold = read_float(&input, key!(c"threshold"))?.unwrap_or(DEFAULT_THRESHOLD);
         if !threshold.is_finite() || threshold < 0.0 {
@@ -77,6 +80,7 @@ impl Filter for PeakGrayShades {
             }
             ffi::VSActivationReason::AllFramesReady => {
                 let input = self.source.get_frame_filter(n, &mut frame_ctx);
+                check_frame_format(&input, "PeakGrayShades", Accept::Gray8)?;
                 let histogram = plane_histogram(&input)?;
                 let shades = analyze_gray_shades(&histogram, self.threshold);
 

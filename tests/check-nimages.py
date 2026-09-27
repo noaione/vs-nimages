@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import math
+import shutil
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
@@ -443,7 +444,21 @@ def check_errors() -> None:
     gray16 = core.std.BlankClip(width=8, height=8, format=vs.GRAY16, length=1)
 
     expect_error("PeakStats on RGB", lambda: core.nimages.PeakStats(rgb), contains="Gray 8 bit")
-    expect_error("Posterize on GRAY16", lambda: core.nimages.Posterize(gray16, bits=4), contains="Gray 8 bit")
+    expect_error(
+        "PeakGrayShades on YUV",
+        lambda: core.nimages.PeakGrayShades(core.std.BlankClip(width=8, height=8, format=vs.YUV420P8)),
+        contains="Gray 8 bit",
+    )
+    expect_error(
+        "Posterize on GRAY16",
+        lambda: core.nimages.Posterize(gray16, bits=4),
+        contains="8 bit integer",
+    )
+    expect_error(
+        "Levels on float RGB",
+        lambda: core.nimages.Levels(core.std.BlankClip(width=8, height=8, format=vs.RGBS)),
+        contains="8 bit integer",
+    )
     expect_error("PeakStats without a clip", lambda: core.nimages.PeakStats())
     expect_error("PeakStats upper_limit 0", lambda: core.nimages.PeakStats(gray, upper_limit=0))
     expect_error("PeakStats upper_limit 256", lambda: core.nimages.PeakStats(gray, upper_limit=256))
@@ -492,6 +507,141 @@ def check_errors() -> None:
     expect_error("Levels use_props without the properties", lambda: plain.get_frame(0), contains="NImagesBlackLevel")
 
 
+def posterize_table(fixtures: dict, bits: int) -> np.ndarray:
+    for case in fixtures["cases"]:
+        if case["bits"] == bits:
+            return np.asarray(case["expect"], dtype=np.uint8)
+    raise AssertionError(f"no posterize fixture for bits={bits}")
+
+
+def check_color_families(posterize: dict) -> None:
+    section("color families the mapping filters take")
+    table = posterize_table(posterize, 3)
+    families = {
+        "GRAY8": vs.GRAY8,
+        "RGB24": vs.RGB24,
+        "YUV420P8": vs.YUV420P8,
+        "YUV422P8": vs.YUV422P8,
+        "YUV444P8": vs.YUV444P8,
+    }
+    rng = np.random.default_rng(17)
+
+    for name, fmt in families.items():
+        blank = core.std.BlankClip(width=16, height=8, format=fmt, length=1)
+        shapes = [
+            np.asarray(blank.get_frame(0)[plane]).shape
+            for plane in range(blank.format.num_planes)
+        ]
+        # Fixed planes, so asking for frame 0 twice yields the same samples.
+        planes = [rng.integers(0, 256, shape, dtype=np.uint8) for shape in shapes]
+        source = clip_of_planes(planes, fmt, width=16, height=8)
+
+        identity = core.nimages.Levels(source, black=0, white=255, gamma=1.0)
+        for plane, values in enumerate(planes):
+            same(
+                np.asarray(identity.get_frame(0)[plane]).tolist(),
+                values.tolist(),
+                f"{name}: identity levels on plane {plane}",
+            )
+
+        posterized = core.nimages.Posterize(source, bits=3)
+        for plane, values in enumerate(planes):
+            same(
+                np.asarray(posterized.get_frame(0)[plane]).tolist(),
+                table[values].tolist(),
+                f"{name}: posterize on plane {plane}",
+            )
+
+    # An RGB clip is three channels, so each must come back holding only what its
+    # own values map to. Bleeding between channels shows up as a mismatch here.
+    shaped = clip_of_rgb((9, 3), base=10, step=60)
+    before = [np.asarray(shaped.get_frame(0)[plane]).copy() for plane in range(3)]
+    same(int(before[0][0, 0]), 10, "red starts at 10")
+    same(int(before[1][0, 0]), 70, "green starts at 70")
+    same(int(before[2][0, 0]), 130, "blue starts at 130")
+
+    posterized = core.nimages.Posterize(shaped, bits=3).get_frame(0)
+    for plane in range(3):
+        same(
+            np.asarray(posterized[plane]).tolist(),
+            table[before[plane]].tolist(),
+            f"plane {plane} keeps its own channel",
+        )
+
+
+def clip_of_planes(planes: list[np.ndarray], format_, *, width: int, height: int):
+    """Builds a one frame clip holding exactly `planes`."""
+    blank = core.std.BlankClip(width=width, height=height, format=format_, length=1)
+
+    def fill(n: int, f):
+        del n
+        out = f.copy()
+        for plane, values in enumerate(planes):
+            np.asarray(out[plane])[:] = values
+        return out
+
+    return core.std.ModifyFrame(blank, blank, fill)
+
+
+def clip_of_rgb(shape: tuple[int, int], *, base: int, step: int):
+    width, height = shape
+    blank = core.std.BlankClip(width=width, height=height, format=vs.RGB24, length=1)
+
+    def fill(n: int, f):
+        del n
+        out = f.copy()
+        for plane in range(3):
+            row = np.arange(width, dtype=np.uint8) + base + plane * step
+            np.asarray(out[plane])[:] = np.tile(row, (height, 1))
+        return out
+
+    return core.std.ModifyFrame(blank, blank, fill)
+
+
+def check_dynamic_dimensions(posterize: dict) -> None:
+    section("dynamic dimensions")
+    table = posterize_table(posterize, 3)
+    scratch = REPO_ROOT / "target" / "check-nimages"
+    shutil.rmtree(scratch, ignore_errors=True)
+    scratch.mkdir(parents=True, exist_ok=True)
+
+    rng = np.random.default_rng(23)
+    sizes = [(7, 5), (13, 3), (9, 9), (1, 1), (64, 2)]
+    pages = []
+    files = []
+    for index, (width, height) in enumerate(sizes):
+        page = rng.integers(0, 256, (height, width), dtype=np.uint8)
+        path = scratch / f"page{index}.pgm"
+        path.write_bytes(b"P5\n%d %d\n255\n" % (width, height) + page.tobytes())
+        files.append(str(path))
+        pages.append(page)
+
+    clip = core.imgseqs.Read(files=files, mismatch=True, prefetch=0)
+    same((clip.width, clip.height), (0, 0), "the source reports variable dimensions")
+
+    nodes = (
+        ("PeakStats", core.nimages.PeakStats(clip)),
+        ("PeakGrayShades", core.nimages.PeakGrayShades(clip)),
+        ("Levels", core.nimages.Levels(clip, black=10, white=200, gamma=1.0)),
+        ("Posterize", core.nimages.Posterize(clip, bits=3)),
+    )
+    for label, node in nodes:
+        for n, (width, height) in enumerate(sizes):
+            with node.get_frame(n) as frame:
+                check(
+                    (frame.width, frame.height) == (width, height),
+                    f"{label} frame {n}: got {frame.width}x{frame.height}, want {width}x{height}",
+                )
+                if label == "Posterize":
+                    same(
+                        np.asarray(frame[0]).tolist(),
+                        table[pages[n]].tolist(),
+                        f"{label} frame {n} pixels",
+                    )
+
+    shutil.rmtree(scratch, ignore_errors=True)
+
+
 def check_determinism() -> None:
     section("determinism")
     rng = np.random.default_rng(13)
@@ -527,6 +677,8 @@ def main() -> int:
     check_per_frame_results()
     check_request_patterns()
     check_errors()
+    check_color_families(posterize)
+    check_dynamic_dimensions(posterize)
     check_determinism()
 
     print()

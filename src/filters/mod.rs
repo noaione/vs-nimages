@@ -3,8 +3,8 @@
 //!
 //! Every filter follows the same shape:
 //!
-//! * `create` reads and validates its arguments, refuses anything but `GRAY8`,
-//!   and registers the node through `core.create_video_filter`
+//! * `create` reads and validates its arguments, checks the format the node
+//!   declares, and registers the node through `core.create_video_filter`
 //! * `get_frame` requests the input frame on `Initial`, and builds the output on
 //!   `AllFramesReady`
 //! * the analysis filters copy the input frame so pixels and properties both
@@ -12,8 +12,11 @@
 //!   source properties onto it
 //!
 //! Frame dimensions come from the frame, never from the node, so a clip whose
-//! pages differ in size still works. every row walk uses the frame's own stride
-//! and stops after `width` samples, so stride padding is never read or written.
+//! pages differ in size works and so does a clip whose dimensions are not known
+//! until a frame is asked for. Every row walk uses the frame's own stride and
+//! stops after the samples the plane holds, so stride padding is never read or
+//! written, and an RGB frame's interleaved channels are stepped over rather than
+//! mixed.
 
 mod levels;
 mod peak_gray_shades;
@@ -27,7 +30,7 @@ pub use posterize::Posterize;
 
 use std::ffi::CStr;
 
-use vapoursynth4_rs::frame::VideoFrame;
+use vapoursynth4_rs::frame::{VideoFormat, VideoFrame};
 use vapoursynth4_rs::map::{KeyStr, MapPropertyError, MapRef};
 use vapoursynth4_rs::node::{Dependencies, Filter, RequestPattern, VideoNode};
 use vapoursynth4_rs::{ColorFamily, SampleType, VideoInfo, core::CoreRef, ffi, key};
@@ -38,6 +41,63 @@ use crate::histogram::Histogram;
 /// The bit depth every filter in this release accepts.
 const GRAY8_BITS: i32 = 8;
 
+/// What a filter accepts as input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Accept {
+    /// Gray, 8 bit integer, one plane. what the analyzers take, because a
+    /// histogram of one plane only means something for a gray clip.
+    Gray8,
+    /// Any color family, 8 bit integer, every plane. what the lookup-table
+    /// filters take, because a curve applies per sample whatever the family.
+    Integer8,
+}
+
+impl Accept {
+    /// Wording for an error message.
+    fn describe(self) -> &'static str {
+        match self {
+            Self::Gray8 => "a constant Gray 8 bit clip",
+            Self::Integer8 => "an 8 bit integer clip",
+        }
+    }
+
+    /// Whether one format is acceptable.
+    ///
+    /// An `Undefined` color family means the clip's format varies between
+    /// frames, which only the frame itself can answer for.
+    fn accepts(self, format: &VideoFormat) -> bool {
+        if format.color_family == ColorFamily::Undefined
+            || format.sample_type != SampleType::Integer
+            || format.bits_per_sample != GRAY8_BITS
+        {
+            return false;
+        }
+        match self {
+            Self::Integer8 => true,
+            Self::Gray8 => {
+                format.color_family == ColorFamily::Gray
+                    && format.sub_sampling_w == 0
+                    && format.sub_sampling_h == 0
+            }
+        }
+    }
+
+    /// Rejects a format that is already known to be wrong.
+    ///
+    /// A clip whose dimensions or format vary reports `Undefined`, and is left
+    /// for [`check_frame_format`] to judge once a frame exists.
+    fn describe_rejection(self, format: &VideoFormat) -> String {
+        format!(
+            "needs {}, got {:?} {} bit with subsampling {}x{}",
+            self.describe(),
+            format.color_family,
+            format.bits_per_sample,
+            format.sub_sampling_w,
+            format.sub_sampling_h,
+        )
+    }
+}
+
 /// Reads the `clip` argument every filter takes.
 pub(super) fn read_clip(input: &MapRef, function: &str) -> Result<VideoNode> {
     input
@@ -45,28 +105,32 @@ pub(super) fn read_clip(input: &MapRef, function: &str) -> Result<VideoNode> {
         .map_err(|error| NImagesError::new(format!("{function}: invalid clip argument: {error}")))
 }
 
-/// Refuses anything but a constant Gray 8 bit clip and returns the output info.
-pub(super) fn require_gray8(node: &VideoNode, function: &str) -> Result<VideoInfo> {
+/// Checks the format a node declares and returns the output info to register.
+///
+/// The info is the input's own, which is what carries variable dimensions
+/// through: `width` and `height` stay 0 and every frame is measured instead.
+pub(super) fn checked_info(node: &VideoNode, function: &str, accept: Accept) -> Result<VideoInfo> {
     let info = node.info().clone();
-    let format = &info.format;
-    let is_gray8 = format.color_family == ColorFamily::Gray
-        && format.sample_type == SampleType::Integer
-        && format.bits_per_sample == GRAY8_BITS
-        && format.sub_sampling_w == 0
-        && format.sub_sampling_h == 0;
-
-    if !is_gray8 {
+    if info.format.color_family != ColorFamily::Undefined && !accept.accepts(&info.format) {
         return Err(NImagesError::new(format!(
-            "{function} needs a constant Gray 8 bit clip, got {:?} {} bit with \
-             subsampling {}x{}",
-            format.color_family,
-            format.bits_per_sample,
-            format.sub_sampling_w,
-            format.sub_sampling_h,
+            "{function} {}",
+            accept.describe_rejection(&info.format)
         )));
     }
-
     Ok(info)
+}
+
+/// Checks the format of one frame, which is the only place a clip that varies
+/// between frames can be judged.
+pub(super) fn check_frame_format(frame: &VideoFrame, function: &str, accept: Accept) -> Result<()> {
+    let format = frame.get_video_format();
+    if accept.accepts(format) {
+        return Ok(());
+    }
+    Err(NImagesError::new(format!(
+        "{function} {}",
+        accept.describe_rejection(format)
+    )))
 }
 
 /// Reads an optional integer argument.
@@ -155,20 +219,22 @@ pub(super) fn plane_histogram(frame: &VideoFrame) -> Result<Histogram> {
         .ok_or_else(|| NImagesError::new("plane 0 is smaller than its reported stride"))
 }
 
-/// Applies a lookup table to plane 0 of `source`, writing into `output`.
+/// Rewrites every sample of one plane through `table`.
 ///
-/// Both frames must share their dimensions, which holds because the output is
-/// allocated from the input frame's own format and size.
-pub(super) fn map_plane(
+/// Only one byte per sample is read, which holds because every accepted format
+/// is 8 bit. A wider format needs the sample loop reworked around
+/// `bytes_per_sample`.
+fn map_plane(
     source: &VideoFrame,
     output: &mut VideoFrame,
+    plane: i32,
     table: &[u8; 256],
 ) -> Result<()> {
-    let width = usize::try_from(source.frame_width(0))
-        .map_err(|_| NImagesError::new("plane 0 has a negative width"))?;
-    let (source_stride, height) = plane_shape(source, 0)?;
-    let (output_stride, output_height) = plane_shape(output, 0)?;
-    if width == 0 || height == 0 {
+    let samples = usize::try_from(source.frame_width(plane))
+        .map_err(|_| NImagesError::new(format!("plane {plane} has a negative width")))?;
+    let (source_stride, height) = plane_shape(source, plane)?;
+    let (output_stride, output_height) = plane_shape(output, plane)?;
+    if samples == 0 || height == 0 {
         return Ok(());
     }
     if height != output_height || source_stride == 0 || output_stride == 0 {
@@ -177,30 +243,39 @@ pub(super) fn map_plane(
         ));
     }
 
+    if samples > source_stride || samples > output_stride {
+        return Err(NImagesError::new(format!(
+            "plane {plane} is {samples} samples wide but its stride is \
+             {source_stride} against {output_stride}"
+        )));
+    }
+
     let source_length = source_stride
         .checked_mul(height)
-        .ok_or_else(|| NImagesError::new("plane 0 is larger than the address space"))?;
+        .ok_or_else(|| NImagesError::new("the input plane is larger than the address space"))?;
     let output_length = output_stride
         .checked_mul(height)
         .ok_or_else(|| NImagesError::new("the output plane is larger than the address space"))?;
 
-    let source_pointer = source.plane(0);
-    let output_pointer = output.plane_mut(0);
+    let source_pointer = source.plane(plane);
+    let output_pointer = output.plane_mut(plane);
     if source_pointer.is_null() || output_pointer.is_null() {
-        return Err(NImagesError::new("plane 0 is not readable or writable"));
+        return Err(NImagesError::new(format!(
+            "plane {plane} is not readable or writable"
+        )));
     }
 
     // SAFETY: both pointers are valid for the length computed above, the two
-    // frames are distinct objects so the slices cannot alias, and the row walk
-    // below stays inside `width` samples of each row.
+    // frames are distinct objects so the slices cannot alias, and every offset
+    // below stays inside `row_bytes` of its row.
     let source_bytes = unsafe { std::slice::from_raw_parts(source_pointer, source_length) };
     let output_bytes = unsafe { std::slice::from_raw_parts_mut(output_pointer, output_length) };
 
     for row in 0..height {
         let source_start = row * source_stride;
         let output_start = row * output_stride;
-        let source_row = &source_bytes[source_start..source_start + width];
-        let output_row = &mut output_bytes[output_start..output_start + width];
+        let source_row = &source_bytes[source_start..source_start + samples];
+        let output_row = &mut output_bytes[output_start..output_start + samples];
         for (input, target) in source_row.iter().zip(output_row.iter_mut()) {
             *target = table[*input as usize];
         }
@@ -210,20 +285,32 @@ pub(super) fn map_plane(
 }
 
 /// Allocates an output frame with the input frame's format, copies the source
-/// properties onto it, and applies `table` to plane 0.
+/// properties onto it, and rewrites every plane through `table`.
+///
+/// The frame's own dimensions are used, so a clip whose pages differ in size
+/// works, and every plane is processed, so an RGB or YUV frame has each of its
+/// channels leveled rather than only the first.
 pub(super) fn map_frame(
     core: &CoreRef<'_>,
     source: &VideoFrame,
     table: &[u8; 256],
 ) -> Result<VideoFrame> {
     let format = source.get_video_format().clone();
+    // A format that varies between frames reports no planes at the clip level,
+    // and the per-frame check has already refused it by the time this runs.
+    let planes = format.num_planes.max(1);
+
     let mut output = core.new_video_frame(
         &format,
         source.frame_width(0),
         source.frame_height(0),
         Some(source),
     );
-    map_plane(source, &mut output, table)?;
+
+    for plane in 0..planes {
+        map_plane(source, &mut output, plane, table)?;
+    }
+
     Ok(output)
 }
 

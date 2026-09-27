@@ -13,10 +13,12 @@ shipped as `vapoursynth-nimages`. keep the public identity unchanged:
 - native artifact: `vs_nimages.dll`, `libvs_nimages.so`, `libvs_nimages.dylib`
 - python distribution: `vapoursynth-nimages`
 
-the first release is `GRAY8` only. `PeakStats` and `PeakGrayShades` leave pixels
-alone and attach their results as frame properties, so a caller composes
-`PeakStats` -> `Levels(use_props=True)` instead of asking for automatic levels in
-one call. `Levels` and `Posterize` are 256-entry lookup tables.
+the first release is 8 bit integer only. `PeakStats` and `PeakGrayShades` take a
+Gray clip and leave pixels alone, attaching their results as frame properties, so
+a caller composes `PeakStats` -> `Levels(use_props=True)` instead of asking for
+automatic levels in one call. `Levels` and `Posterize` take any 8 bit integer
+family and rewrite every plane. Every filter handles a clip whose dimensions are
+not known until a frame is asked for.
 
 `docs/IMPLEMENTATIONS.md` is the plan of record for the filter surface, the
 argument names and the property names. read it before changing anything public.
@@ -25,10 +27,9 @@ crate gets wrong, and which decisions are already locked.
 
 ## status
 
-the four filters are implemented for `GRAY8` and covered by
-`tests/check-nimages.py`. `docs/FINDINGS.md` §8 tracks the milestones: M1, M2 and
-M3 are done, M4 is deferred because it touches the sibling checkout, and M5 is
-distribution work.
+the four filters are implemented and covered by `tests/check-nimages.py`.
+`docs/FINDINGS.md` §8 tracks the milestones: M1, M2 and M3 are done, M4 is
+deferred because it touches the sibling checkout, and M5 is distribution work.
 
 ## where the behaviour comes from
 
@@ -62,9 +63,9 @@ carries a `parity` of `nmanga`, `diverges` or `reference-only` plus the
 - `src/lib.rs`: plugin declaration through `declare_plugin!`, and the four filter
   registrations.
 - `src/error.rs`: `NImagesError`, the type that crosses the boundary.
-- `src/filters/mod.rs`: the shared filter layer. reading a clip, refusing
-  anything but `GRAY8`, reading optional arguments, registering the node,
-  building a frame's histogram, and applying a lookup table to a plane.
+- `src/filters/mod.rs`: the shared filter layer. reading a clip, the `Accept`
+  rules for what each filter takes, reading optional arguments, registering the
+  node, building a frame's histogram, and rewriting a plane through a table.
 - `src/filters/{peak_stats,peak_gray_shades,levels,posterize}.rs`: the four
   filters. all `Parallel`, all with a strict spatial dependency on their input.
 - `src/histogram.rs`: the stride-aware `[u64; 256]` histogram every analyzer
@@ -147,7 +148,16 @@ copy target\release\vs_nimages.dll .venv\Lib\site-packages\vapoursynth\plugins\n
 things worth knowing before touching `src/filters/`. `README.md` has the full
 argument and property tables.
 
-- every filter refuses anything but a constant `Gray` 8 bit clip, at creation.
+- a filter checks the format the node declares, and re-checks the format of each
+  frame. a clip whose dimensions or format vary reports `Undefined`, and only the
+  frame can answer for it.
+- `PeakStats` and `PeakGrayShades` take a Gray clip, because a histogram of one
+  plane only means something for one. `Levels` and `Posterize` take any 8 bit
+  integer family and rewrite every plane.
+- every plane walk uses the frame's own `frame_width`, `frame_height` and
+  `stride`, so variable dimensions and subsampled chroma both work. samples are
+  one byte apart: VapourSynth hands an RGB24 frame out as three separate plane
+  buffers, not as one interleaved buffer, so the walk is the same as for Gray.
 - `PeakStats` and `PeakGrayShades` copy the input frame, so pixels and properties
   both survive, and then attach their own properties.
 - `Levels` and `Posterize` allocate from the input frame's format and pass the

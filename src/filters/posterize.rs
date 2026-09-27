@@ -1,4 +1,10 @@
-//! `Posterize`: a `GRAY8` lookup table mapping each frame to `2^bits` levels.
+//! `Posterize`: a 256-entry lookup table mapping each sample to one of `2^bits`
+//! levels.
+//!
+//! Like `Levels`, the mapping applies per sample, so any 8 bit integer format is
+//! accepted and every plane is rewritten. Posterizing the planes of an RGB clip
+//! independently is not the same operation as posterizing its luma, so an RGB
+//! caller that wants the grayscale behaviour converts first.
 
 use std::ffi::{CStr, c_void};
 
@@ -10,7 +16,10 @@ use vapoursynth4_rs::{core::CoreRef, ffi, key};
 use crate::error::{NImagesError, Result};
 use crate::posterize::{MAX_BITS, MIN_BITS, posterize_lut};
 
-use super::{add_filter, input_failed, map_frame, read_clip, read_int, require_gray8};
+use super::{
+    Accept, add_filter, check_frame_format, checked_info, input_failed, map_frame, read_clip,
+    read_int,
+};
 
 /// Maps each frame to `2^bits` evenly spaced gray values, without dithering.
 pub struct Posterize {
@@ -34,7 +43,7 @@ impl Filter for Posterize {
         mut core: CoreRef,
     ) -> Result<()> {
         let source = read_clip(&input, "Posterize")?;
-        let info = require_gray8(&source, "Posterize")?;
+        let info = checked_info(&source, "Posterize", Accept::Integer8)?;
 
         let bits = read_int(&input, key!(c"bits"))?.ok_or_else(|| {
             NImagesError::new(format!(
@@ -77,6 +86,7 @@ impl Filter for Posterize {
             }
             ffi::VSActivationReason::AllFramesReady => {
                 let input = self.source.get_frame_filter(n, &mut frame_ctx);
+                check_frame_format(&input, "Posterize", Accept::Integer8)?;
                 let output = map_frame(&core, &input, &self.table)?;
                 Ok(Some(output))
             }

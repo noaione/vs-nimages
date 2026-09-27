@@ -498,18 +498,48 @@ artifact still loads and serves frames in VapourSynth R80.
   vectors through the built plugin, including 248 histogram peak cases and 60
   histogram shade cases materialised as real frames, and then checks geometry,
   per-frame independence, repeated and out-of-order and concurrent requests,
-  property preservation, determinism and the error messages.
+  property preservation, determinism, the color families each filter takes,
+  channel separation on RGB, dynamic dimensions and the error messages.
 
 Verified: `cargo test` 61 passed (51 unit, 10 integration),
 `cargo clippy --all-targets` clean, `cargo fmt --check` clean,
 `cargo build --release --locked` loads in VapourSynth R80 with all four filters
-registered, and `tests/check-nimages.py` reports **1826 checks passed**.
+registered, and `tests/check-nimages.py` reports **1886 checks passed**.
 
 Two things the plan called for that are not here: `dev-tests` gained `numpy`
 rather than `pytest`, because the validator is a plain script in the style of
 `vs-imageseqs` rather than a pytest suite, and there is no `vspipe` run because the
 concurrent-request and determinism checks cover the same ground without needing an
 encoder.
+
+### 8.1 Input surface, widened after review
+
+The first M3 draft took `GRAY8` only and refused a clip whose dimensions vary.
+Both were wrong for how the filters are used, so the surface is:
+
+| filter | families | planes | variable dimensions |
+|---|---|---|---|
+| `PeakStats` | Gray | plane 0 | yes |
+| `PeakGrayShades` | Gray | plane 0 | yes |
+| `Levels` | Gray, RGB, YUV | all | yes |
+| `Posterize` | Gray, RGB, YUV | all | yes |
+
+Anything not an 8 bit integer format is refused, with the message naming what was
+received.
+
+A clip whose dimensions or format vary reports `Undefined` at the node, so the
+format is checked twice: once at creation when the node declares one, and again
+per frame when it does not. The output `VideoInfo` is the input's own, which is
+what carries `width = height = 0` through.
+
+**`getFrameWidth` is the sample count for every plane.** VapourSynth gives an
+RGB24 frame three *separate* plane buffers rather than one interleaved buffer:
+`getReadPtr` for planes 0, 1 and 2 of a 6x4 RGB24 frame returned addresses
+differing by whole plane allocations, not by one byte. Samples are therefore one
+byte apart for Gray, RGB and YUV alike, and the walk is the same for all of them.
+The first implementation assumed the interleaved layout and used a three byte
+sample stride for RGB, which mixed the channels; the RGB channel-separation check
+in `tests/check-nimages.py` is what catches that, and it stays in the suite.
 
 ### M4 — `nmanga` integration — **deferred, out of scope**
 

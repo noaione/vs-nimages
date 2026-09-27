@@ -11,8 +11,8 @@ use crate::error::{NImagesError, Result};
 use crate::peaks::{PeakOptions, find_local_peak};
 
 use super::{
-    add_filter, input_failed, plane_histogram, read_clip, read_float, read_int, require_gray8,
-    validate_percentage,
+    Accept, add_filter, check_frame_format, checked_info, input_failed, plane_histogram, read_clip,
+    read_float, read_int, validate_percentage,
 };
 
 /// Lower bound of `upper_limit`, matching the `nmanga` cli and orchestrator.
@@ -48,7 +48,7 @@ impl Filter for PeakStats {
         mut core: CoreRef,
     ) -> Result<()> {
         let source = read_clip(&input, "PeakStats")?;
-        let info = require_gray8(&source, "PeakStats")?;
+        let info = checked_info(&source, "PeakStats", Accept::Gray8)?;
 
         let upper_limit = read_int(&input, key!(c"upper_limit"))?.unwrap_or(DEFAULT_UPPER_LIMIT);
         if !(MIN_UPPER_LIMIT..=MAX_UPPER_LIMIT).contains(&upper_limit) {
@@ -105,6 +105,7 @@ impl Filter for PeakStats {
             }
             ffi::VSActivationReason::AllFramesReady => {
                 let input = self.source.get_frame_filter(n, &mut frame_ctx);
+                check_frame_format(&input, "PeakStats", Accept::Gray8)?;
                 let histogram = plane_histogram(&input)?;
                 let peaks = find_local_peak(&histogram, &self.options);
 

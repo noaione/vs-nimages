@@ -10,14 +10,17 @@ levels or posterization from either fixed parameters or per-frame statistics.
 
 ## status
 
-all four filters are implemented for `GRAY8` and verified against the reference
-python implementation. the analysis and mapping algorithms are replayed against
+all four filters are implemented and verified against the reference python
+implementation. the analysis and mapping algorithms are replayed against
 committed golden vectors, and `tests/check-nimages.py` replays the same vectors
 through the built plugin. see `docs/FINDINGS.md` for what was verified and
 `docs/IMPLEMENTATIONS.md` for the plan the interface comes from.
 
-the first release is `GRAY8` only. 9 to 16 bit integer input and float input are
-later milestones.
+input is 8 bit integer only. `PeakStats` and `PeakGrayShades` take a Gray clip,
+because a histogram of one plane only means something for one. `Levels` and
+`Posterize` take any 8 bit integer family and rewrite every plane. every filter
+handles a clip whose dimensions are not known until a frame is asked for. 9 to 16
+bit integer input and float input are later milestones.
 
 ## features
 
@@ -36,8 +39,11 @@ later milestones.
 - VapourSynth R79 or newer
 - Python 3.12 or newer when installing the wheel
 - Rust 1.88 or newer when building from source
-- `GRAY8` input, normalized with `resize.Bicubic` before the filters, as in
-  [use](#use) below
+- 8 bit integer input. `PeakStats` and `PeakGrayShades` need a Gray clip;
+  `Levels` and `Posterize` take Gray, RGB or YUV
+- a clip whose dimensions are not known until a frame is asked for, such as
+  `imgseqs.Read(..., mismatch=True)` over pages of different sizes
+- normalize an image sequence as in [use](#use) below
 
 ## install
 
@@ -167,7 +173,9 @@ order.
 
 ### `Levels`
 
-applies the ImageMagick `-level` curve as a 256-entry table.
+applies the ImageMagick `-level` curve as a 256-entry table, to every plane of
+every frame. Gray, RGB and YUV clips are all accepted, subsampled or not, and the
+curve applies to each sample as it stands rather than to luma.
 
 ```python
 # constant parameters, table built once
@@ -204,11 +212,16 @@ rejects one instead of producing NaN.
 
 ### `Posterize`
 
-maps each frame to `2 ** bits` evenly spaced gray values, without dithering.
+maps every plane of each frame to `2 ** bits` evenly spaced values, without
+dithering. Like `Levels` it takes any 8 bit integer family.
 
 ```python
 posterized = core.nimages.Posterize(clip, bits=4)
 ```
+
+posterizing an RGB clip's planes independently is not the same operation as
+posterizing its luma. an RGB caller that wants the grayscale behaviour converts
+first, as in [use](#use) above.
 
 | argument | default | meaning |
 | --- | --- | --- |
