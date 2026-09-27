@@ -4,23 +4,7 @@
 [![License](https://img.shields.io/github/license/noaione/vs-nimages)](https://github.com/noaione/vs-nimages/blob/master/LICENSE)
 ![VapourSynth Version](https://img.shields.io/badge/vapoursynth-%3E%3DR79-blue)
 
-a rust vapoursynth plugin that analyzes and manipulates images. it finds the
-black and white points of a page, reports which gray shades matter, and applies
-levels or posterization from either fixed parameters or per-frame statistics.
-
-## status
-
-all four filters are implemented and verified against the reference python
-implementation. the analysis and mapping algorithms are replayed against
-committed golden vectors, and `tests/check-nimages.py` replays the same vectors
-through the built plugin. see `docs/FINDINGS.md` for what was verified and
-`docs/IMPLEMENTATIONS.md` for the plan the interface comes from.
-
-input is 8 bit integer only. `PeakStats` and `PeakGrayShades` take a Gray clip,
-because a histogram of one plane only means something for one. `Levels` and
-`Posterize` take any 8 bit integer family and rewrite every plane. every filter
-handles a clip whose dimensions are not known until a frame is asked for. 9 to 16
-bit integer input and float input are later milestones.
+a rust vapoursynth plugin that analyzes and manipulates images.
 
 ## features
 
