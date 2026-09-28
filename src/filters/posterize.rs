@@ -1,11 +1,12 @@
-//! `Posterize`: a 256-entry lookup table mapping each sample to one of `2^bits`
-//! levels.
+//! `Posterize`: a native-range lookup table mapping each sample to one of
+//! `2^bits` levels.
 //!
-//! Like `Levels`, the mapping applies per sample, so any 8 bit integer format is
-//! accepted and every plane is rewritten. Posterizing the planes of an RGB clip
-//! independently is not the same operation as posterizing its luma, so an RGB
-//! caller that wants the grayscale behaviour converts first.
+//! Like `Levels`, the mapping applies per sample, so any 8 to 16 bit integer
+//! format is accepted and every plane is rewritten. Posterizing the planes of
+//! an RGB clip independently is not the same operation as posterizing its
+//! luma, so an RGB caller that wants the grayscale behaviour converts first.
 
+use std::borrow::Cow;
 use std::ffi::{CStr, c_void};
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
@@ -16,11 +17,13 @@ use vapoursynth4_rs::node::{Filter, Node, VideoNode};
 use vapoursynth4_rs::{core::CoreRef, ffi, key};
 
 use crate::error::{NImagesError, Result};
-use crate::posterize::{MAX_BITS, MIN_BITS, posterize_lut};
+use crate::posterize::{
+    MAX_INTEGER_SAMPLE_BITS, MIN_BITS, PosterizeError, posterize_lut, posterize_lut_u16,
+};
 
 use super::{
-    Accept, FrameTrace, add_filter, check_frame_format, checked_info, describe_frame, input_failed,
-    map_frame, read_clip, read_int, report_settings_once,
+    Accept, FrameTrace, MappingTable, add_filter, check_frame_format, checked_info, describe_frame,
+    input_failed, map_frame, read_clip, read_int, report_settings_once,
 };
 
 // Hardcoded table
@@ -41,15 +44,18 @@ enum Bits {
     FromShades,
 }
 
+#[derive(Clone)]
 struct ResolvedBits {
     bits: u8,
-    table: [u8; 256],
+    sample_depth: u8,
+    table: MappingTable,
 }
 
 /// Maps each frame to `2^bits` evenly spaced gray values, without dithering.
 pub struct Posterize {
     source: VideoNode,
     bits: Bits,
+    resolved: Option<ResolvedBits>,
     debug: bool,
     /// Set once the settings line has been written for this instance.
     reported: AtomicBool,
@@ -71,7 +77,7 @@ impl Filter for Posterize {
         mut core: CoreRef,
     ) -> Result<()> {
         let source = read_clip(&input, "Posterize")?;
-        let info = checked_info(&source, "Posterize", Accept::Integer8)?;
+        let info = checked_info(&source, "Posterize", Accept::Integer8To16)?;
 
         let use_props = read_int(&input, key!(c"use_props"))?.unwrap_or(0) != 0;
         let bits = if use_props {
@@ -79,7 +85,8 @@ impl Filter for Posterize {
         } else {
             let bpc = read_int(&input, key!(c"bits"))?.ok_or_else(|| {
                 NImagesError::new(format!(
-                    "Posterize: bits is required, and must be between {MIN_BITS} and {MAX_BITS}"
+                    "Posterize: bits is required, and must be between {MIN_BITS} and \
+                     {MAX_INTEGER_SAMPLE_BITS}"
                 ))
             })?;
 
@@ -88,12 +95,36 @@ impl Filter for Posterize {
                 Ok(bits) => bits,
                 Err(_) => {
                     return Err(NImagesError::new(format!(
-                        "Posterize: bits must be between {MIN_BITS} and {MAX_BITS}, got {bpc}"
+                        "Posterize: bits must be between {MIN_BITS} and \
+                         {MAX_INTEGER_SAMPLE_BITS}, got {bpc}"
                     )));
                 }
             };
+            if bpc_u8 > MAX_INTEGER_SAMPLE_BITS {
+                return Err(NImagesError::new(format!(
+                    "Posterize: bits must be between {MIN_BITS} and \
+                     {MAX_INTEGER_SAMPLE_BITS}, got {bpc}"
+                )));
+            }
+            if info.format.color_family != vapoursynth4_rs::ColorFamily::Undefined {
+                let sample_depth = info.format.bits_per_sample as u8;
+                if bpc_u8 > sample_depth {
+                    return Err(NImagesError::new(format!(
+                        "Posterize: bits must be between {MIN_BITS} and {sample_depth}, \
+                         got {bpc_u8}"
+                    )));
+                }
+            }
 
             Bits::Fixed(bpc_u8)
+        };
+        let resolved = match &bits {
+            Bits::Fixed(bits)
+                if info.format.color_family != vapoursynth4_rs::ColorFamily::Undefined =>
+            {
+                Some(resolve_from_bits(*bits, info.format.bits_per_sample as u8)?)
+            }
+            _ => None,
         };
 
         let debug = read_int(&input, key!(c"debug"))?.unwrap_or(0) != 0;
@@ -107,6 +138,7 @@ impl Filter for Posterize {
             Self {
                 source,
                 bits,
+                resolved,
                 debug,
                 reported: AtomicBool::new(false),
             },
@@ -132,11 +164,24 @@ impl Filter for Posterize {
                 let mut trace = FrameTrace::new(self.debug, "Posterize");
 
                 let input = self.source.get_frame_filter(n, &mut frame_ctx);
-                check_frame_format(&input, "Posterize", Accept::Integer8)?;
+                check_frame_format(&input, "Posterize", Accept::Integer8To16)?;
+                let sample_depth = input.get_video_format().bits_per_sample as u8;
 
-                let resolved = match self.bits {
-                    Bits::Fixed(bits) => resolve_from_bits(bits, "bits=...")?,
-                    Bits::FromShades => resolve_from_properties(&input)?,
+                let resolved: Cow<'_, ResolvedBits> = match &self.resolved {
+                    Some(resolved) if resolved.sample_depth == sample_depth => {
+                        Cow::Borrowed(resolved)
+                    }
+                    Some(_) => {
+                        return Err(NImagesError::new(
+                            "Posterize: the input sample depth changed after filter creation",
+                        ));
+                    }
+                    None => match &self.bits {
+                        Bits::Fixed(bits) => Cow::Owned(resolve_from_bits(*bits, sample_depth)?),
+                        Bits::FromShades => {
+                            Cow::Owned(resolve_from_properties(&input, sample_depth)?)
+                        }
+                    },
                 };
 
                 let settings = describe_frame(&input);
@@ -151,8 +196,7 @@ impl Filter for Posterize {
                     ),
                 );
 
-                // skip if 8bpc?
-                if resolved.bits == 8 {
+                if resolved.bits == sample_depth {
                     return Ok(Some(input));
                 }
 
@@ -170,7 +214,7 @@ impl Filter for Posterize {
 }
 
 /// Resolves the lookup table for one frame from `PeakGrayShades` properties.
-fn resolve_from_properties(frame: &VideoFrame) -> Result<ResolvedBits> {
+fn resolve_from_properties(frame: &VideoFrame, sample_depth: u8) -> Result<ResolvedBits> {
     let properties = frame
         .properties()
         .ok_or_else(|| NImagesError::new("Posterize: the input frame holds no properties"))?;
@@ -184,9 +228,10 @@ fn resolve_from_properties(frame: &VideoFrame) -> Result<ResolvedBits> {
         })?;
 
     let shade_count = shades.len();
-    if !(1..=256).contains(&shade_count) {
+    let max_shades = 1usize << sample_depth;
+    if !(1..=max_shades).contains(&shade_count) {
         return Err(NImagesError::new(format!(
-            "Posterize(use_props=True) needs between 1 and 256 values in \
+            "Posterize(use_props=True) needs between 1 and {max_shades} values in \
              NImagesGrayShades, got {shade_count}"
         )));
     }
@@ -198,45 +243,76 @@ fn resolve_from_properties(frame: &VideoFrame) -> Result<ResolvedBits> {
         (usize::BITS - (shade_count - 1).leading_zeros()) as u8
     };
 
-    resolve_from_bits(bits, "use_props=true")
+    resolve_from_bits(bits, sample_depth)
 }
 
-fn resolve_from_bits(bits: u8, whence: &str) -> Result<ResolvedBits> {
-    match bits {
-        1 => Ok(ResolvedBits {
-            table: TABLE_BITS_1,
-            bits: 1,
-        }),
-        2 => Ok(ResolvedBits {
-            table: TABLE_BITS_2,
-            bits: 2,
-        }),
-        3 => Ok(ResolvedBits {
-            table: TABLE_BITS_3,
-            bits: 3,
-        }),
-        4 => Ok(ResolvedBits {
-            table: TABLE_BITS_4,
-            bits: 4,
-        }),
-        5 => Ok(ResolvedBits {
-            table: TABLE_BITS_5,
-            bits: 5,
-        }),
-        6 => Ok(ResolvedBits {
-            table: TABLE_BITS_6,
-            bits: 6,
-        }),
-        7 => Ok(ResolvedBits {
-            table: TABLE_BITS_7,
-            bits: 7,
-        }),
-        8 => Ok(ResolvedBits {
-            table: TABLE_BITS_8,
-            bits: 8,
-        }),
-        other => Err(NImagesError::new(format!(
-            "Posterize({whence}): needs between 1 and 8 bpc, got {other} instead"
-        ))),
+fn resolve_from_bits(bits: u8, sample_depth: u8) -> Result<ResolvedBits> {
+    if bits == 0 || bits > sample_depth {
+        return Err(NImagesError::new(format!(
+            "Posterize needs between {MIN_BITS} and {sample_depth} bits, got {bits}"
+        )));
     }
+
+    if sample_depth == 8 {
+        return match bits {
+            1 => Ok(ResolvedBits {
+                table: MappingTable::U8(TABLE_BITS_1),
+                bits: 1,
+                sample_depth,
+            }),
+            2 => Ok(ResolvedBits {
+                table: MappingTable::U8(TABLE_BITS_2),
+                bits: 2,
+                sample_depth,
+            }),
+            3 => Ok(ResolvedBits {
+                table: MappingTable::U8(TABLE_BITS_3),
+                bits: 3,
+                sample_depth,
+            }),
+            4 => Ok(ResolvedBits {
+                table: MappingTable::U8(TABLE_BITS_4),
+                bits: 4,
+                sample_depth,
+            }),
+            5 => Ok(ResolvedBits {
+                table: MappingTable::U8(TABLE_BITS_5),
+                bits: 5,
+                sample_depth,
+            }),
+            6 => Ok(ResolvedBits {
+                table: MappingTable::U8(TABLE_BITS_6),
+                bits: 6,
+                sample_depth,
+            }),
+            7 => Ok(ResolvedBits {
+                table: MappingTable::U8(TABLE_BITS_7),
+                bits: 7,
+                sample_depth,
+            }),
+            8 => Ok(ResolvedBits {
+                table: MappingTable::U8(TABLE_BITS_8),
+                bits: 8,
+                sample_depth,
+            }),
+            _ => Err(NImagesError::new(format!(
+                "Posterize needs between {MIN_BITS} and {sample_depth} bits, got {bits}"
+            ))),
+        };
+    }
+
+    let table = posterize_lut_u16(bits, sample_depth).map_err(|error| {
+        let message = match error {
+            PosterizeError::InvalidBits => {
+                "posterization bits must be between 1 and the sample depth"
+            }
+            PosterizeError::Allocation => "could not allocate the posterization lookup table",
+        };
+        NImagesError::new(format!("Posterize: {message}"))
+    })?;
+    Ok(ResolvedBits {
+        table: MappingTable::U16(table),
+        bits,
+        sample_depth,
+    })
 }

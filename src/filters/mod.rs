@@ -41,8 +41,9 @@ use vapoursynth4_rs::{ColorFamily, SampleType, VideoInfo, core::CoreRef, ffi, ke
 use crate::error::{NImagesError, Result};
 use crate::histogram::Histogram;
 
-/// The bit depth every filter in this release accepts.
-const GRAY8_BITS: i32 = 8;
+/// The sample-depth range the integer mapping filters accept.
+const MIN_INTEGER_BITS: i32 = 8;
+const MAX_INTEGER_BITS: i32 = 16;
 
 /// Stages one frame can report under `debug`.
 const TRACE_STAGES: usize = 4;
@@ -53,9 +54,9 @@ pub(super) enum Accept {
     /// Gray, 8 bit integer, one plane. what the analyzers take, because a
     /// histogram of one plane only means something for a gray clip.
     Gray8,
-    /// Any color family, 8 bit integer, every plane. what the lookup-table
+    /// Any color family, 8 to 16 bit integer, every plane. what the lookup-table
     /// filters take, because a curve applies per sample whatever the family.
-    Integer8,
+    Integer8To16,
 }
 
 impl Accept {
@@ -63,7 +64,7 @@ impl Accept {
     fn describe(self) -> &'static str {
         match self {
             Self::Gray8 => "a constant Gray 8 bit clip",
-            Self::Integer8 => "an 8 bit integer clip",
+            Self::Integer8To16 => "an 8 to 16 bit integer clip",
         }
     }
 
@@ -72,16 +73,18 @@ impl Accept {
     /// An `Undefined` color family means the clip's format varies between
     /// frames, which only the frame itself can answer for.
     fn accepts(self, format: &VideoFormat) -> bool {
-        if format.color_family == ColorFamily::Undefined
-            || format.sample_type != SampleType::Integer
-            || format.bits_per_sample != GRAY8_BITS
-        {
+        if format.color_family == ColorFamily::Undefined {
             return false;
         }
         match self {
-            Self::Integer8 => true,
+            Self::Integer8To16 => {
+                format.sample_type == SampleType::Integer
+                    && (MIN_INTEGER_BITS..=MAX_INTEGER_BITS).contains(&format.bits_per_sample)
+            }
             Self::Gray8 => {
-                format.color_family == ColorFamily::Gray
+                format.sample_type == SampleType::Integer
+                    && format.bits_per_sample == 8
+                    && format.color_family == ColorFamily::Gray
                     && format.sub_sampling_w == 0
                     && format.sub_sampling_h == 0
             }
@@ -157,6 +160,17 @@ pub(super) fn read_float(input: &MapRef, key: &KeyStr) -> Result<Option<f64>> {
     }
 }
 
+/// Returns the largest code value for a supported integer sample depth.
+pub(super) fn max_sample_value(bits_per_sample: i32) -> Result<u16> {
+    if !(MIN_INTEGER_BITS..=MAX_INTEGER_BITS).contains(&bits_per_sample) {
+        return Err(NImagesError::new(format!(
+            "integer sample depth must be between {MIN_INTEGER_BITS} and \
+             {MAX_INTEGER_BITS}, got {bits_per_sample}"
+        )));
+    }
+    Ok(((1u32 << bits_per_sample) - 1) as u16)
+}
+
 /// Checks a percentage argument.
 ///
 /// `None` disables the threshold, and `0` is accepted because the reference
@@ -225,16 +239,21 @@ pub(super) fn plane_histogram(frame: &VideoFrame) -> Result<Histogram> {
         .ok_or_else(|| NImagesError::new("plane 0 is smaller than its reported stride"))
 }
 
+/// Lookup table selected for the input's integer sample width.
+#[derive(Clone)]
+pub(super) enum MappingTable {
+    /// Eight bit code values.
+    U8([u8; 256]),
+    /// Nine through sixteen bit code values stored in 16-bit words.
+    U16(Vec<u16>),
+}
+
 /// Rewrites every sample of one plane through `table`.
-///
-/// Only one byte per sample is read, which holds because every accepted format
-/// is 8 bit. A wider format needs the sample loop reworked around
-/// `bytes_per_sample`.
 fn map_plane(
     source: &VideoFrame,
     output: &mut VideoFrame,
     plane: i32,
-    table: &[u8; 256],
+    table: &MappingTable,
 ) -> Result<()> {
     let samples = usize::try_from(source.frame_width(plane))
         .map_err(|_| NImagesError::new(format!("plane {plane} has a negative width")))?;
@@ -243,15 +262,20 @@ fn map_plane(
     if samples == 0 || height == 0 {
         return Ok(());
     }
+    let bits_per_sample = source.get_video_format().bits_per_sample;
+    let bytes_per_sample = if bits_per_sample <= 8 { 1usize } else { 2usize };
+    let row_bytes = samples
+        .checked_mul(bytes_per_sample)
+        .ok_or_else(|| NImagesError::new(format!("plane {plane} row is too large")))?;
     if height != output_height || source_stride == 0 || output_stride == 0 {
         return Err(NImagesError::new(
             "the output frame does not match the input frame",
         ));
     }
 
-    if samples > source_stride || samples > output_stride {
+    if row_bytes > source_stride || row_bytes > output_stride {
         return Err(NImagesError::new(format!(
-            "plane {plane} is {samples} samples wide but its stride is \
+            "plane {plane} needs {row_bytes} row bytes but its stride is \
              {source_stride} against {output_stride}"
         )));
     }
@@ -280,10 +304,39 @@ fn map_plane(
     for row in 0..height {
         let source_start = row * source_stride;
         let output_start = row * output_stride;
-        let source_row = &source_bytes[source_start..source_start + samples];
-        let output_row = &mut output_bytes[output_start..output_start + samples];
-        for (input, target) in source_row.iter().zip(output_row.iter_mut()) {
-            *target = table[*input as usize];
+        let source_row = &source_bytes[source_start..source_start + row_bytes];
+        let output_row = &mut output_bytes[output_start..output_start + row_bytes];
+
+        match (bytes_per_sample, table) {
+            (1, MappingTable::U8(table)) => {
+                for (input, target) in source_row.iter().zip(output_row.iter_mut()) {
+                    *target = table[*input as usize];
+                }
+            }
+            (2, MappingTable::U16(table)) if !table.is_empty() => {
+                for (input, target) in source_row
+                    .chunks_exact(2)
+                    .zip(output_row.chunks_exact_mut(2))
+                {
+                    let value = u16::from_ne_bytes([input[0], input[1]]);
+                    let index = usize::from(value).min(table.len() - 1);
+                    target.copy_from_slice(&table[index].to_ne_bytes());
+                }
+            }
+            (1, MappingTable::U16(_)) => {
+                return Err(NImagesError::new(
+                    "an 8 bit frame needs an 8 bit lookup table",
+                ));
+            }
+            (2, MappingTable::U8(_)) => {
+                return Err(NImagesError::new(
+                    "a wider integer frame needs a 16 bit lookup table",
+                ));
+            }
+            (2, MappingTable::U16(_)) => {
+                return Err(NImagesError::new("the 16 bit lookup table is empty"));
+            }
+            _ => return Err(NImagesError::new("the input sample width is unsupported")),
         }
     }
 
@@ -299,7 +352,7 @@ fn map_plane(
 pub(super) fn map_frame(
     core: &CoreRef<'_>,
     source: &VideoFrame,
-    table: &[u8; 256],
+    table: &MappingTable,
 ) -> Result<VideoFrame> {
     let format = source.get_video_format().clone();
     // A format that varies between frames reports no planes at the clip level,

@@ -21,6 +21,9 @@ pub const MIN_BITS: u8 = 1;
 /// The largest number of bits the filter accepts.
 pub const MAX_BITS: u8 = 8;
 
+/// Maximum bit depth held by a VapourSynth integer sample.
+pub const MAX_INTEGER_SAMPLE_BITS: u8 = 16;
+
 /// Builds the 256-entry `GRAY8` lookup table for one posterization depth.
 ///
 /// Returns [`None`] when `bits` is outside `1..=8`.
@@ -41,6 +44,52 @@ pub const fn posterize_lut(bits: u8) -> Option<[u8; 256]> {
     }
 
     Some(table)
+}
+
+/// Reason a wider posterization table could not be built.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PosterizeError {
+    /// `bits` is outside `1..=sample_depth` or `sample_depth` is outside `1..=16`.
+    InvalidBits,
+    /// The table could not reserve its bounded storage.
+    Allocation,
+}
+
+impl PosterizeError {
+    /// A message suitable for the filter boundary.
+    #[must_use]
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::InvalidBits => "posterization bits must be between 1 and the sample depth",
+            Self::Allocation => "could not allocate the posterization lookup table",
+        }
+    }
+}
+
+/// Builds a lookup table for an integer sample depth above 8 bits.
+///
+/// Both the input and output range span the complete legal range for
+/// `sample_depth`, even when that range is narrower than `u16`.
+pub fn posterize_lut_u16(bits: u8, sample_depth: u8) -> Result<Vec<u16>, PosterizeError> {
+    if !(1..=MAX_INTEGER_SAMPLE_BITS).contains(&sample_depth) || bits == 0 || bits > sample_depth {
+        return Err(PosterizeError::InvalidBits);
+    }
+
+    let max_value = (1u32 << sample_depth) - 1;
+    let levels = (1u32 << bits) - 1;
+    let length = max_value as usize + 1;
+    let mut table = Vec::new();
+    table
+        .try_reserve_exact(length)
+        .map_err(|_| PosterizeError::Allocation)?;
+    table.resize(length, 0);
+
+    for (value, target) in table.iter_mut().enumerate() {
+        let level = round_ratio_ties_even(value as u32 * levels, max_value);
+        *target = round_ratio_ties_even(level * max_value, levels) as u16;
+    }
+
+    Ok(table)
 }
 
 /// Rounds a nonnegative rational number to its nearest integer, with ties to even.
@@ -135,5 +184,47 @@ mod tests {
         levels.sort_unstable();
         levels.dedup();
         assert_eq!(levels, [0, 36, 73, 109, 146, 182, 219, 255]);
+    }
+
+    #[test]
+    fn sixteen_bit_posterization_uses_the_full_native_range() {
+        for bits in [1, 2, 8, 15, 16] {
+            let table = posterize_lut_u16(bits, 16).expect("valid depth");
+            assert_eq!(table.len(), 65_536);
+            assert_eq!(table[0], 0, "bits {bits}");
+            assert_eq!(table[65_535], u16::MAX, "bits {bits}");
+            assert!(table.windows(2).all(|pair| pair[0] <= pair[1]));
+            let mut seen = vec![false; 65_536];
+            for value in table {
+                seen[usize::from(value)] = true;
+            }
+            assert_eq!(
+                seen.into_iter().filter(|present| *present).count(),
+                1usize << bits,
+                "bits {bits}"
+            );
+        }
+    }
+
+    #[test]
+    fn lower_integer_depth_uses_its_own_peak_value() {
+        let table = posterize_lut_u16(8, 10).expect("valid depth");
+        assert_eq!(table.len(), 1_024);
+        assert_eq!(table[1_023], 1_023);
+        assert_eq!(
+            table
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            256
+        );
+    }
+
+    #[test]
+    fn wide_posterization_rejects_bits_above_the_sample_depth() {
+        assert_eq!(posterize_lut_u16(0, 16), Err(PosterizeError::InvalidBits));
+        assert_eq!(posterize_lut_u16(11, 10), Err(PosterizeError::InvalidBits));
+        assert_eq!(posterize_lut_u16(1, 17), Err(PosterizeError::InvalidBits));
     }
 }

@@ -450,14 +450,14 @@ def check_errors() -> None:
         contains="Gray 8 bit",
     )
     expect_error(
-        "Posterize on GRAY16",
-        lambda: core.nimages.Posterize(gray16, bits=4),
-        contains="8 bit integer",
+        "Posterize bits above GRAY16 depth",
+        lambda: core.nimages.Posterize(gray16, bits=17),
+        contains="between 1 and 16",
     )
     expect_error(
         "Levels on float RGB",
         lambda: core.nimages.Levels(core.std.BlankClip(width=8, height=8, format=vs.RGBS)),
-        contains="8 bit integer",
+        contains="8 to 16 bit integer",
     )
     expect_error("PeakStats without a clip", lambda: core.nimages.PeakStats())  # type: ignore
     expect_error("PeakStats upper_limit 0", lambda: core.nimages.PeakStats(gray, upper_limit=0))
@@ -475,7 +475,11 @@ def check_errors() -> None:
     expect_error("PeakGrayShades threshold -1", lambda: core.nimages.PeakGrayShades(gray, threshold=-1.0))
     expect_error("Posterize without bits", lambda: core.nimages.Posterize(gray), contains="bits is required")  # type: ignore
     expect_error("Posterize bits 0", lambda: core.nimages.Posterize(gray, bits=0), contains="between 1 and 8")
-    expect_error("Posterize bits 9", lambda: core.nimages.Posterize(gray, bits=9), contains="between 1 and 8")
+    expect_error(
+        "Posterize bits 9",
+        lambda: core.nimages.Posterize(gray, bits=9),
+        contains="between 1 and 8",
+    )
     expect_error(
         "Levels reversed endpoints",
         lambda: core.nimages.Levels(gray, black=200, white=100),
@@ -489,7 +493,7 @@ def check_errors() -> None:
     expect_error(
         "Levels auto_gamma above the domain",
         lambda: core.nimages.Levels(gray, black=200, white=255, auto_gamma=1),
-        contains="below 128",
+        contains="half the sample range",
     )
     expect_error(
         "Levels peak_offset below zero",
@@ -581,6 +585,86 @@ def clip_of_planes(planes: list[np.ndarray], format_, *, width: int, height: int
         return out
 
     return core.std.ModifyFrame(blank, blank, fill)
+
+
+def round_ratio_ties_even(numerator: int, denominator: int) -> int:
+    quotient, remainder = divmod(numerator, denominator)
+    return quotient + int(
+        remainder * 2 > denominator
+        or (remainder * 2 == denominator and quotient % 2 != 0)
+    )
+
+
+def expected_posterize_u16(values: np.ndarray, bits: int) -> np.ndarray:
+    maximum = 65_535
+    levels = (1 << bits) - 1
+    mapped = [
+        round_ratio_ties_even(
+            round_ratio_ties_even(int(value) * levels, maximum) * maximum,
+            levels,
+        )
+        for value in values.flat
+    ]
+    return np.asarray(mapped, dtype=np.uint16).reshape(values.shape)
+
+
+def check_high_depth_integer_mapping() -> None:
+    section("higher-depth integer mapping")
+    formats = {
+        "GRAY16": vs.GRAY16,
+        "RGB48": vs.RGB48,
+        "YUV420P16": vs.YUV420P16,
+    }
+    values = np.asarray([0, 1_024, 30_500, 60_000, 65_535], dtype=np.uint16)
+
+    for name, fmt in formats.items():
+        blank = core.std.BlankClip(width=5, height=3, format=fmt, length=1)
+        shapes = [
+            np.asarray(blank.get_frame(0)[plane]).shape
+            for plane in range(blank.format.num_planes)
+        ]
+        planes = [
+            np.resize(np.roll(values, plane), shape).astype(np.uint16, copy=True)
+            for plane, shape in enumerate(shapes)
+        ]
+        source = clip_of_planes(planes, fmt, width=5, height=3)
+
+        identity = core.nimages.Levels(source, gamma=1.0)
+        with identity.get_frame(0) as frame:
+            for plane, expected in enumerate(planes):
+                same(
+                    np.asarray(frame[plane]).tolist(),
+                    expected.tolist(),
+                    f"{name}: native-range default Levels plane {plane}",
+                )
+
+        leveled = core.nimages.Levels(source, black=1_024, white=60_000, gamma=1.0)
+        with leveled.get_frame(0) as frame:
+            for plane, input_values in enumerate(planes):
+                expected = np.where(
+                    input_values < 1_024,
+                    0,
+                    np.where(
+                        input_values > 60_000,
+                        65_535,
+                        np.rint((input_values.astype(np.float64) - 1_024)
+                                * (65_535 / (60_000 - 1_024))),
+                    ),
+                ).astype(np.uint16)
+                same(
+                    np.asarray(frame[plane]).tolist(),
+                    expected.tolist(),
+                    f"{name}: Levels plane {plane}",
+                )
+
+        posterized = core.nimages.Posterize(source, bits=5)
+        with posterized.get_frame(0) as frame:
+            for plane, input_values in enumerate(planes):
+                same(
+                    np.asarray(frame[plane]).tolist(),
+                    expected_posterize_u16(input_values, 5).tolist(),
+                    f"{name}: Posterize plane {plane}",
+                )
 
 
 def clip_of_rgb(shape: tuple[int, int], *, base: int, step: int):
@@ -756,6 +840,7 @@ def main() -> int:
     check_request_patterns()
     check_errors()
     check_color_families(posterize)
+    check_high_depth_integer_mapping()
     check_dynamic_dimensions(posterize)
     check_debug_logging()
     check_determinism()

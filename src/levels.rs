@@ -24,7 +24,16 @@ use crate::round::{round_to_places, to_u8};
 /// `upper_limit` may be as large as 255.
 #[must_use]
 pub fn automatic_gamma(black_level: u8) -> Option<f64> {
-    let black = black_level as f64 / 255.0;
+    automatic_gamma_for_range(u16::from(black_level), 255)
+}
+
+/// Automatic gamma for an integer sample range, normalized by its maximum.
+#[must_use]
+pub fn automatic_gamma_for_range(black_level: u16, max_value: u16) -> Option<f64> {
+    if max_value == 0 || black_level > max_value {
+        return None;
+    }
+    let black = f64::from(black_level) / f64::from(max_value);
     if black >= 0.5 {
         return None;
     }
@@ -56,6 +65,10 @@ pub enum LevelError {
     Reversed,
     /// Gamma was not strictly positive.
     Gamma,
+    /// An endpoint was outside the selected integer sample range.
+    OutOfRange,
+    /// The lookup table could not reserve its bounded storage.
+    Allocation,
 }
 
 impl LevelError {
@@ -66,6 +79,8 @@ impl LevelError {
             Self::NotFinite => "level parameters must be finite numbers",
             Self::Reversed => "black level must be lower than white level",
             Self::Gamma => "gamma must be greater than zero",
+            Self::OutOfRange => "level endpoints must fit the input sample range",
+            Self::Allocation => "could not allocate the level lookup table",
         }
     }
 }
@@ -108,6 +123,52 @@ pub fn levels_lut(black: f64, white: f64, gamma: f64) -> Result<[u8; 256], Level
             255
         } else {
             to_u8(((value - black) / delta).powf(inverse_gamma) * 255.0)
+        };
+    }
+
+    Ok(table)
+}
+
+/// Builds a lookup table for an integer sample range wider than 8 bits.
+///
+/// `max_value` is the largest legal input and output sample. The returned table
+/// contains every input from zero through that value, inclusive.
+///
+/// # Errors
+///
+/// Returns [`LevelError`] when the endpoints are invalid or the table cannot
+/// reserve its bounded storage.
+pub fn levels_lut_u16(
+    black: u16,
+    white: u16,
+    gamma: f64,
+    max_value: u16,
+) -> Result<Vec<u16>, LevelError> {
+    if black > max_value || white > max_value {
+        return Err(LevelError::OutOfRange);
+    }
+    validate(black as f64, white as f64, gamma)?;
+
+    let length = usize::from(max_value) + 1;
+    let mut table = Vec::new();
+    table
+        .try_reserve_exact(length)
+        .map_err(|_| LevelError::Allocation)?;
+    table.resize(length, 0);
+
+    let delta = f64::from(white - black);
+    let inverse_gamma = 1.0 / gamma;
+    for (value, slot) in table.iter_mut().enumerate() {
+        let value = value as u16;
+        *slot = if value < black {
+            0
+        } else if value > white {
+            max_value
+        } else {
+            let normalized = f64::from(value - black) / delta;
+            (normalized.powf(inverse_gamma) * f64::from(max_value))
+                .round_ties_even()
+                .clamp(0.0, f64::from(max_value)) as u16
         };
     }
 
@@ -175,6 +236,45 @@ mod tests {
         assert_eq!(table[245], 255);
         assert_eq!(table[255], 255);
         assert_eq!(table[10], 0, "the black point itself maps to 0");
+    }
+
+    #[test]
+    fn sixteen_bit_identity_covers_the_native_range() {
+        let max = u16::MAX;
+        let table = levels_lut_u16(0, max, 1.0, max).expect("valid full range");
+        assert_eq!(table.len(), 65_536);
+        assert_eq!(table[0], 0);
+        assert_eq!(table[32_768], 32_768);
+        assert_eq!(table[usize::from(max)], max);
+        assert!(table.windows(2).all(|pair| pair[0] <= pair[1]));
+    }
+
+    #[test]
+    fn sixteen_bit_levels_clamp_and_map_in_native_units() {
+        let table = levels_lut_u16(1_000, 60_000, 1.0, u16::MAX).expect("valid range");
+        assert_eq!(table[0], 0);
+        assert_eq!(table[999], 0);
+        assert_eq!(table[1_000], 0);
+        assert_eq!(table[30_500], 32_768);
+        assert_eq!(table[60_000], u16::MAX);
+        assert_eq!(table[60_001], u16::MAX);
+    }
+
+    #[test]
+    fn sixteen_bit_levels_reject_invalid_ranges() {
+        assert_eq!(
+            levels_lut_u16(90, 100, 1.0, 50),
+            Err(LevelError::OutOfRange)
+        );
+        assert_eq!(
+            levels_lut_u16(100, 90, 1.0, u16::MAX),
+            Err(LevelError::Reversed)
+        );
+        assert_eq!(
+            levels_lut_u16(0, 100, f64::NAN, u16::MAX),
+            Err(LevelError::NotFinite)
+        );
+        assert_eq!(levels_lut_u16(0, 40, 1.0, 50), Err(LevelError::OutOfRange));
     }
 
     #[test]

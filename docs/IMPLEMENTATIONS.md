@@ -238,8 +238,8 @@ leveled = core.nimages.Levels(
 ```
 
 When `use_props=True`, the filter reads `NImagesBlackLevel` and
-`NImagesWhiteLevel` from the current input frame. A 256-entry LUT can be built
-per frame; this cost is negligible relative to scanning and writing the image.
+`NImagesWhiteLevel` from the current input frame. For 8-bit frames it uses the
+existing 256-entry LUT; for wider integer frames it uses a native-range LUT.
 
 ### 5.4 `Posterize`
 
@@ -247,13 +247,10 @@ per frame; this cost is negligible relative to scanning and writing the image.
 posterized = core.nimages.Posterize(clip, bits=4)
 ```
 
-The first release accepts `GRAY8`, requires `bits` in `1..=8`, disables
-dithering, and returns `GRAY8`.
-
-The behavior for future RGB input must be explicit. To match the Python
-function exactly, an RGB input would first be converted to gray and the output
-would be grayscale. Applying posterization independently to RGB planes is a
-different operation and should use a different option or filter name.
+`Posterize` accepts integer Gray, RGB, and YUV formats from 8 through 16 bits.
+It requires `bits` in `1..=sample_depth`, disables dithering, and maps every
+plane independently over its full native sample range. RGB input is not
+converted to gray.
 
 Peak analysis and levels deliberately remain separate. Users should compose
 `PeakStats` and `Levels(use_props=True)` when automatic per-frame levels are
@@ -305,14 +302,9 @@ selection near bin boundaries.
 - `GRAYS` and `RGBS` float processing for HDRI-like levels.
 - Dynamic/variable-format clip handling.
 
-For higher-depth peak detection, choose and document one of these policies:
-
-1. Quantize input values into the same 256 analysis bins and continue returning
-   8-bit-equivalent black and white values.
-2. Use one bin per native integer sample and return native levels.
-
-The second option is more precise; the first is more compatible with the
-existing Python algorithm.
+For higher-depth peak detection, use one bin per native integer sample and
+return native levels. This is more precise than quantizing into 256 bins. Keep
+the existing `GRAY8` binning, properties, and output unchanged.
 
 ## 7. Peak detection algorithm
 
@@ -658,10 +650,85 @@ the frame evaluation.
 
 ### Milestone 6: Higher precision and color
 
-- Add integer depths above 8-bit.
-- Add float HDRI-like levels.
-- Add RGB input and explicit plane behavior.
-- Benchmark scalar LUT application before considering SIMD.
+M6 extends the existing filters without changing their `GRAY8` results or the
+current 8-bit argument meanings. RGB and YUV already work for 8-bit
+`Levels` and `Posterize`; M6 extends their per-plane behavior to higher sample
+depths and adds a separate floating-point path for `Levels`.
+
+The current implementation increment extends `Levels` and `Posterize` to
+integer formats through 16 bits. Native-value analysis and floating-point
+`Levels` remain to be implemented.
+
+#### Proposed scope
+
+- Extend `Levels` and `Posterize` to integer samples through 16 bits. `bits`
+  ranges from 1 through the input sample depth, and posterized values span the
+  full native sample range.
+- Extend `PeakStats` and `PeakGrayShades` to Gray integer samples through 16
+  bits. Use native-value histogram bins and keep property values in native code
+  units. This chooses precision over compatibility with the old 256-bin
+  analysis policy for new formats; `GRAY8` properties remain unchanged.
+- Extend `Levels` to `GRAYS` and `RGBS` with per-sample floating-point math.
+  Do not quantize float samples through an 8-bit or 16-bit lookup table. Float
+  `Posterize` and float peak analysis stay out of M6.
+- Process color components independently. Do not add implicit RGB-to-gray or
+  YUV-to-RGB conversion.
+- Keep SIMD out of the first implementation. Benchmark the scalar paths before
+  proposing it.
+
+#### M6 decisions
+
+- Keep `upper_limit` in its current 8-bit-equivalent units and scale it to the
+  native integer range as `round_ties_even(upper_limit * max_sample / 255)`.
+  This preserves the existing default's relative search range and leaves the
+  `GRAY8` behavior unchanged. At 16 bits, the default 60 becomes 15420.
+- Keep integer `black`, `white`, and `peak_offset` in native code units above
+  8 bits. For float `Levels`, choose typed float endpoint arguments that do not
+  change the existing integer arguments. Use `black_float` and `white_float`.
+- Validate finite float endpoints with `black_float < white_float` and finite
+  positive `gamma`. Map values below/above the endpoints to 0/1. NaN sample
+  handling is not a current requirement; the existing 8-bit path cannot receive
+  NaN samples.
+- VapourSynth carries alpha as a separate clip/output, not as a fourth plane in
+  an RGB video format. M6 operates on the planes in the input video format; it
+  does not add alpha-specific arguments.
+
+#### Implementation sequence
+
+1. Update the public argument and property tables to match the decisions above.
+2. Add pure sample-level integer and float operations outside the VapourSynth
+   filter layer. Keep the 8-bit implementations as compatibility paths until
+   exhaustive comparison proves the shared implementation is byte-identical.
+3. Add stride-aware 16-bit plane reads and writes. Use the frame's sample width,
+   plane dimensions, and stride; never treat 16-bit samples as individual
+   bytes.
+4. Extend Gray analyzers with native-value histograms and frame properties.
+   Preserve per-frame independence and the existing threshold and peak rules.
+5. Extend integer mapping filters to 9–16-bit Gray, RGB, and YUV formats, then
+   add `GRAYS` and `RGBS` support to `Levels`.
+6. Add integration coverage for real plugin frames and run the existing 8-bit
+   golden and concurrency checks unchanged.
+7. Benchmark scalar 8-bit LUT, 16-bit LUT, and float paths on representative
+   clips. Consider SIMD only if the scalar measurements show a meaningful
+   bottleneck.
+
+#### M6 test plan
+
+- Keep every existing 8-bit golden output unchanged.
+- Test 16-bit endpoints, full-scale mapping, monotonicity, gamma, values around
+  black/white, and posterization to exactly `2 ** bits` output levels.
+- Test peak selection and shade properties at values above 255, including
+  peaks near 0 and the native maximum, tied peaks, empty regions, and threshold
+  boundaries.
+- Test odd-width `GRAY16`, `RGB48`, and subsampled `YUV420P16` frames with
+  stride padding and distinct plane values. Verify pixels outside each plane's
+  active row are neither read nor written.
+- Test `GRAYS` and `RGBS` with fractional samples, endpoint clipping, gamma,
+  and multiple consecutive `Levels` operations.
+- Test property preservation through the built plugin, including concurrent,
+  repeated, and out-of-order frame requests.
+- Compare scalar performance with the current 8-bit path and record the tested
+  frame sizes and formats before considering SIMD.
 
 ## 13. Test plan
 

@@ -14,8 +14,10 @@ a rust vapoursynth plugin that analyzes and manipulates images.
   and `Levels` can consume it
 - significant gray shades as parallel property arrays, binned over the real
   `0..=255` range
-- levels matching the ImageMagick `-level` curve, built as a 256-entry table
-- posterization to any depth from 1 to 8 bits, without dithering
+- levels matching the ImageMagick `-level` curve for integer samples through
+  16 bits
+- posterization to any depth from 1 through the input sample depth, without
+  dithering
 - automatic gamma derived from the detected black point
 
 ## requirements
@@ -23,8 +25,9 @@ a rust vapoursynth plugin that analyzes and manipulates images.
 - VapourSynth R79 or newer
 - Python 3.12 or newer when installing the wheel
 - Rust 1.88 or newer when building from source
-- 8 bit integer input. `PeakStats` and `PeakGrayShades` need a Gray clip;
-  `Levels` and `Posterize` take Gray, RGB or YUV
+- `PeakStats` and `PeakGrayShades` currently need a Gray 8 bit integer clip;
+  `Levels` and `Posterize` take Gray, RGB or YUV integer samples from 8 to 16
+  bits
 - a clip whose dimensions are not known until a frame is asked for, such as
   `imgseqs.Read(..., mismatch=True)` over pages of different sizes
 - normalize an image sequence as in [use](#use) below
@@ -174,33 +177,33 @@ leveled = core.nimages.Levels(stats, use_props=True, peak_offset=0, auto_gamma=T
 | argument | default | meaning |
 | --- | --- | --- |
 | `black` | `0` | black point, in source sample units |
-| `white` | `255` | white point, in source sample units |
+| `white` | sample maximum | white point, in source sample units (`255` for 8 bit) |
 | `gamma` | `1.0` | gamma of the curve |
 | `use_props` | `false` | read `NImagesBlackLevel` and `NImagesWhiteLevel` from each input frame instead |
 | `peak_offset` | `0` | added to the black point, in source sample units |
 | `auto_gamma` | `false` | derive gamma from the effective black point, ignoring `gamma` |
 | `debug` | `false` | log the resolved curve and each frame's stage timings |
 
-for an input `x`, black `b`, white `w` and output maximum `255`:
+for an input `x`, black `b`, white `w` and sample maximum `Q`:
 
 ```text
 x < b  -> 0
-x > w  -> 255
-else   -> round(255 * ((x - b) / (w - b)) ** (1 / gamma))
+x > w  -> Q
+else   -> round(Q * ((x - b) / (w - b)) ** (1 / gamma))
 ```
 
 rounding is ties-to-even at every step, matching the pillow path. `peak_offset`
 is a code-value offset, so `peak_offset=1` on `black=12` levels from 13 rather
 than from one percentage point, which is about 2.55 code values.
 
-`auto_gamma` uses `round(1 / (ln(0.5) / ln((0.5 - b/255) / (1 - b/255))), 2)`.
-that expression is undefined for a black point of 128 or more, so the filter
-rejects one instead of producing NaN.
+`auto_gamma` normalizes the black point by `Q` before applying its formula. the
+expression is undefined at or above half the sample range, so the filter rejects
+such a black point.
 
 ### `Posterize`
 
 maps every plane of each frame to `2 ** bits` evenly spaced values, without
-dithering. Like `Levels` it takes any 8 bit integer family.
+dithering. Like `Levels` it takes 8 to 16 bit integer Gray, RGB or YUV formats.
 
 ```python
 posterized = core.nimages.Posterize(clip, bits=4)
@@ -212,24 +215,24 @@ first, as in [use](#use) above.
 
 | argument | default | meaning |
 | --- | --- | --- |
-| `bits` | required | number of bits, from 1 to 8 |
+| `bits` | required | number of bits, from 1 through the input sample depth |
 | `use_props` | `false` | read `NImagesGrayShades` from each input frame instead, this is the same as auto bits detection. |
 | `debug` | `false` | log the resolved depth and each frame's stage timings |
 
-`bits=8` is the identity. the mapping is
+`bits` equal to the input sample depth is the identity. the mapping uses the
+full native sample maximum `Q`:
 
 ```text
 colors = 2 ** bits
-level  = round(x * (colors - 1) / 255)
-out    = round(level * 255 / (colors - 1))
+level  = round(x * (colors - 1) / Q)
+out    = round(level * Q / (colors - 1))
 ```
 
 the pillow path follows this with `quantize(colors, dither=NONE)`, which is
 provably redundant here: the mapping already produces exactly `colors` distinct
 values, and pillow's quantized output is byte-identical to its input.
 
-**note**: when `bits` or detected shades are 8 bits, the frame would just be
-returned unchanged.
+**note**: when `bits` equals the sample depth, the frame is returned unchanged.
 
 ### debug
 
