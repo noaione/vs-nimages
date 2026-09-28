@@ -213,7 +213,7 @@ first, as in [use](#use) above.
 | argument | default | meaning |
 | --- | --- | --- |
 | `bits` | required | number of bits, from 1 to 8 |
-| `use_props` | `false` | read `NImagesGrayShades` from each input frame instead |
+| `use_props` | `false` | read `NImagesGrayShades` from each input frame instead, this is the same as auto bits detection. |
 | `debug` | `false` | log the resolved depth and each frame's stage timings |
 
 `bits=8` is the identity. the mapping is

@@ -203,10 +203,6 @@ fn resolve_from_properties(frame: &VideoFrame) -> Result<ResolvedBits> {
 
 fn resolve_from_bits(bits: u8, whence: &str) -> Result<ResolvedBits> {
     match bits {
-        0 => Ok(ResolvedBits {
-            table: TABLE_BITS_1,
-            bits: 1,
-        }),
         1 => Ok(ResolvedBits {
             table: TABLE_BITS_1,
             bits: 1,
