@@ -16,8 +16,6 @@
 //! values, and Pillow's quantized output is byte-identical to its input. See
 //! `IMPLEMENTATIONS.md` §4.4 and `docs/FINDINGS.md` §6.1.
 
-use crate::round::to_u8;
-
 /// The smallest number of bits the filter accepts.
 pub const MIN_BITS: u8 = 1;
 /// The largest number of bits the filter accepts.
@@ -27,20 +25,37 @@ pub const MAX_BITS: u8 = 8;
 ///
 /// Returns [`None`] when `bits` is outside `1..=8`.
 #[must_use]
-pub fn posterize_lut(bits: u8) -> Option<[u8; 256]> {
-    if !(MIN_BITS..=MAX_BITS).contains(&bits) {
+pub const fn posterize_lut(bits: u8) -> Option<[u8; 256]> {
+    if bits < MIN_BITS || bits > MAX_BITS {
         return None;
     }
 
-    let levels = ((1u32 << bits) - 1) as f64;
+    let levels = (1u32 << bits) - 1;
     let mut table = [0u8; 256];
+    let mut value = 0u32;
 
-    for (value, slot) in table.iter_mut().enumerate() {
-        let level = to_u8(value as f64 * levels / 255.0) as f64;
-        *slot = to_u8(level * 255.0 / levels);
+    while value < 256 {
+        let level = round_ratio_ties_even(value * levels, 255);
+        table[value as usize] = round_ratio_ties_even(level * 255, levels) as u8;
+        value += 1;
     }
 
     Some(table)
+}
+
+/// Rounds a nonnegative rational number to its nearest integer, with ties to even.
+const fn round_ratio_ties_even(numerator: u32, denominator: u32) -> u32 {
+    let quotient = numerator / denominator;
+    let remainder = numerator % denominator;
+    let doubled_remainder = remainder * 2;
+
+    if doubled_remainder > denominator
+        || (doubled_remainder == denominator && !quotient.is_multiple_of(2))
+    {
+        quotient + 1
+    } else {
+        quotient
+    }
 }
 
 #[cfg(test)]

@@ -10,7 +10,7 @@ use std::ffi::{CStr, c_void};
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
-use vapoursynth4_rs::frame::{FrameContext, VideoFrame};
+use vapoursynth4_rs::frame::{Frame, FrameContext, VideoFrame};
 use vapoursynth4_rs::map::MapRef;
 use vapoursynth4_rs::node::{Filter, Node, VideoNode};
 use vapoursynth4_rs::{core::CoreRef, ffi, key};
@@ -23,11 +23,33 @@ use super::{
     map_frame, read_clip, read_int, report_settings_once,
 };
 
+// Hardcoded table
+const TABLE_BITS_1: [u8; 256] = posterize_lut(1).unwrap();
+const TABLE_BITS_2: [u8; 256] = posterize_lut(2).unwrap();
+const TABLE_BITS_3: [u8; 256] = posterize_lut(3).unwrap();
+const TABLE_BITS_4: [u8; 256] = posterize_lut(4).unwrap();
+const TABLE_BITS_5: [u8; 256] = posterize_lut(5).unwrap();
+const TABLE_BITS_6: [u8; 256] = posterize_lut(6).unwrap();
+const TABLE_BITS_7: [u8; 256] = posterize_lut(7).unwrap();
+const TABLE_BITS_8: [u8; 256] = posterize_lut(8).unwrap();
+
+/// A posterization operation, fixed by bits or automatically inferred from gray shades
+enum Bits {
+    /// A fixed number of bits, as specified by the caller.
+    Fixed(u8),
+    /// The number of bits to use, inferred from the gray shades of each frame.
+    FromShades,
+}
+
+struct ResolvedBits {
+    bits: u8,
+    table: [u8; 256],
+}
+
 /// Maps each frame to `2^bits` evenly spaced gray values, without dithering.
 pub struct Posterize {
     source: VideoNode,
-    table: [u8; 256],
-    bits: u8,
+    bits: Bits,
     debug: bool,
     /// Set once the settings line has been written for this instance.
     reported: AtomicBool,
@@ -39,7 +61,7 @@ impl Filter for Posterize {
     type FilterData = ();
 
     const NAME: &'static CStr = c"Posterize";
-    const ARGS: &'static CStr = c"clip:vnode;bits:int;debug:int:opt;";
+    const ARGS: &'static CStr = c"clip:vnode;bits:int:opt;use_props:int:opt;debug:int:opt;";
     const RETURN_TYPE: &'static CStr = c"clip:vnode;";
 
     fn create(
@@ -51,19 +73,29 @@ impl Filter for Posterize {
         let source = read_clip(&input, "Posterize")?;
         let info = checked_info(&source, "Posterize", Accept::Integer8)?;
 
-        let bits = read_int(&input, key!(c"bits"))?.ok_or_else(|| {
-            NImagesError::new(format!(
-                "Posterize: bits is required, and must be between {MIN_BITS} and {MAX_BITS}"
-            ))
-        })?;
-        let (bits, table) = match u8::try_from(bits).ok().and_then(posterize_lut) {
-            Some(table) => (bits as u8, table),
-            None => {
-                return Err(NImagesError::new(format!(
-                    "Posterize: bits must be between {MIN_BITS} and {MAX_BITS}, got {bits}"
-                )));
-            }
+        let use_props = read_int(&input, key!(c"use_props"))?.unwrap_or(0) != 0;
+        let bits = if use_props {
+            Bits::FromShades
+        } else {
+            let bpc = read_int(&input, key!(c"bits"))?.ok_or_else(|| {
+                NImagesError::new(format!(
+                    "Posterize: bits is required, and must be between {MIN_BITS} and {MAX_BITS}"
+                ))
+            })?;
+
+            // cast from i64 to u8
+            let bpc_u8 = match u8::try_from(bpc) {
+                Ok(bits) => bits,
+                Err(_) => {
+                    return Err(NImagesError::new(format!(
+                        "Posterize: bits must be between {MIN_BITS} and {MAX_BITS}, got {bpc}"
+                    )));
+                }
+            };
+
+            Bits::Fixed(bpc_u8)
         };
+
         let debug = read_int(&input, key!(c"debug"))?.unwrap_or(0) != 0;
 
         let dependency = source.as_ptr();
@@ -74,7 +106,6 @@ impl Filter for Posterize {
             &info,
             Self {
                 source,
-                table,
                 bits,
                 debug,
                 reported: AtomicBool::new(false),
@@ -103,6 +134,11 @@ impl Filter for Posterize {
                 let input = self.source.get_frame_filter(n, &mut frame_ctx);
                 check_frame_format(&input, "Posterize", Accept::Integer8)?;
 
+                let resolved = match self.bits {
+                    Bits::Fixed(bits) => resolve_from_bits(bits, "bits=...")?,
+                    Bits::FromShades => resolve_from_properties(&input)?,
+                };
+
                 let settings = describe_frame(&input);
                 report_settings_once(
                     self.debug,
@@ -110,20 +146,101 @@ impl Filter for Posterize {
                     &mut core,
                     format_args!(
                         "Posterize: bits={} colors={} input={settings}",
-                        self.bits,
-                        1u32 << self.bits
+                        resolved.bits,
+                        1u32 << resolved.bits
                     ),
                 );
 
+                // skip if 8bpc?
+                if resolved.bits == 8 {
+                    return Ok(Some(input));
+                }
+
                 let mark = Instant::now();
-                let output = map_frame(&core, &input, &self.table)?;
+                let output = map_frame(&core, &input, &resolved.table)?;
                 trace.mark("map", mark);
 
-                trace.emit(&mut core, n, format_args!("bits={} ", self.bits));
+                trace.emit(&mut core, n, format_args!("bits={} ", resolved.bits));
 
                 Ok(Some(output))
             }
             ffi::VSActivationReason::Error => Err(input_failed("Posterize")),
         }
+    }
+}
+
+/// Resolves the lookup table for one frame from `PeakGrayShades` properties.
+fn resolve_from_properties(frame: &VideoFrame) -> Result<ResolvedBits> {
+    let properties = frame
+        .properties()
+        .ok_or_else(|| NImagesError::new("Posterize: the input frame holds no properties"))?;
+    let shades = properties
+        .get_int_array(key!(c"NImagesGrayShades"))
+        .map_err(|error| {
+            NImagesError::new(format!(
+                "Posterize(use_props=True) needs NImagesGrayShades on the input frame, which \
+                 PeakGrayShades writes; {error}"
+            ))
+        })?;
+
+    let shade_count = shades.len();
+    if !(1..=256).contains(&shade_count) {
+        return Err(NImagesError::new(format!(
+            "Posterize(use_props=True) needs between 1 and 256 values in \
+             NImagesGrayShades, got {shade_count}"
+        )));
+    }
+
+    // Pick the smallest power-of-two level count that can cover all shades.
+    let bits = if shade_count <= 2 {
+        MIN_BITS
+    } else {
+        (usize::BITS - (shade_count - 1).leading_zeros()) as u8
+    };
+
+    resolve_from_bits(bits, "use_props=true")
+}
+
+fn resolve_from_bits(bits: u8, whence: &str) -> Result<ResolvedBits> {
+    match bits {
+        0 => Ok(ResolvedBits {
+            table: TABLE_BITS_1,
+            bits: 1,
+        }),
+        1 => Ok(ResolvedBits {
+            table: TABLE_BITS_1,
+            bits: 1,
+        }),
+        2 => Ok(ResolvedBits {
+            table: TABLE_BITS_2,
+            bits: 2,
+        }),
+        3 => Ok(ResolvedBits {
+            table: TABLE_BITS_3,
+            bits: 3,
+        }),
+        4 => Ok(ResolvedBits {
+            table: TABLE_BITS_4,
+            bits: 4,
+        }),
+        5 => Ok(ResolvedBits {
+            table: TABLE_BITS_5,
+            bits: 5,
+        }),
+        6 => Ok(ResolvedBits {
+            table: TABLE_BITS_6,
+            bits: 6,
+        }),
+        7 => Ok(ResolvedBits {
+            table: TABLE_BITS_7,
+            bits: 7,
+        }),
+        8 => Ok(ResolvedBits {
+            table: TABLE_BITS_8,
+            bits: 8,
+        }),
+        other => Err(NImagesError::new(format!(
+            "Posterize({whence}): needs between 1 and 8 bpc, got {other} instead"
+        ))),
     }
 }

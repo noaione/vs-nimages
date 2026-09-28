@@ -213,6 +213,7 @@ first, as in [use](#use) above.
 | argument | default | meaning |
 | --- | --- | --- |
 | `bits` | required | number of bits, from 1 to 8 |
+| `use_props` | `false` | read `NImagesGrayShades` from each input frame instead |
 | `debug` | `false` | log the resolved depth and each frame's stage timings |
 
 `bits=8` is the identity. the mapping is
@@ -226,6 +227,9 @@ out    = round(level * 255 / (colors - 1))
 the pillow path follows this with `quantize(colors, dither=NONE)`, which is
 provably redundant here: the mapping already produces exactly `colors` distinct
 values, and pillow's quantized output is byte-identical to its input.
+
+**note**: when `bits` or detected shades are 8 bits, the frame would just be
+returned unchanged.
 
 ### debug
 
