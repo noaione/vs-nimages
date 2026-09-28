@@ -77,7 +77,5 @@ include = [
     "hatch_build.py",
     "pyproject.toml",
     "README.md",
-    "CHANGELOG.md",
-    "tools/create-changelog.py",
     "LICENSE",
 ]

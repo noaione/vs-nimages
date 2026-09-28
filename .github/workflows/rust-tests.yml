@@ -1,0 +1,58 @@
+name: rust tests
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: rust-tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: rust checks and VapourSynth integration
+    runs-on: ubuntu-26.04
+
+    steps:
+      - name: check out source
+        uses: actions/checkout@v7
+
+      - name: set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: check formatting
+        run: cargo fmt --check
+
+      - name: run Clippy
+        run: cargo clippy --all-targets --locked
+
+      - name: run Rust tests
+        run: cargo test --locked
+
+      - name: build and install plugin with test dependencies
+        run: uv sync --locked --extra dev --extra dev-tests
+
+      - name: run VapourSynth integration checks
+        run: .venv/bin/python tests/check-nimages.py
