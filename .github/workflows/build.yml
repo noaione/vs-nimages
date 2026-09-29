@@ -43,7 +43,7 @@ jobs:
         run: |
           set -euo pipefail
           export PATH="/opt/python/cp312-cp312/bin:$PATH"
-          python -m pip install --upgrade build auditwheel numpy "VapourSynth>=79,<81"
+          python -m pip install --upgrade build auditwheel numpy "VapourSynth>=79,<81" "vapoursynth-imageseqs>=0.2.0"
           python -m build --wheel --outdir dist
           auditwheel show dist/*.whl
           auditwheel repair --plat manylinux_2_28_x86_64 --wheel-dir repaired dist/*.whl
