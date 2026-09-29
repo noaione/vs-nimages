@@ -350,25 +350,231 @@ impl Workspace {
 
     /// Limits the candidate against the local extremes of the luma plane and
     /// blends it back through the mask, in place.
+    ///
+    /// The window walk is the hot loop. Three whole rows are sliced out once per
+    /// output row so the taps are plain indexing into slices whose length is the
+    /// plane's width, and the two end columns are the only ones that repeat a
+    /// sample. `min` and `max` are exact, so chaining them gives the same window
+    /// as walking it.
     fn blend(&mut self, plane: Plane, overshoot: f32) {
+        let width = plane.width;
+        let height = plane.height;
+        if width == 0 || height == 0 {
+            return;
+        }
         let length = self.length;
-        for row in 0..plane.height {
-            for column in 0..plane.width {
-                let index = row * plane.width + column;
-                let value = self.luma[index];
-                let (low, high) = local_extremes(&self.luma[..length], plane, column, row);
-                let limited = clamp(self.first[index], low - overshoot, high + overshoot);
-                self.first[index] = clamp(
-                    value + self.third[index] * (limited - value),
-                    0.0,
-                    CODE_VALUES,
+
+        #[cfg(target_arch = "x86_64")]
+        if width > 2 && is_x86_feature_detected!("avx2") {
+            // SAFETY: `avx2` was just detected, and the three slices are all
+            // `length` long, which is the plane the vector loop walks.
+            unsafe {
+                blend_avx2(
+                    &self.luma[..length],
+                    &self.third[..length],
+                    &mut self.first[..length],
+                    plane,
+                    overshoot,
                 );
+            }
+            return;
+        }
+
+        let luma = &self.luma[..length];
+        let mask = &self.third[..length];
+
+        for row in 0..height {
+            let start = row * width;
+            let above = row.saturating_sub(1) * width;
+            let below = (row + 1).min(height - 1) * width;
+            let (Some(above), Some(current), Some(below), Some(mask_row)) = (
+                luma.get(above..above + width),
+                luma.get(start..start + width),
+                luma.get(below..below + width),
+                mask.get(start..start + width),
+            ) else {
+                return;
+            };
+            let Some(target) = self.first.get_mut(start..start + width) else {
+                return;
+            };
+
+            for column in 0..width {
+                blend_sample(above, current, below, mask_row, target, column, overshoot);
             }
         }
     }
 }
 
 /// Grows `buffer` to at least `length` samples without ever shrinking it.
+/// One sample of the scalar blend.
+///
+/// The two end columns and the tail of a row go through this on both paths, so
+/// the vector path cannot drift from the scalar one at the edges.
+#[inline]
+fn blend_sample(
+    above: &[f32],
+    current: &[f32],
+    below: &[f32],
+    mask_row: &[f32],
+    target: &mut [f32],
+    column: usize,
+    overshoot: f32,
+) {
+    let left = column.saturating_sub(1);
+    let right = (column + 1).min(current.len().saturating_sub(1));
+    let low = above[left]
+        .min(above[column])
+        .min(above[right])
+        .min(current[left])
+        .min(current[column])
+        .min(current[right])
+        .min(below[left])
+        .min(below[column])
+        .min(below[right]);
+    let high = above[left]
+        .max(above[column])
+        .max(above[right])
+        .max(current[left])
+        .max(current[column])
+        .max(current[right])
+        .max(below[left])
+        .max(below[column])
+        .max(below[right]);
+    let value = current[column];
+    let limited = clamp(target[column], low - overshoot, high + overshoot);
+    target[column] = clamp(
+        value + mask_row[column] * (limited - value),
+        0.0,
+        CODE_VALUES,
+    );
+}
+
+/// The blend, eight columns at a time.
+///
+/// Every operation is the one `blend_sample` applies to the same column in the
+/// same order: the same nine taps into the same `min`/`max` chain, the same
+/// clamp, the same mix. Nothing is reassociated and no `fmadd` contracts a
+/// multiply into an add, so the two paths produce the same bytes.
+///
+/// The two end columns repeat a sample and the tail of a row is shorter than
+/// eight, so both go through `blend_sample`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[expect(
+    unsafe_op_in_unsafe_fn,
+    reason = "the body is one unsafe operation, and it is entered only after the feature is detected"
+)]
+unsafe fn blend_avx2(luma: &[f32], mask: &[f32], first: &mut [f32], plane: Plane, overshoot: f32) {
+    use std::arch::x86_64::*;
+
+    let width = plane.width;
+    let height = plane.height;
+    let overshoot8 = _mm256_set1_ps(overshoot);
+    let ceiling = _mm256_set1_ps(CODE_VALUES);
+    let zero = _mm256_setzero_ps();
+
+    for row in 0..height {
+        let start = row * width;
+        let above_start = row.saturating_sub(1) * width;
+        let below_start = (row + 1).min(height - 1) * width;
+        let (Some(above), Some(current), Some(below), Some(mask_row), Some(target)) = (
+            luma.get(above_start..above_start + width),
+            luma.get(start..start + width),
+            luma.get(below_start..below_start + width),
+            mask.get(start..start + width),
+            first.get_mut(start..start + width),
+        ) else {
+            return;
+        };
+
+        blend_sample(above, current, below, mask_row, target, 0, overshoot);
+
+        // SAFETY: the row slices are exactly `width` long, the loop keeps
+        // widest load and every store inside the row.
+        let mut column = 1;
+        while column + 8 < width {
+            let up_left = _mm256_loadu_ps(above.as_ptr().add(column - 1));
+            let up_mid = _mm256_loadu_ps(above.as_ptr().add(column));
+            let up_right = _mm256_loadu_ps(above.as_ptr().add(column + 1));
+            let mid_left = _mm256_loadu_ps(current.as_ptr().add(column - 1));
+            let mid_mid = _mm256_loadu_ps(current.as_ptr().add(column));
+            let mid_right = _mm256_loadu_ps(current.as_ptr().add(column + 1));
+            let low_left = _mm256_loadu_ps(below.as_ptr().add(column - 1));
+            let low_mid = _mm256_loadu_ps(below.as_ptr().add(column));
+            let low_right = _mm256_loadu_ps(below.as_ptr().add(column + 1));
+
+            let mut low = _mm256_min_ps(up_left, up_mid);
+            low = _mm256_min_ps(low, up_right);
+            low = _mm256_min_ps(low, mid_left);
+            low = _mm256_min_ps(low, mid_mid);
+            low = _mm256_min_ps(low, mid_right);
+            low = _mm256_min_ps(low, low_left);
+            low = _mm256_min_ps(low, low_mid);
+            low = _mm256_min_ps(low, low_right);
+            let mut high = _mm256_max_ps(up_left, up_mid);
+            high = _mm256_max_ps(high, up_right);
+            high = _mm256_max_ps(high, mid_left);
+            high = _mm256_max_ps(high, mid_mid);
+            high = _mm256_max_ps(high, mid_right);
+            high = _mm256_max_ps(high, low_left);
+            high = _mm256_max_ps(high, low_mid);
+            high = _mm256_max_ps(high, low_right);
+
+            let value = _mm256_loadu_ps(current.as_ptr().add(column));
+            let candidate = _mm256_loadu_ps(target.as_ptr().add(column));
+            let limited = clamp8(
+                candidate,
+                _mm256_sub_ps(low, overshoot8),
+                _mm256_add_ps(high, overshoot8),
+            );
+            let blended = _mm256_add_ps(
+                value,
+                _mm256_mul_ps(
+                    _mm256_loadu_ps(mask_row.as_ptr().add(column)),
+                    _mm256_sub_ps(limited, value),
+                ),
+            );
+            let bounded = clamp8(blended, zero, ceiling);
+            _mm256_storeu_ps(target.as_mut_ptr().add(column), bounded);
+
+            column += 8;
+        }
+        while column < width - 1 {
+            blend_sample(above, current, below, mask_row, target, column, overshoot);
+            column += 1;
+        }
+        blend_sample(
+            above,
+            current,
+            below,
+            mask_row,
+            target,
+            width - 1,
+            overshoot,
+        );
+    }
+}
+
+/// `clamp` in eight lanes.
+///
+/// `min` then `max` is the scalar comparison chain without the branches, but it
+/// snaps a `NaN` to a bound where the scalar form lets it through, so a `NaN`
+/// value is blended back over the result.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn clamp8(
+    value: std::arch::x86_64::__m256,
+    low: std::arch::x86_64::__m256,
+    high: std::arch::x86_64::__m256,
+) -> std::arch::x86_64::__m256 {
+    use std::arch::x86_64::*;
+
+    let bounded = _mm256_max_ps(_mm256_min_ps(value, high), low);
+    let unordered = _mm256_cmp_ps(value, value, _CMP_UNORD_Q);
+    _mm256_blendv_ps(bounded, value, unordered)
+}
 fn ensure(buffer: &mut Vec<f32>, length: usize) -> Result<(), DeblurError> {
     if buffer.len() >= length {
         return Ok(());
@@ -458,6 +664,13 @@ fn blur(
             let Some(tap_row) = temp.get(bump..bump + width) else {
                 return;
             };
+            #[cfg(target_arch = "x86_64")]
+            if is_x86_feature_detected!("avx2") {
+                // SAFETY: `avx2` was just detected, and both rows are `width`
+                // long, so every eight lane load and store stays inside them.
+                unsafe { accumulate_avx2(target_row, tap_row, *weight) };
+                continue;
+            }
             for (value, tap) in target_row.iter_mut().zip(tap_row) {
                 *value += tap * weight;
             }
@@ -465,8 +678,42 @@ fn blur(
     }
 }
 
+/// `target[i] += tap[i] * weight`, eight lanes at a time.
+///
+/// The accumulator is the one the scalar loop keeps and the product and the sum
+/// are separate instructions, so no `fmadd` contracts them and the bytes do not
+/// move. This is the vertical pass, which is elementwise down a row; the
+/// horizontal pass is a dot product of runtime length and has to stay scalar.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[expect(
+    unsafe_op_in_unsafe_fn,
+    reason = "the body is one unsafe operation, and it is entered only after the feature is detected"
+)]
+unsafe fn accumulate_avx2(target: &mut [f32], tap: &[f32], weight: f32) {
+    use std::arch::x86_64::*;
+
+    let weight8 = _mm256_set1_ps(weight);
+    let mut column = 0;
+    while column + 8 <= target.len() {
+        let sum = _mm256_add_ps(
+            _mm256_loadu_ps(target.as_ptr().add(column)),
+            _mm256_mul_ps(_mm256_loadu_ps(tap.as_ptr().add(column)), weight8),
+        );
+        _mm256_storeu_ps(target.as_mut_ptr().add(column), sum);
+        column += 8;
+    }
+    for (value, tap) in target[column..].iter_mut().zip(&tap[column..]) {
+        *value += tap * weight;
+    }
+}
+
 /// One horizontal pass: the interior reads a bounds-free window and only the
 /// first and last `radius` samples reflect.
+///
+/// Four samples at a time were tried here, to put four independent sum chains in
+/// flight instead of one left fold's single chain. It measured inside the run to
+/// run noise, so the simpler loop is what stayed.
 fn blur_row(source: &[f32], target: &mut [f32], weights: &[f32], radius: usize) {
     let width = source.len();
     let interior_start = radius.min(width);
@@ -527,65 +774,180 @@ fn reflect(index: isize, length: usize) -> usize {
 /// The Sobel kernels are the unnormalized ones scipy uses, so a full black to
 /// white step responds with `4`; dividing by `SOBEL_SPAN` puts the magnitude in
 /// 8-bit levels per pixel, which is the unit `threshold` is in.
+///
+/// Three rows are sliced out once per output row, so the nine taps are direct
+/// reads instead of an index computation each.
 fn sobel_mask(base: &[f32], mask: &mut [f32], plane: Plane, threshold: f32) {
+    let width = plane.width;
+    let height = plane.height;
+    if width == 0 || height == 0 {
+        return;
+    }
     let ramp = (RAMP * threshold).max(RAMP_FLOOR);
-    for row in 0..plane.height {
-        for column in 0..plane.width {
-            let index = row * plane.width + column;
-            let (vertical, horizontal) = sobel(base, plane, column, row);
-            let magnitude = vertical.hypot(horizontal) / SOBEL_SPAN;
+
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("avx2") && width > 2 {
+        // SAFETY: `avx2` was just detected, and the three rows are `width` long,
+        // so every eight lane load and store stays inside them.
+        unsafe { sobel_mask_avx2(base, mask, plane, threshold, ramp) };
+        return;
+    }
+
+    for row in 0..height {
+        let start = row * width;
+        let above = row.saturating_sub(1) * width;
+        let below = (row + 1).min(height - 1) * width;
+        let (Some(above), Some(current), Some(below), Some(target)) = (
+            base.get(above..above + width),
+            base.get(start..start + width),
+            base.get(below..below + width),
+            mask.get_mut(start..start + width),
+        ) else {
+            return;
+        };
+
+        for column in 0..width {
+            let left = column.saturating_sub(1);
+            let right = (column + 1).min(width - 1);
+            let (top_left, top_middle, top_right) = (above[left], above[column], above[right]);
+            let (middle_left, middle_right) = (current[left], current[right]);
+            let (bottom_left, bottom_middle, bottom_right) =
+                (below[left], below[column], below[right]);
+
+            let vertical = (bottom_left + 2.0 * bottom_middle + bottom_right)
+                - (top_left + 2.0 * top_middle + top_right);
+            let horizontal = (top_right + 2.0 * middle_right + bottom_right)
+                - (top_left + 2.0 * middle_left + bottom_left);
+            let magnitude = (vertical * vertical + horizontal * horizontal).sqrt() / SOBEL_SPAN;
             let progress = clamp((magnitude - threshold) / ramp, 0.0, 1.0);
-            if let Some(slot) = mask.get_mut(index) {
-                *slot = progress * progress * (3.0 - 2.0 * progress);
-            }
+            target[column] = progress * progress * (3.0 - 2.0 * progress);
         }
     }
 }
 
-/// The two Sobel responses at one sample, with the edge sample repeated.
+/// One sample of the scalar Sobel and smoothstep.
+///
+/// The two end columns and the tail of a row go through this on the vector path,
+/// so it cannot drift from the scalar one at the edges.
 #[inline]
-fn sobel(base: &[f32], plane: Plane, column: usize, row: usize) -> (f32, f32) {
+fn sobel_sample(
+    above: &[f32],
+    current: &[f32],
+    below: &[f32],
+    target: &mut [f32],
+    column: usize,
+    threshold: f32,
+    ramp: f32,
+) {
     let left = column.saturating_sub(1);
-    let right = (column + 1).min(plane.width.saturating_sub(1));
-    let top = row.saturating_sub(1);
-    let bottom = (row + 1).min(plane.height.saturating_sub(1));
-
-    let at = |column: usize, row: usize| -> f32 {
-        base.get(row * plane.width + column).copied().unwrap_or(0.0)
-    };
-    let (top_left, top_middle, top_right) = (at(left, top), at(column, top), at(right, top));
-    let (middle_left, middle_right) = (at(left, row), at(right, row));
-    let (bottom_left, bottom_middle, bottom_right) =
-        (at(left, bottom), at(column, bottom), at(right, bottom));
+    let right = (column + 1).min(current.len().saturating_sub(1));
+    let (top_left, top_middle, top_right) = (above[left], above[column], above[right]);
+    let (middle_left, middle_right) = (current[left], current[right]);
+    let (bottom_left, bottom_middle, bottom_right) = (below[left], below[column], below[right]);
 
     let vertical = (bottom_left + 2.0 * bottom_middle + bottom_right)
         - (top_left + 2.0 * top_middle + top_right);
     let horizontal = (top_right + 2.0 * middle_right + bottom_right)
         - (top_left + 2.0 * middle_left + bottom_left);
-    (vertical, horizontal)
+    let magnitude = (vertical * vertical + horizontal * horizontal).sqrt() / SOBEL_SPAN;
+    let progress = clamp((magnitude - threshold) / ramp, 0.0, 1.0);
+    target[column] = progress * progress * (3.0 - 2.0 * progress);
 }
 
-/// The 3x3 minimum and maximum of `source` around one sample, with the edge
-/// sample repeated.
-#[inline]
-fn local_extremes(source: &[f32], plane: Plane, column: usize, row: usize) -> (f32, f32) {
-    let left = column.saturating_sub(1);
-    let right = (column + 1).min(plane.width.saturating_sub(1));
-    let top = row.saturating_sub(1);
-    let bottom = (row + 1).min(plane.height.saturating_sub(1));
+/// The Sobel and smoothstep, eight columns at a time.
+///
+/// Every operation is the one `sobel_sample` applies to the same column in the
+/// same order, including the order the three terms of each response are added
+/// in and the division by the ramp. `1 / SOBEL_SPAN` is a power of two, so the
+/// multiply the vector path uses is the same scaling the scalar division is.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[expect(
+    unsafe_op_in_unsafe_fn,
+    reason = "the body is one unsafe operation, and it is entered only after the feature is detected"
+)]
+unsafe fn sobel_mask_avx2(base: &[f32], mask: &mut [f32], plane: Plane, threshold: f32, ramp: f32) {
+    use std::arch::x86_64::*;
 
-    let mut low = f32::INFINITY;
-    let mut high = f32::NEG_INFINITY;
-    for row in top..=bottom {
-        for column in left..=right {
-            let Some(value) = source.get(row * plane.width + column).copied() else {
-                continue;
-            };
-            low = low.min(value);
-            high = high.max(value);
+    let width = plane.width;
+    let height = plane.height;
+    let two = _mm256_set1_ps(2.0);
+    let three = _mm256_set1_ps(3.0);
+    let span = _mm256_set1_ps(1.0 / SOBEL_SPAN);
+    let threshold8 = _mm256_set1_ps(threshold);
+    let ramp8 = _mm256_set1_ps(ramp);
+    let zero = _mm256_setzero_ps();
+    let one = _mm256_set1_ps(1.0);
+
+    for row in 0..height {
+        let start = row * width;
+        let above_start = row.saturating_sub(1) * width;
+        let below_start = (row + 1).min(height - 1) * width;
+        let (Some(above), Some(current), Some(below), Some(target)) = (
+            base.get(above_start..above_start + width),
+            base.get(start..start + width),
+            base.get(below_start..below_start + width),
+            mask.get_mut(start..start + width),
+        ) else {
+            return;
+        };
+
+        sobel_sample(above, current, below, target, 0, threshold, ramp);
+
+        // SAFETY: the row slices are exactly `width` long, and the loop keeps
+        // the widest load and every store inside the row.
+        let mut column = 1;
+        while column + 8 < width {
+            let up_left = _mm256_loadu_ps(above.as_ptr().add(column - 1));
+            let up_mid = _mm256_loadu_ps(above.as_ptr().add(column));
+            let up_right = _mm256_loadu_ps(above.as_ptr().add(column + 1));
+            let mid_left = _mm256_loadu_ps(current.as_ptr().add(column - 1));
+            let mid_right = _mm256_loadu_ps(current.as_ptr().add(column + 1));
+            let low_left = _mm256_loadu_ps(below.as_ptr().add(column - 1));
+            let low_mid = _mm256_loadu_ps(below.as_ptr().add(column));
+            let low_right = _mm256_loadu_ps(below.as_ptr().add(column + 1));
+
+            let vertical = _mm256_sub_ps(
+                _mm256_add_ps(
+                    _mm256_add_ps(low_left, _mm256_mul_ps(low_mid, two)),
+                    low_right,
+                ),
+                _mm256_add_ps(_mm256_add_ps(up_left, _mm256_mul_ps(up_mid, two)), up_right),
+            );
+            let horizontal = _mm256_sub_ps(
+                _mm256_add_ps(
+                    _mm256_add_ps(up_right, _mm256_mul_ps(mid_right, two)),
+                    low_right,
+                ),
+                _mm256_add_ps(
+                    _mm256_add_ps(up_left, _mm256_mul_ps(mid_left, two)),
+                    low_left,
+                ),
+            );
+            let squared = _mm256_add_ps(
+                _mm256_mul_ps(vertical, vertical),
+                _mm256_mul_ps(horizontal, horizontal),
+            );
+            let magnitude = _mm256_mul_ps(_mm256_sqrt_ps(squared), span);
+            let progress = clamp8(
+                _mm256_div_ps(_mm256_sub_ps(magnitude, threshold8), ramp8),
+                zero,
+                one,
+            );
+            let value = _mm256_mul_ps(
+                _mm256_mul_ps(progress, progress),
+                _mm256_sub_ps(three, _mm256_mul_ps(two, progress)),
+            );
+            _mm256_storeu_ps(target.as_mut_ptr().add(column), value);
+
+            column += 8;
         }
+        while column < width - 1 {
+            sobel_sample(above, current, below, target, column, threshold, ramp);
+            column += 1;
+        }
+        sobel_sample(above, current, below, target, width - 1, threshold, ramp);
     }
-    (low, high)
 }
 
 /// Clamps `value` into `[low, high]`, mapping a `NaN` to `low`.
@@ -849,15 +1211,39 @@ mod tests {
     }
 
     #[test]
-    fn the_extremes_are_the_3x3_window_with_a_repeated_edge() {
-        let plane: Vec<f32> = (0..9).map(|value| value as f32).collect();
-        let shape = Plane {
+    fn the_blend_limits_the_candidate_to_the_3x3_window() {
+        // A fully open mask leaves the clamp alone, so a candidate past the
+        // window comes back as the local extreme, with the edge sample
+        // repeated at the border.
+        let plane = Plane {
             width: 3,
             height: 3,
         };
-        assert_eq!(local_extremes(&plane, shape, 0, 0), (0.0, 4.0));
-        assert_eq!(local_extremes(&plane, shape, 2, 2), (4.0, 8.0));
-        assert_eq!(local_extremes(&plane, shape, 1, 1), (0.0, 8.0));
+        let mut workspace = Workspace::new();
+        workspace.prepare(3, 3).expect("sized");
+        for (index, value) in workspace.luma_mut().iter_mut().enumerate() {
+            *value = index as f32;
+        }
+        workspace.third[..9].fill(1.0);
+
+        workspace.first[..9].fill(CODE_VALUES);
+        workspace.blend(plane, 0.0);
+        assert_eq!(
+            workspace.first[..9].to_vec(),
+            vec![4.0, 5.0, 5.0, 7.0, 8.0, 8.0, 7.0, 8.0, 8.0]
+        );
+
+        workspace.first[..9].fill(0.0);
+        workspace.blend(plane, 0.0);
+        assert_eq!(
+            workspace.first[..9].to_vec(),
+            vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 3.0, 3.0, 4.0]
+        );
+
+        // Overshoot widens the window in both directions.
+        workspace.first[..9].fill(CODE_VALUES);
+        workspace.blend(plane, 300.0);
+        assert_eq!(workspace.first[..9].to_vec(), vec![CODE_VALUES; 9]);
     }
 
     #[test]

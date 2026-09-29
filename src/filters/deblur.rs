@@ -348,14 +348,14 @@ impl Convert {
                 let value = if self.float {
                     scaled
                 } else {
-                    scaled.round_ties_even().clamp(0.0, self.max_value)
+                    round_ties_even(scaled).clamp(0.0, self.max_value)
                 };
                 if let Some(target) = row.get_mut(offset) {
                     *target = value as u8;
                 }
             }
             2 => {
-                let value = scaled.round_ties_even().clamp(0.0, self.max_value) as u16;
+                let value = round_ties_even(scaled).clamp(0.0, self.max_value) as u16;
                 if let Some(target) = row.get_mut(offset..offset + 2) {
                     target.copy_from_slice(&value.to_ne_bytes());
                 }
@@ -368,6 +368,19 @@ impl Convert {
             }
         }
     }
+}
+
+/// Rounds to the nearest integer, ties to even, in the two instructions the
+/// FPU already has.
+///
+/// `f64::round_ties_even` needs `roundsd`, which a baseline x86-64 build does
+/// not enable, so it becomes a library call per sample. Adding and subtracting
+/// `2^52` leans on the FPU's own round-to-nearest-even and is exact for every
+/// value this is handed, which is a code value inside `0..=65535`.
+#[inline]
+fn round_ties_even(value: f64) -> f64 {
+    const MAGIC: f64 = 4_503_599_627_370_496.0;
+    (value + MAGIC) - MAGIC
 }
 
 /// Writes the luma the kernels produced back into one plane.

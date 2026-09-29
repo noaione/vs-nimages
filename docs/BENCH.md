@@ -98,27 +98,27 @@ decode instead. read the plugin's `decode + resize` against the reference's
 <!-- bench:start -->
 | pages | workflow | pipeline | decode | resize | analyze | apply | total | per page | peak rss |
 | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 129 | levels (levels) | nmanga | 3.63 s | 0.00 s | 6.27 s | 0.29 s | **10.18 s** | 78.9 ms | 119 MiB |
-| 129 | levels (levels) | vapoursynth | 2.09 s | 0.33 s | 0.50 s | 0.14 s | **3.06 s** | 23.8 ms | 128 MiB |
-| 49 | shades (posterize) | nmanga | 2.38 s | 0.00 s | 12.20 s | 0.00 s | **14.58 s** | 297.5 ms | 146 MiB |
-| 49 | shades (posterize) | vapoursynth | 2.57 s | 0.40 s | 0.88 s | 0.00 s | **3.86 s** | 78.7 ms | 489 MiB |
-| 49 | posterize (posterize) | nmanga | 2.00 s | 0.00 s | 0.00 s | 17.50 s | **19.50 s** | 398.0 ms | 274 MiB |
-| 49 | posterize (posterize) | vapoursynth | 2.42 s | 0.42 s | 0.00 s | 0.26 s | **3.09 s** | 63.1 ms | 511 MiB |
-| 49 | deblur (posterize) | nmanga | 1.99 s | 0.00 s | 0.00 s | 328.74 s | **330.73 s** | 6749.7 ms | 1569 MiB |
-| 49 | deblur (posterize) | vapoursynth | 2.31 s | 0.58 s | 0.00 s | 74.87 s | **77.76 s** | 1586.9 ms | 969 MiB |
-| 49 | deblur-unsharp (posterize) | nmanga | 1.96 s | 0.00 s | 0.00 s | 170.56 s | **172.52 s** | 3520.9 ms | 1569 MiB |
-| 49 | deblur-unsharp (posterize) | vapoursynth | 2.31 s | 0.61 s | 0.00 s | 33.12 s | **36.04 s** | 735.4 ms | 969 MiB |
-| 44 | levels (webp) | nmanga | 11.83 s | 0.00 s | 6.22 s | 0.32 s | **18.36 s** | 417.4 ms | 284 MiB |
-| 44 | levels (webp) | vapoursynth | 7.14 s | 1.37 s | 0.75 s | 0.20 s | **9.46 s** | 215.1 ms | 400 MiB |
+| 129 | levels (levels) | nmanga | 1.90 s | 0.00 s | 4.11 s | 0.22 s | **6.23 s** | 48.3 ms | 119 MiB |
+| 129 | levels (levels) | vapoursynth | 1.92 s | 0.29 s | 0.49 s | 0.12 s | **2.81 s** | 21.8 ms | 128 MiB |
+| 49 | shades (posterize) | nmanga | 1.83 s | 0.00 s | 10.33 s | 0.00 s | **12.16 s** | 248.2 ms | 146 MiB |
+| 49 | shades (posterize) | vapoursynth | 2.06 s | 0.33 s | 0.86 s | 0.00 s | **3.25 s** | 66.3 ms | 489 MiB |
+| 49 | posterize (posterize) | nmanga | 1.90 s | 0.00 s | 0.00 s | 16.50 s | **18.39 s** | 375.4 ms | 274 MiB |
+| 49 | posterize (posterize) | vapoursynth | 2.37 s | 0.39 s | 0.00 s | 0.24 s | **3.00 s** | 61.2 ms | 511 MiB |
+| 49 | deblur (posterize) | nmanga | 1.86 s | 0.00 s | 0.00 s | 309.81 s | **311.67 s** | 6360.6 ms | 1569 MiB |
+| 49 | deblur (posterize) | vapoursynth | 2.01 s | 0.49 s | 0.00 s | 46.86 s | **49.36 s** | 1007.4 ms | 968 MiB |
+| 49 | deblur-unsharp (posterize) | nmanga | 1.85 s | 0.00 s | 0.00 s | 160.10 s | **161.95 s** | 3305.1 ms | 1569 MiB |
+| 49 | deblur-unsharp (posterize) | vapoursynth | 1.98 s | 0.48 s | 0.00 s | 10.97 s | **13.43 s** | 274.1 ms | 969 MiB |
+| 44 | levels (webp) | nmanga | 11.03 s | 0.00 s | 5.68 s | 0.30 s | **17.01 s** | 386.6 ms | 283 MiB |
+| 44 | levels (webp) | vapoursynth | 6.73 s | 1.21 s | 0.73 s | 0.17 s | **8.85 s** | 201.0 ms | 400 MiB |
 
 | pages | workflow | pipeline | speedup | memory ratio | levels agreed |
 | ---: | --- | --- | ---: | ---: | --- |
-| 129 | levels (levels) | vapoursynth vs nmanga | 3.32x | 1.08x | 129/129 |
-| 49 | shades (posterize) | vapoursynth vs nmanga | 3.78x | 3.34x | 49/49 |
-| 49 | posterize (posterize) | vapoursynth vs nmanga | 6.30x | 1.87x | 49/49 |
-| 49 | deblur (posterize) | vapoursynth vs nmanga | 4.25x | 0.62x | 0/0 |
-| 49 | deblur-unsharp (posterize) | vapoursynth vs nmanga | 4.79x | 0.62x | 0/0 |
-| 44 | levels (webp) | vapoursynth vs nmanga | 1.94x | 1.41x | 44/44 |
+| 129 | levels (levels) | vapoursynth vs nmanga | 2.21x | 1.08x | 129/129 |
+| 49 | shades (posterize) | vapoursynth vs nmanga | 3.74x | 3.35x | 49/49 |
+| 49 | posterize (posterize) | vapoursynth vs nmanga | 6.14x | 1.87x | 49/49 |
+| 49 | deblur (posterize) | vapoursynth vs nmanga | 6.31x | 0.62x | 0/0 |
+| 49 | deblur-unsharp (posterize) | vapoursynth vs nmanga | 12.06x | 0.62x | 0/0 |
+| 44 | levels (webp) | vapoursynth vs nmanga | 1.92x | 1.41x | 44/44 |
 <!-- bench:end -->
 
 ## what a webp actually hands out
@@ -214,13 +214,23 @@ and writes straight into the output frame.
 ### deblur
 
 this is the one workflow where the plugin's own work still dominates the wall
-time, because the reference spends seconds per page here: 74.87 s against
-328.74 s over 49 pages, **4.25x** for the deconvolution and **4.79x** for the
-unsharp mask (33.12 s against 170.56 s). every other row is won by the analysis
+time, because the reference spends seconds per page here: 49.36 s against
+311.67 s over 49 pages, **6.31x** for the deconvolution and **12.06x** for the
+unsharp mask (13.43 s against 161.95 s). every other row is won by the analysis
 being an order of magnitude faster.
 
-the unsharp mask is the cheaper operation by a wide margin, 735 ms a page against
-1587 ms, which is what twelve gaussian blurs per page cost against one. it is
+the plugin side of those two rows started this work at 77.76 s and 36.04 s, so the
+kernels are 36% and 63% faster while the reference stayed inside its own run to run
+spread. six passes did it, all recorded in
+[03-deblur-filter.md](improvements/03-deblur-filter.md): reading each window from
+row slices instead of a per-tap helper, `sqrt` instead of the `f32::hypot` libcall,
+a ties-to-even round that does not need `roundsd`, and an AVX2 path for the blend
+stencil that is entered only when `is_x86_feature_detected!` says the feature is
+there, with the scalar loop kept for everything else and the output byte-identical
+either way.
+
+the unsharp mask is the cheaper operation by a wide margin, 274 ms a page against
+1007 ms, which is what twelve gaussian blurs per page cost against one. it is
 also the better relative win, so `method=1` is what a caller who just wants a
 page sharpened should reach for.
 
@@ -228,9 +238,16 @@ where that time goes is not visible in this table: `Deblur` reports `luma`,
 `restore` and `write`, all three of which land in `apply`, and the reference's
 deblur branch times one call, so `apply` is the whole operation on both sides.
 `docs/improvements/03-deblur-filter.md` measured the inside of `restore`
-separately and found the edge mask and the halo clamp are 87% of the unsharp
-mask and 36% of the deconvolution, with the twelve blur passes the other 62%.
-the mask is the bigger lever, which is not where a first look would go.
+separately and found the edge mask and the halo clamp are still 78% of the
+unsharp mask and 28% of the deconvolution, with the twelve blur passes 65% of the
+deconvolution. the mask is the bigger lever, which is not where a first look
+would go.
+
+the per page column is one frame's latency on a quiet machine. a graph that asks
+for several frames gets about nine and a half of them running at once on 12 worker
+threads, measured in [03-deblur-filter.md](improvements/03-deblur-filter.md), so a
+real pipeline sees roughly 9x this throughput while the reference stays single
+threaded.
 
 peak memory runs the other way for once. 969 MiB against the reference's
 1569 MiB is the only row where the plugin is the smaller process: scipy holds

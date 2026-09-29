@@ -310,41 +310,258 @@ and one 5806x4128 spread.
 | `1` unsharp | nmanga `deblur_edge_sharp` | 170.56 s | 172.52 s | 3520.9 ms | 1569 MiB |
 | `1` unsharp | `nimages.Deblur` | 33.12 s | 36.04 s | 735.4 ms | 969 MiB |
 
-The port is 4.25x faster on the deconvolution and 4.79x on the unsharp mask. It is
-also the one workflow where the plugin holds less memory than the reference, 0.62x,
-because scipy keeps several megapixel-sized float64 temporaries alive per stage of
-a 24 Mpx page while the plugin's cost is its own scratch. The unsharp mask is
-2.2x cheaper than the deconvolution, so it is the better choice for a caller who
+The table is the first build measured. The three passes under [where the time
+goes](#where-the-time-goes) then took the plugin from 1586.9 to 1302.3 ms a page
+on the deconvolution and 735.4 to 548.7 on the unsharp mask, so the current build
+is 4.88x and 6.13x faster than the reference; the reference's own run to run
+spread is wider than that difference, so read the plugin column, not the ratio.
+[`docs/BENCH.md`](../BENCH.md) is the machine generated record of the current
+build.
+
+It is also the one workflow where the plugin holds less memory than the reference,
+0.62x, because scipy keeps several megapixel-sized float64 temporaries alive per
+stage of a 24 Mpx page while the plugin's cost is its own scratch. The unsharp mask
+is 2.3x cheaper than the deconvolution, so it is the better choice for a caller who
 just wants a page sharpened.
 
 ### where the time goes
 
-The filter reports one `restore=` number, so the split came from timing the same
+The filter reports one `restore=` number, so the split comes from timing the same
 12.0 Mpx page in four configurations that differ only in how many blurs they run,
-one node per configuration so the scratch is allocated once:
+one node per configuration so the scratch is allocated once and the first frame
+is dropped. Medians of five warmed frames, over the three builds this work
+produced, run to run spread is about 5%:
 
-| configuration | blurs | restore |
-| --- | ---: | ---: |
-| `method=0 iterations=0` | 0 candidate | 523.5 ms |
-| `method=1` | 1 | 583.3 ms |
-| `method=0 iterations=1` | 2 | 661.4 ms |
-| `method=0 iterations=6` | 12 | 1384.9 ms |
+| configuration | blurs | first | row slices | plus `sqrt` |
+| --- | ---: | ---: | ---: | ---: |
+| `method=0 iterations=0` | 0 candidate | 522.2 ms | 454.9 ms | 379.1 ms |
+| `method=1` | 1 | 565.3 ms | 502.1 ms | 427.2 ms |
+| `method=0 iterations=1` | 2 | 671.0 ms | 604.0 ms | 519.2 ms |
+| `method=0 iterations=6` | 12 | 1414.7 ms | 1338.7 ms | 1197.2 ms |
+| mask and blend, derived as `2B - C` | | 459.6 ms | 400.2 ms | 335.2 ms |
+| read the luma, `luma` stage | | 10.6 ms | 10.9 ms | 8.9 ms |
+| write the plane back, `write` stage | | 50.3 ms | 52.4 ms | 48.7 ms |
 
-Solving those gives one sigma 0.8 blur at **6.5 ns/px**, which is the 6.2 ns/px
-the kernel harness measured for the same kernel in isolation, so the
-decomposition holds. What it says:
+The stage table is the second pass; the third pass below then took the `write` row
+from 48.7 to 30.8 ms without moving anything else, so read the last column as the
+second pass plus that. End to end over the 49 page bench, the plugin went from
+1586.9 to 1302.3 ms a page for `method=0` and 735.4 to 548.7 for `method=1`,
+against a reference that only moved by its own noise: **18% off the deconvolution
+and 25% off the unsharp mask**.
 
-- **the edge mask and the blend are 87% of `method=1`** and 36% of `method=0`.
-  The mask is two small blurs plus the Sobel, and the blend is a 3x3 window and
-  a clamp per pixel; together they are 42 ns/px, against 6.5 ns/px for a blur.
+**The fourth pass: AVX2 for the blend.** The stencil is elementwise, so eight
+columns at a time computes what one column computed, which is what the probe in
+`.tmpbuild/simdprobe/` established. `Workspace::blend` now dispatches to a
+`#[target_feature(enable = "avx2")]` path when `is_x86_feature_detected!("avx2")`
+says the feature is there, with the scalar loop kept as the fallback on every
+other target and the two end columns and the row tail still going through the
+shared scalar `blend_sample`. Measured at 12.0 Mpx:
+
+| configuration | scalar | AVX2 | |
+| --- | ---: | ---: | ---: |
+| `method=0 iterations=0` | 378.3 ms | 171.7 ms | -55% |
+| `method=1` | 420.8 ms | 223.5 ms | **-47%** |
+| `method=0 iterations=1` | 494.5 ms | 309.2 ms | -37% |
+| `method=0 iterations=6` | 1157.1 ms | 954.3 ms | -18% |
+| mask and blend, derived as `2B - C` | 347.1 ms | 137.7 ms | **-60%** |
+
+The output is byte-identical. The hash harness now carries two float pages full of
+`NaN` and reports no difference at all across all twelve cases, and the validator
+still passes its 2150 checks. The `NaN` pages are there for a reason: the
+branchless vector clamp would snap a `NaN` to a window bound where the scalar form
+lets it through, so `clamp8` blends the `NaN` back over the result with an
+unordered compare. Getting that wrong would have made float clips behave
+differently on machines with AVX2 than without.
+
+**The fifth pass: the vertical blur accumulate.** `target[i] += tap[i] * weight`
+down a row is elementwise on the same terms, so the inner loop dispatches to an
+`accumulate_avx2` helper eight lanes wide, with the scalar loop left in place
+directly below it as the fallback. The product and the sum stay separate
+instructions, so no `fmadd` contracts them.
+
+It is worth much less than the blend, and the reason is instructive: the scalar
+loop was a plain contiguous `zip` and LLVM had already vectorised it four lanes
+wide with SSE2, so the hand written eight lane version only bought the width
+difference.
+
+| | before | after | |
+| --- | ---: | ---: | ---: |
+| twelve blur passes | 808.9 ms | 744.6 ms | -7.9% |
+| `method=0 iterations=6` | 977.9 ms | 916.0 ms | -6.3% |
+| `method=1` | 220.2 ms | 215.7 ms | -2% |
+
+All twelve hash cases are still identical, validator still 2150 checks.
+
+**The sixth pass: the Sobel and smoothstep.** Same pattern, and this time the
+guess was right. `sobel_mask` dispatches to a `sobel_mask_avx2` eight lanes wide,
+with a shared `sobel_sample` for the two end columns and the row tail so the
+vector path cannot drift from the scalar one at the edges. The three terms of each
+response are added in the same order, the division by the ramp stays a division,
+and `1 / SOBEL_SPAN` is a power of two, so the multiply the vector path uses is
+the same scaling the scalar division is.
+
+| configuration | before | after | |
+| --- | ---: | ---: | ---: |
+| mask and blend, derived as `2B - C` | 153.2 ms | 101.7 ms | **-34%** |
+| `method=1` | 222.9 ms | 180.7 ms | **-19%** |
+| `method=0 iterations=6` | 960.2 ms | 868.6 ms | -9.5% |
+
+That is where the fifth pass's lesson pays off. The vertical accumulate bought
+7.9% because LLVM had already vectorised it; the Sobel bought 34% because its
+scalar form clamps an index per pixel and clamps the ramp with branches, which is
+what stops a loop from vectorising. Hand vectorising is worth it where the scalar
+form fights the compiler, not where it is already a clean contiguous loop.
+
+Twelve hash cases still identical, validator still 2150 checks.
+
+**A pass that failed hard: the horizontal blur sum.** Vectorising across pixels
+rather than taps should have been the safe way to do this one, because each lane
+keeps its own taps in weight order and the accumulator starts at zero exactly as
+the scalar `sum()` fold does. It was byte-identical as expected, and it measured
+**2.9x slower**: twelve blurs went from 759.7 to 2217.6 ms, and `method=0`'s
+restore from 892.2 to 2519.5 ms. It was reverted, and the reverted build reports
+768.9 ms and the same twelve hashes.
+
+Two explanations were tried and neither accounts for a factor of three: the
+`set1` broadcast inside the tap loop, and the single accumulator chain. A
+9x-longer loop body with the same memory traffic should not lose a factor of
+three, so this needs a profiler rather than another guess. It is the only loop in
+the filter that is still scalar, and it is worth about half of the blur, which is
+most of `method=0`.
+
+**Then the same loop measured 3x faster in isolation.** `.tmpbuild/simdprobe/`
+has a `hsum` binary that runs the row interior three ways over the same plane and
+checks the outputs first:
+
+| shape | time |
+| --- | ---: |
+| scalar left fold, what the crate does | 2.10 ns/px |
+| eight columns at a time, taps inner, register accumulator | **0.70 ns/px** |
+| eight columns at a time, taps outer, memory accumulator | 0.93 ns/px |
+
+The shape that cost 2.9x inside the plugin is 3.0x *faster* on its own, so the
+regression is not a property of the loop. The one structural difference between
+the probe and the plugin run is where the feature check sits: `blend` and
+`sobel_mask` test `is_x86_feature_detected!` once per plane, while the attempt
+put it inside `blur_row`, which runs once per row, 49.5k times for the twelve blur
+passes of one frame. That is the thing to change before trying again, and it is a
+guess with a measurement behind it rather than a comfortable one.
+
+The probe's own two vector shapes differ from its scalar one on 1536 of 1.5M
+samples, which is a probe artifact from the slack window it slices (the row ends
+reflect into the neighbouring row); the crate's version was byte-identical on all
+twelve cases, so that discrepancy belongs to the harness and not to the idea.
+
+**The first pass: row slices.** `blend` and `sobel_mask` called a helper per pixel
+that recomputed `row * width + column` and bounds-checked into a plane-sized slice
+for each of the nine taps. They now slice the three rows they need out of the plane
+once per output row, so a tap is indexing into a slice whose length is the plane
+width. The arithmetic is unchanged and the output is byte-identical on all ten
+cases: -13% on the mask and blend stage, -11% on `method=1`.
+
+**The second pass: `sqrt` instead of `hypot`.** `f32::hypot` is a libcall, and it
+was about a sixth of the mask and blend stage on its own. `sqrt(a * a + b * b)` is
+safe here because the Sobel responses are bounded by four times the sample range
+and the result is clamped to `[0, 1]` before it is used, so nothing can overflow or
+underflow into a different mask. It is **not** bit-exact: the magnitude can differ
+in the last bit. The integer paths absorb it, and the fixture cases still report
+`max 0` and `zero 1.0` at 8 and 16 bits; the float cases deviate from the reference
+by 2.50e-7, unchanged from before, against a `1 / 255` bound. The hash harness
+shows the difference in exactly one of its ten cases, `gray32 method0`.
+-16% on the mask and blend stage, -12% on `method=1`.
+
+**The third pass: rounding without `roundsd`.** The `write` stage was 45.9 ms a
+frame, which is 10% of `method=1`'s wall time for what should be a byte store.
+`f64::round_ties_even` needs SSE4.1's `roundsd`, which a baseline x86-64 build does
+not enable, so it was a library call per sample. Adding and subtracting `2^52`
+leans on the FPU's own round-to-nearest-even and is exact for every value here, a
+code value in `0..=65535`, so it is bit-exact: 45.9 to 30.8 ms, -31% on that
+stage, -3% on `method=1`'s wall.
+
+**A pass that did not measure: four samples per horizontal step.** `blur_row`'s
+interior was rewritten to sum four windows at once, four independent chains
+instead of one left fold's single chain, with each sample still summed in tap
+order so the values were unchanged. Twelve blurs measured 773 to 783 ms against a
+775 ms baseline, which is the noise floor, and the output was again byte-identical.
+It was reverted: the simpler loop is what stayed, and the note is here so the next
+round does not spend the same afternoon on it.
+
+What it says:
+
+- **the edge mask and the blend are still 78% of `method=1`** and 28% of
+  `method=0`. Together they are 28 ns/px against 8.5 ns/px for a sigma 0.8 blur.
   Sharpening a page with the unsharp mask costs almost nothing on top of masking
   it.
-- the twelve deconvolution blur passes are 861 ms, 62% of `method=0`.
+- the twelve deconvolution blur passes are 784 ms, 65% of `method=0`.
+- the plan's tolerance is what makes the second pass possible. Bit-exactness was
+  never the bar; it was a convenient check while the arithmetic stayed put.
 
-That is the lever to pull before rayon: the mask and the blend are scalar
-per-pixel work over nine neighbours, which is where the bounds checks and the
-ninefold re-reads are, and the 3x3 minimum and maximum are separable exactly
-like the blur.
+### what the loops are bound by
+
+`restore` per pixel for `method=1` at three page sizes, one build throughout:
+
+| page | one plane | `restore` | twelve blurs |
+| --- | ---: | ---: | ---: |
+| 1024x1024 | 4 MB | 38.1 ns/px | 62.2 ns/px |
+| 2048x2048 | 16 MB | 36.0 ns/px | 63.8 ns/px |
+| 2902x4128 | 48 MB | 37.6 ns/px | 65.4 ns/px |
+
+A working set twelve times larger costs 5%. The first plane fits in a 32 MB L3 and
+the last does not, so if DRAM bandwidth were the limit these columns would climb
+steeply. They do not, which says the loops are bound by instructions rather than
+by memory traffic. Two things follow: fusing passes to save traversals buys a few
+percent at most, and rayon would help by using more cores rather than by using more
+bandwidth.
+
+### what is left
+
+Scalar micro-optimisation is exhausted. Three passes took 24% off `method=1` and
+15% off the deconvolution, and what is left needs a different kind of change:
+
+| loop | work per pixel | measured |
+| --- | --- | ---: |
+| one sigma 0.8 blur, both passes | 27 mul/add, 14 loads, 7 stores | 5.3 ns/px |
+| edge mask and blend | six blurs, two stencils and two passes | 26.5 ns/px |
+
+5.3 ns/px for a blur is about 18 cycles for roughly 48 operations, which is
+2.6 operations a cycle, and the stencils run at about 2. A four sample unroll of
+the horizontal sum was tried and measured inside the noise, which is what near
+peak scalar throughput looks like, and the blend is now vectorised, which is the
+second lever and the one that landed:
+
+1. **The Sobel stencil**, which is the last elementwise loop: nine taps, the same
+   order, and a `sqrt` that vectors. The same pattern and the same harness apply.
+   It is the smaller half of the mask and blend stage, so expect less than the
+   blend bought.
+
+One thing worth stating in the other direction: the vector path is
+`#[cfg(target_arch = "x86_64")]`, so a build for any other target falls back to the
+scalar loop and is exactly as fast as it was before this pass.
+Smaller, in case that is not wanted: a rolling three-value window in `blend` (a
+few percent, since the loads are L1 hits and the sixteen `min`/`max` dominate).
+A chunk-based write, walking `chunks_exact_mut` and handing each sample its own
+slice, was tried and **regressed the stage threefold**, 29.4 to 94.9 ms: the
+chunk length is a runtime value there, so the constant-length bounds elision the
+indexed form gets goes away. That is the second idea in this plan to measure
+worse than the code it replaced, after the four sample unroll.
+
+**Rayon is not on the list any more, and the measurement says so.** A single
+threaded puller, which is what the bench does, gives the filter no frame level
+parallelism at all. A temporal fan-in gives it the shape a real graph has: 13
+frames of a 1 Mpx page through `std.AverageFrames`, one pull, with each Deblur
+frame reporting its own stage times:
+
+| | wall | reported `restore` |
+| --- | ---: | ---: |
+| one frame on its own | 108.5 ms | 104.1 ms |
+| 13 frames through a fan-in | 527.6 ms | 5002.2 ms |
+
+That is **9.48x**: 12 worker threads already run nine and a half of these frames
+at once, and each frame costs 3.7x more under that contention (104 to 385 ms) as
+the 12 threads share cache and execution ports. There is no idle core for rayon
+to use, and 12 rayon threads inside each of 9 frames would oversubscribe the
+machine. The bench's per page column is one frame's latency on a quiet machine,
+not the throughput a graph sees, which is about 9x better than it looks.
 
 ### concurrency and memory
 
