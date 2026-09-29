@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -75,7 +76,7 @@ class NativePluginHook(BuildHookInterface):  # type: ignore[type-arg]
 
     def initialize(self, version: str, build_data: dict[str, object]) -> None:
         root = Path(self.root)
-        environment = {}
+        environment = os.environ.copy()
         artifact = build_plugin(root, environment)
 
         destination_directory = root / self.plugin_directory
