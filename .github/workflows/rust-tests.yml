@@ -51,6 +51,11 @@ jobs:
       - name: run Rust tests
         run: cargo test --locked
 
+      - name: install image sequence codec libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libde265-0 libdav1d7
+
       - name: build and install plugin with test dependencies
         run: uv sync --locked --extra dev --extra dev-tests
 
