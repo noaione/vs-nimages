@@ -257,21 +257,21 @@ When `use_props=True`, the filter reads `NImagesBlackLevel` and
 `NImagesWhiteLevel` from the current input frame. For 8-bit frames it uses the
 existing 256-entry LUT; for wider integer frames it uses a native-range LUT.
 
-Float `Levels` accepts `GRAYS` and `RGBS` with `black_float` and `white_float`:
+Float `Levels` accepts `GRAYS` and `RGBS` and takes the same `black` and
+`white`, read as 8-bit code values and divided by 255:
 
 ```python
 leveled = core.nimages.Levels(
     clip,
-    black_float=0.02,
-    white_float=0.94,
+    black=5.1,
+    white=239.7,
     gamma=1.18,
 )
 ```
 
 It evaluates each sample without an integer LUT, maps the selected interval to
 `0..=1`, clamps outside it, and preserves NaN samples. Float `Levels` does not
-accept integer endpoints, `use_props=True`, nonzero `peak_offset`, or
-`auto_gamma=True`.
+accept `use_props=True`, nonzero `peak_offset`, or `auto_gamma=True`.
 
 ### 5.4 `Posterize`
 
@@ -711,27 +711,31 @@ validation is pending for this increment.
 
 #### M6 decisions
 
-the current M6 interface retains separate float endpoint names and normalized
-float units. a proposed consolidation is tracked in
-[02-unified-level-endpoints.md](improvements/02-unified-level-endpoints.md);
-the current argument names and units remain in effect until that proposal is
-accepted.
+the M6 interface was consolidated once
+[02-unified-level-endpoints.md](improvements/02-unified-level-endpoints.md) was
+accepted: `Levels` declares one `black` and one `white`, and the separate
+`black_float` and `white_float` arguments are gone.
 
 - Keep `upper_limit` in its current 8-bit-equivalent units and scale it to the
   native integer range as `round_ties_even(upper_limit * max_sample / 255)`.
   This preserves the existing default's relative search range and leaves the
   `GRAY8` behavior unchanged. At 16 bits, the default 60 becomes 15420.
-- Keep integer `black`, `white`, and `peak_offset` in native code units above
-  8 bits. For float `Levels`, choose typed float endpoint arguments that do not
-  change the existing integer arguments. Use `black_float` and `white_float`.
-- Default float endpoints are 0.0 and 1.0. Float outputs are clamped to
-  `0..=1`; NaN samples remain NaN.
-- Validate finite float endpoints with `black_float < white_float` and finite
-  positive `gamma`. Map values below/above the endpoints to 0/1. Preserve NaN
-  samples as NaN; positive and negative infinity clamp through the endpoint
-  comparisons. Float `Levels` does not accept integer endpoints,
-  `use_props=True`, nonzero `peak_offset`, or `auto_gamma=True` because the peak
-  properties are integer-only.
+- Keep integer `black` and `white` in native code units above 8 bits, so an
+  endpoint is a whole number inside the frame's own sample range. A fractional,
+  non-finite, negative, or out-of-range endpoint is refused before a table is
+  built.
+- Declare both endpoints as VapourSynth `float` values, so a Python caller keeps
+  passing integer literals and a native map builds one argument set for either
+  domain.
+- Float `Levels` reads the same numbers as 8-bit code values and divides them by
+  255, so the default `black=0`, `white=255` is the old `0.0` and `1.0`, and
+  `white=245` is `245 / 255`. Default float outputs stay clamped to `0..=1` and
+  NaN samples stay NaN.
+- Validate finite endpoints with `black < white` and finite positive `gamma`. Map
+  values below/above the endpoints to 0/1. Preserve NaN samples as NaN; positive
+  and negative infinity clamp through the endpoint comparisons. Float `Levels`
+  does not accept `use_props=True`, nonzero `peak_offset`, or `auto_gamma=True`
+  because the peak properties are integer-only.
 - VapourSynth carries alpha as a separate clip/output, not as a fourth plane in
   an RGB video format. M6 operates on the planes in the input video format; it
   does not add alpha-specific arguments.

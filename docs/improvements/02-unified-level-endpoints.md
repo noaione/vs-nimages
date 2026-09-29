@@ -1,6 +1,6 @@
 # unified Levels endpoints
 
-status: proposed
+status: implemented
 
 ## problem
 
@@ -67,3 +67,25 @@ fractional endpoint values after conversion.
 the reported test failure was an invalid expectation: white=40 is inside a
 sample maximum of 50. the regression case now uses white=51, and cargo test
 --locked passes.
+
+## outcome
+
+implemented as proposed. the deprecated aliases were not kept: `Levels` declares
+`black:float:opt` and `white:float:opt` and no longer accepts `black_float` or
+`white_float`, so an old float call fails loudly instead of silently rescaling.
+
+- `resolve_for_domain` converts the endpoints once per resolution: whole numbers
+  inside the frame's own code-value range on an integer frame, and `value / 255`
+  on a float one.
+- A variable-format clip resolves per frame, so a clip that mixes depths gets
+  each frame's own table from one argument set.
+- `tests/check-nimages.py` covers the defaults on `GRAY8`, `GRAY16`, `GRAYS` and
+  `RGBS`, the conversion at 0, 1, 245, 255, fractional and above-255 endpoints,
+  the endpoints an integer clip refuses, and a sequence that mixes 8 and 16 bit
+  frames.
+
+performance: measured against the pre-change build on the same machine, the per
+sample `map` stage is unchanged within run-to-run noise (`GRAY8` 1.42 against
+1.44 ms, `GRAYS` 7.61 against 7.33 ms, `RGBS` 23.23 against 23.35 ms) and the 16
+bit `use_props` `curve` stage stays at 0.13 to 0.14 ms, so the unified arguments
+cost nothing per frame.

@@ -24,10 +24,17 @@ use super::{
 };
 
 /// Default black point.
-const DEFAULT_BLACK: i64 = 0;
+/// Default black point, in code values for an integer clip and in 8-bit code
+/// values for a float one.
+const DEFAULT_BLACK: f64 = 0.0;
 /// Default gamma.
 const DEFAULT_GAMMA: f64 = 1.0;
-
+/// Code values per unit on the float side.
+///
+/// A float clip takes its endpoints in the same 8-bit units an integer clip uses,
+/// so the curve is built from `endpoint / 255`: `white=245` is `245 / 255` and the
+/// default white point of 255 maps to 1.0.
+const FLOAT_SCALE: f64 = 255.0;
 /// One frame's curve, with the parameters it was resolved from so `debug` can
 /// report what a page was actually leveled with.
 #[derive(Clone)]
@@ -61,8 +68,8 @@ enum Curve {
     Constant(Resolved),
     /// Parameters deferred until a variable-format frame supplies its depth.
     ConstantForFormat {
-        black: i64,
-        white: Option<i64>,
+        black: f64,
+        white: Option<f64>,
         gamma: f64,
         peak_offset: i64,
         auto_gamma: bool,
@@ -90,7 +97,7 @@ impl Filter for Levels {
     type FilterData = ();
 
     const NAME: &'static CStr = c"Levels";
-    const ARGS: &'static CStr = c"clip:vnode;black:int:opt;white:int:opt;black_float:float:opt;white_float:float:opt;gamma:float:opt;use_props:int:opt;peak_offset:int:opt;auto_gamma:int:opt;debug:int:opt;";
+    const ARGS: &'static CStr = c"clip:vnode;black:float:opt;white:float:opt;gamma:float:opt;use_props:int:opt;peak_offset:int:opt;auto_gamma:int:opt;debug:int:opt;";
     const RETURN_TYPE: &'static CStr = c"clip:vnode;";
 
     fn create(
@@ -105,58 +112,45 @@ impl Filter for Levels {
         let peak_offset = read_int(&input, key!(c"peak_offset"))?.unwrap_or(0);
         let auto_gamma = read_int(&input, key!(c"auto_gamma"))?.unwrap_or(0) != 0;
         let use_props = read_int(&input, key!(c"use_props"))?.unwrap_or(0) != 0;
-        let black = read_int(&input, key!(c"black"))?;
-        let white = read_int(&input, key!(c"white"))?;
-        let black_float = read_float(&input, key!(c"black_float"))?;
-        let white_float = read_float(&input, key!(c"white_float"))?;
+        let black = read_float(&input, key!(c"black"))?.unwrap_or(DEFAULT_BLACK);
+        let white = read_float(&input, key!(c"white"))?;
         let gamma = read_float(&input, key!(c"gamma"))?.unwrap_or(DEFAULT_GAMMA);
-        let float_args = black_float.is_some() || white_float.is_some();
-        let known_float = info.format.color_family != ColorFamily::Undefined
-            && info.format.sample_type == SampleType::Float;
-        let known_integer = info.format.color_family != ColorFamily::Undefined
-            && info.format.sample_type == SampleType::Integer;
 
-        let curve = if known_float || float_args {
-            if (known_integer && float_args)
-                || black.is_some()
-                || white.is_some()
-                || use_props
-                || auto_gamma
-                || peak_offset != 0
-            {
+        // One set of endpoints covers both domains. A clip whose format varies
+        // reports `Undefined`, and only a frame can say whether its endpoints are
+        // code values or 8-bit float units, so that case resolves per frame.
+        let domain = if info.format.color_family == ColorFamily::Undefined {
+            None
+        } else {
+            Some(curve_domain(&info.format)?)
+        };
+
+        let curve = if use_props {
+            if domain == Some(CurveDomain::Float32) {
                 return Err(float_mode_error());
             }
-            Curve::Constant(resolve_float(
-                black_float.unwrap_or(0.0),
-                white_float.unwrap_or(1.0),
-                gamma,
-            )?)
-        } else if use_props {
             Curve::FromProperties {
                 gamma,
                 peak_offset,
                 auto_gamma,
             }
         } else {
-            let black = black.unwrap_or(DEFAULT_BLACK);
-            if info.format.color_family == vapoursynth4_rs::ColorFamily::Undefined {
-                Curve::ConstantForFormat {
+            match domain {
+                Some(domain) => Curve::Constant(resolve_for_domain(
                     black,
                     white,
                     gamma,
                     peak_offset,
                     auto_gamma,
-                }
-            } else {
-                let max_sample = max_sample_value(info.format.bits_per_sample)?;
-                Curve::Constant(resolve(
+                    domain,
+                )?),
+                None => Curve::ConstantForFormat {
                     black,
-                    white.unwrap_or(i64::from(max_sample)),
+                    white,
                     gamma,
                     peak_offset,
                     auto_gamma,
-                    max_sample,
-                )?)
+                },
             }
         };
         let debug = read_int(&input, key!(c"debug"))?.unwrap_or(0) != 0;
@@ -248,21 +242,14 @@ impl Filter for Levels {
                         gamma,
                         peak_offset,
                         auto_gamma,
-                    } => match domain {
-                        CurveDomain::Integer(max_sample) => Cow::Owned(resolve(
-                            *black,
-                            white.unwrap_or(i64::from(max_sample)),
-                            *gamma,
-                            *peak_offset,
-                            *auto_gamma,
-                            max_sample,
-                        )?),
-                        CurveDomain::Float32 => {
-                            return Err(NImagesError::new(
-                                "Levels: integer endpoints cannot be applied to a float frame",
-                            ));
-                        }
-                    },
+                    } => Cow::Owned(resolve_for_domain(
+                        *black,
+                        *white,
+                        *gamma,
+                        *peak_offset,
+                        *auto_gamma,
+                        domain,
+                    )?),
                     Curve::FromProperties {
                         gamma,
                         peak_offset,
@@ -342,6 +329,65 @@ fn resolve(
     })
 }
 
+/// Resolves the caller's endpoints against one frame's own domain.
+///
+/// An integer frame takes them as code values, and a float frame takes the same
+/// numbers scaled by 255, so one call serves a clip whose format varies.
+fn resolve_for_domain(
+    black: f64,
+    white: Option<f64>,
+    gamma: f64,
+    peak_offset: i64,
+    auto_gamma: bool,
+    domain: CurveDomain,
+) -> Result<Resolved> {
+    match domain {
+        CurveDomain::Integer(max_sample) => {
+            let black = code_value(black, "black", max_sample)?;
+            let white = match white {
+                Some(white) => code_value(white, "white", max_sample)?,
+                None => i64::from(max_sample),
+            };
+            resolve(black, white, gamma, peak_offset, auto_gamma, max_sample)
+        }
+        CurveDomain::Float32 => {
+            if peak_offset != 0 || auto_gamma {
+                return Err(float_mode_error());
+            }
+            resolve_float(
+                black / FLOAT_SCALE,
+                white.unwrap_or(FLOAT_SCALE) / FLOAT_SCALE,
+                gamma,
+            )
+        }
+    }
+}
+
+/// Converts one endpoint into a code value for an integer frame.
+///
+/// An integer frame takes endpoints in code values, so an endpoint has to be a
+/// finite whole number inside the sample range. A fractional endpoint belongs to
+/// the float side, where the same argument is scaled.
+fn code_value(value: f64, name: &str, max_sample: u16) -> Result<i64> {
+    if !value.is_finite() {
+        return Err(NImagesError::new(format!(
+            "Levels: the {name} point must be a finite number, got {value}"
+        )));
+    }
+    if value.fract() != 0.0 {
+        return Err(NImagesError::new(format!(
+            "Levels: the {name} point must be a whole number of code values on an \
+             integer clip, got {value}"
+        )));
+    }
+    if value < 0.0 || value > f64::from(max_sample) {
+        return Err(NImagesError::new(format!(
+            "Levels: the {name} point must be between 0 and {max_sample}, got {value}"
+        )));
+    }
+    Ok(value as i64)
+}
+
 /// Resolves the per-sample float curve without quantizing through a table.
 fn resolve_float(black: f64, white: f64, gamma: f64) -> Result<Resolved> {
     validate(black, white, gamma)
@@ -377,7 +423,8 @@ fn curve_domain(format: &VideoFormat) -> Result<CurveDomain> {
 
 fn float_mode_error() -> NImagesError {
     NImagesError::new(
-        "Levels: choose black/white for integer clips or black_float/white_float for float clips; float Levels does not support use_props=True, nonzero peak_offset, or auto_gamma=True",
+        "Levels: float clips take their endpoints in 8-bit code values, and do not \
+         support use_props=True, nonzero peak_offset, or auto_gamma=True",
     )
 }
 

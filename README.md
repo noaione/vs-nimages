@@ -168,11 +168,11 @@ Gray, RGB and YUV clips from 8 to 16 bits use native-range tables. `GRAYS` and
 table. The curve applies to each sample as it stands rather than to luma.
 
 ```python
-# integer parameters, table built once
+# integer clips take code values, table built once
 leveled = core.nimages.Levels(clip, black=12, white=245, gamma=1.18)
 
-# float clips use floating-point sample endpoints
-leveled = core.nimages.Levels(clip, black_float=0.02, white_float=0.94, gamma=1.18)
+# float clips take the same argument in 8-bit code values
+leveled = core.nimages.Levels(clip, black=5.1, white=239.7, gamma=1.18)
 
 # per-frame parameters read from PeakStats
 leveled = core.nimages.Levels(stats, use_props=True, peak_offset=0, auto_gamma=True)
@@ -180,10 +180,8 @@ leveled = core.nimages.Levels(stats, use_props=True, peak_offset=0, auto_gamma=T
 
 | argument | default | meaning |
 | --- | --- | --- |
-| `black` | `0` | black point, in source sample units |
-| `white` | sample maximum | white point, in source sample units (`255` for 8 bit) |
-| `black_float` | `0.0` | float black point for `GRAYS` or `RGBS` |
-| `white_float` | `1.0` | float white point for `GRAYS` or `RGBS` |
+| `black` | `0` | black point: a code value on an integer clip, 8-bit code values on a float one |
+| `white` | sample maximum, `255` on a float clip | white point, in the same units as `black` |
 | `gamma` | `1.0` | gamma of the curve |
 | `use_props` | `false` | read `NImagesBlackLevel` and `NImagesWhiteLevel` from each input frame instead |
 | `peak_offset` | `0` | added to the black point, in source sample units |
@@ -202,11 +200,14 @@ rounding is ties-to-even at every step, matching the pillow path. `peak_offset`
 is a code-value offset, so `peak_offset=1` on `black=12` levels from 13 rather
 than from one percentage point, which is about 2.55 code values.
 
-float clips use `black_float` and `white_float` and produce floating-point
-outputs in `[0, 1]`. Values outside the endpoints clamp to 0 or 1, and NaN
-samples remain NaN. Float `Levels` does not accept integer `black`/`white`,
-`use_props=True`, nonzero `peak_offset`, or `auto_gamma=True`; integer `Levels`
-does not accept the float endpoint arguments.
+`black` and `white` are one argument set for both domains. On an integer clip
+they are code values, and an endpoint that is not a finite whole number or that
+falls outside the sample range is refused. On a float clip they are 8-bit code
+values: `white=245` becomes `245 / 255`, and the default `255` becomes `1.0`.
+Float outputs are clamped to `[0, 1]`, values outside the endpoints clamp to 0
+or 1, and NaN samples remain NaN. Float `Levels` does not accept
+`use_props=True`, nonzero `peak_offset`, or `auto_gamma=True`, because the peak
+properties are integer-only.
 
 `auto_gamma` normalizes the black point by `Q` before applying its formula. the
 expression is undefined at or above half the sample range, so the filter rejects

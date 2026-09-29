@@ -550,12 +550,41 @@ def check_errors() -> None:
         lambda: core.nimages.Posterize(gray16, bits=17),
         contains="between 1 and 16",
     )
+    float_rgb = core.std.BlankClip(width=8, height=8, format=vs.RGBS)
     expect_error(
-        "Levels on float RGB",
-        lambda: core.nimages.Levels(
-            core.std.BlankClip(width=8, height=8, format=vs.RGBS), black=10
-        ),
-        contains="float Levels does not support",
+        "Levels use_props on float RGB",
+        lambda: core.nimages.Levels(float_rgb, use_props=True),
+        contains="do not support use_props=True",
+    )
+    expect_error(
+        "Levels auto_gamma on float RGB",
+        lambda: core.nimages.Levels(float_rgb, auto_gamma=1),
+        contains="auto_gamma=True",
+    )
+    expect_error(
+        "Levels peak_offset on float RGB",
+        lambda: core.nimages.Levels(float_rgb, peak_offset=1),
+        contains="nonzero peak_offset",
+    )
+    expect_error(
+        "Levels fractional black on an integer clip",
+        lambda: core.nimages.Levels(gray, black=10.5),
+        contains="whole number of code values",
+    )
+    expect_error(
+        "Levels negative black on an integer clip",
+        lambda: core.nimages.Levels(gray, black=-1, white=200),
+        contains="between 0 and 255",
+    )
+    expect_error(
+        "Levels white above the sample maximum",
+        lambda: core.nimages.Levels(gray, black=0, white=256),
+        contains="between 0 and 255",
+    )
+    expect_error(
+        "Levels infinite white",
+        lambda: core.nimages.Levels(gray, black=0, white=float("inf")),
+        contains="finite number",
     )
     expect_error("PeakStats without a clip", lambda: core.nimages.PeakStats())  # type: ignore
     expect_error("PeakStats upper_limit 0", lambda: core.nimages.PeakStats(gray, upper_limit=0))
@@ -809,7 +838,7 @@ def check_float_levels() -> None:
         dtype=np.float32,
     )
     source = clip_of_planes([values], vs.GRAYS, width=5, height=2)
-    output = array_of(core.nimages.Levels(source, black_float=0.25, white_float=0.75))
+    output = array_of(core.nimages.Levels(source, black=63.75, white=191.25))
     expected = np.asarray(
         [[0.0, 0.0, 0.0, 0.0, 0.5], [1.0, 1.0, 1.0, 1.0, np.nan]],
         dtype=np.float32,
@@ -827,7 +856,7 @@ def check_float_levels() -> None:
         np.asarray([[1.0, 0.5, 0.0]], dtype=np.float32),
     ]
     rgb = clip_of_planes(rgb_planes, vs.RGBS, width=3, height=1)
-    adjusted = core.nimages.Levels(rgb, black_float=0.25, white_float=0.75, gamma=2.0)
+    adjusted = core.nimages.Levels(rgb, black=63.75, white=191.25, gamma=2.0)
     with adjusted.get_frame(0) as frame:
         expected_planes = [
             np.asarray([[0.0, np.sqrt(0.5), 1.0]], dtype=np.float32),
@@ -839,6 +868,128 @@ def check_float_levels() -> None:
                 np.allclose(np.asarray(frame[plane]), expected_plane, rtol=0, atol=1e-7),
                 f"RGBS plane {plane} is mapped independently",
             )
+
+
+def check_unified_level_endpoints() -> None:
+    section("one endpoint argument set for both domains")
+    # Omitted endpoints keep their defaults: 0 and the sample maximum on an integer
+    # clip, and 0 and 255 (1.0 once scaled) on a float one.
+    ramp8 = np.arange(256, dtype=np.uint8).reshape(1, 256)
+    ramp16 = (np.arange(256, dtype=np.uint16) * 257).reshape(1, 256)
+    for name, values, fmt in (
+        ("GRAY8", ramp8, vs.GRAY8),
+        ("GRAY16", ramp16, vs.GRAY16),
+    ):
+        source = clip_of_planes([values], fmt, width=256, height=1)
+        same(
+            array_of(core.nimages.Levels(source)).tolist(),
+            values.tolist(),
+            f"{name}: the default endpoints are the identity",
+        )
+
+    floats = np.linspace(0.0, 1.0, 256, dtype=np.float32).reshape(1, 256)
+    gray_s = clip_of_planes([floats], vs.GRAYS, width=256, height=1)
+    same(
+        array_of(core.nimages.Levels(gray_s)).tolist(),
+        floats.tolist(),
+        "GRAYS: the default endpoints are the identity",
+    )
+    rgb_planes = [floats * 0.5, 1.0 - floats, floats * 0.25]
+    rgb_s = clip_of_planes(rgb_planes, vs.RGBS, width=256, height=1)
+    with core.nimages.Levels(rgb_s).get_frame(0) as frame:
+        for plane, values in enumerate(rgb_planes):
+            same(
+                np.asarray(frame[plane]).tolist(),
+                values.tolist(),
+                f"RGBS plane {plane}: the default endpoints are the identity",
+            )
+
+    # The same numbers are code values on an integer clip and 8-bit float units on a
+    # float one, which is the point of the unified arguments.
+    leveled8 = array_of(core.nimages.Levels(clip_of(ramp8), black=51, white=204)).ravel()
+    same(int(leveled8[51]), 0, "integer endpoints are code values: black maps to 0")
+    same(int(leveled8[204]), 255, "integer endpoints are code values: white maps to 255")
+    same(int(leveled8[2]), 0, "values below the black point clamp to 0")
+    same(int(leveled8[250]), 255, "values above the white point clamp to 255")
+
+    exact = clip_of_planes(
+        [np.asarray([[0.25, 0.75]], dtype=np.float32)], vs.GRAYS, width=2, height=1
+    )
+    same(
+        array_of(core.nimages.Levels(exact, black=63.75, white=191.25)).tolist(),
+        [[0.0, 1.0]],
+        "float endpoints are 8-bit units: 63.75 is 0.25 and 191.25 is 0.75",
+    )
+
+    values = np.asarray(
+        [[-1.0, -0.25, 0.0, 0.1, 0.5, 0.75, 0.94, 1.0, 1.5, 2.0, np.nan]], dtype=np.float32
+    )
+    source = clip_of_planes([values], vs.GRAYS, width=11, height=1)
+    for black, white in (
+        (0.0, 255.0),
+        (0.0, 1.0),
+        (0.0, 245.0),
+        (12.75, 239.7),
+        (-25.5, 280.5),
+        (63.75, 191.25),
+    ):
+        output = array_of(core.nimages.Levels(source, black=black, white=white))
+        scaled = (values.astype(np.float64) - black / 255.0) / (white / 255.0 - black / 255.0)
+        expected = np.clip(scaled, 0.0, 1.0).astype(np.float32)
+        same(
+            np.isnan(output).tolist(),
+            np.isnan(expected).tolist(),
+            f"black={black} white={white}: NaN stays NaN",
+        )
+        same(
+            np.nan_to_num(output, nan=-99).tolist(),
+            np.nan_to_num(expected, nan=-99).tolist(),
+            f"black={black} white={white}: endpoints are scaled by 255",
+        )
+
+
+def check_mixed_depth_levels() -> None:
+    section("a clip whose depth varies between frames")
+    # `imgseqs` reports `Undefined` for a sequence that mixes depths, so the
+    # endpoints resolve against each frame instead of at creation.
+    scratch = REPO_ROOT / "target" / "check-nimages"
+    shutil.rmtree(scratch, ignore_errors=True)
+    scratch.mkdir(parents=True, exist_ok=True)
+
+    page8 = np.arange(256, dtype=np.uint8).reshape(1, 256)
+    page16 = (np.arange(256, dtype=np.uint16) * 257).reshape(1, 256)
+    paths = [scratch / "depth8.pgm", scratch / "depth16.pgm"]
+    paths[0].write_bytes(b"P5\n256 1\n255\n" + page8.tobytes())
+    # A 16-bit PGM stores big-endian words.
+    paths[1].write_bytes(b"P5\n256 1\n65535\n" + page16.astype(">u2").tobytes())
+
+    clip = core.imgseqs.Read(files=[str(path) for path in paths], mismatch=True, prefetch=0)
+    check(clip.format.color_family == vs.ColorFamily.UNDEFINED, "the source reports no fixed format")
+
+    leveled = core.nimages.Levels(clip, black=10, white=200, gamma=1.0)
+    fixed8 = core.nimages.Levels(clip_of(page8), black=10, white=200, gamma=1.0)
+    fixed16 = core.nimages.Levels(
+        clip_of_planes([page16], vs.GRAY16, width=256, height=1),
+        black=10,
+        white=200,
+        gamma=1.0,
+    )
+    with leveled.get_frame(0) as frame:
+        same(frame.format.bits_per_sample, 8, "frame 0 is 8 bit")
+    with leveled.get_frame(1) as frame:
+        same(frame.format.bits_per_sample, 16, "frame 1 is 16 bit")
+    same(
+        array_of(leveled, 0).tolist(),
+        array_of(fixed8, 0).tolist(),
+        "the 8 bit frame matches the same curve on a fixed 8 bit clip",
+    )
+    same(
+        array_of(leveled, 1).tolist(),
+        array_of(fixed16, 0).tolist(),
+        "the 16 bit frame matches the same curve on a fixed 16 bit clip",
+    )
+
+    shutil.rmtree(scratch, ignore_errors=True)
 
 
 def clip_of_rgb(shape: tuple[int, int], *, base: int, step: int):
@@ -1018,6 +1169,8 @@ def main() -> int:
     check_high_depth_integer_mapping()
     check_high_depth_analysis()
     check_float_levels()
+    check_unified_level_endpoints()
+    check_mixed_depth_levels()
     check_dynamic_dimensions(posterize)
     check_debug_logging()
     check_determinism()

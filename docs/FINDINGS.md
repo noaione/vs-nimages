@@ -613,8 +613,8 @@ Both were wrong for how the filters are used. M3 widened the family surface to
 | `Posterize` | Gray/RGB/YUV integer 8–16 bit | all | yes |
 
 Formats outside those rows are refused, with the message naming what was
-received. Float `Levels` uses `black_float` and `white_float`; peak properties,
-`peak_offset`, and `auto_gamma` remain integer-only.
+received. Float `Levels` takes `black` and `white` in 8-bit code values; peak
+properties, `peak_offset`, and `auto_gamma` remain integer-only.
 
 A clip whose dimensions or format vary reports `Undefined` at the node, so the
 format is checked twice: once at creation when the node declares one, and again
