@@ -269,6 +269,12 @@ pub(super) fn plane_histogram(frame: &VideoFrame) -> Result<Histogram> {
 }
 
 /// Lookup table selected for the input's integer sample width.
+// Keep the small table inline to avoid heap allocation and indirection while
+// mapping every sample. Filter data is boxed when the video filter is created.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "an inline LUT avoids heap allocation and per-sample indirection"
+)]
 #[derive(Clone)]
 pub(super) enum MappingTable {
     /// Eight bit code values.
@@ -353,19 +359,15 @@ fn map_plane(
                 }
             }
             (2, MappingTable::U16(table)) if !table.is_empty() => {
-                for (input, target) in source_row
-                    .chunks_exact(2)
-                    .zip(output_row.chunks_exact_mut(2))
-                {
-                    let input: [u8; 2] = input
-                        .try_into()
-                        .map_err(|_| NImagesError::new("the 16 bit input sample is incomplete"))?;
-                    let value = u16::from_ne_bytes(input);
+                let (inputs, _) = source_row.as_chunks::<2>();
+                let (targets, _) = output_row.as_chunks_mut::<2>();
+                for (input, target) in inputs.iter().zip(targets.iter_mut()) {
+                    let value = u16::from_ne_bytes(*input);
                     let index = usize::from(value).min(table.len() - 1);
                     let mapped = table.get(index).ok_or_else(|| {
                         NImagesError::new("the 16 bit lookup table is incomplete")
                     })?;
-                    target.copy_from_slice(&mapped.to_ne_bytes());
+                    *target = mapped.to_ne_bytes();
                 }
             }
             (1, MappingTable::U16(_)) => {
@@ -386,16 +388,12 @@ fn map_plane(
                     gamma,
                 },
             ) => {
-                for (input, target) in source_row
-                    .chunks_exact(4)
-                    .zip(output_row.chunks_exact_mut(4))
-                {
-                    let input: [u8; 4] = input
-                        .try_into()
-                        .map_err(|_| NImagesError::new("the float input sample is incomplete"))?;
-                    let value = f32::from_ne_bytes(input);
+                let (inputs, _) = source_row.as_chunks::<4>();
+                let (targets, _) = output_row.as_chunks_mut::<4>();
+                for (input, target) in inputs.iter().zip(targets.iter_mut()) {
+                    let value = f32::from_ne_bytes(*input);
                     let mapped = apply_float_level(value, *black, *white, *gamma);
-                    target.copy_from_slice(&mapped.to_ne_bytes());
+                    *target = mapped.to_ne_bytes();
                 }
             }
             (2, MappingTable::U16(_)) => {

@@ -6,6 +6,11 @@
 /// Number of shades in an 8-bit sample.
 pub const BINS: usize = 256;
 
+// Keep the 8-bit histogram inline to avoid a per-frame heap allocation.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the inline 8-bit histogram avoids a per-frame heap allocation"
+)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Counts {
     U8([u64; BINS]),
@@ -93,9 +98,8 @@ impl Histogram {
 
         for row in 0..height {
             let start = row * stride;
-            for sample in data[start..start + row_bytes].chunks_exact(2) {
-                let bytes: [u8; 2] = sample.try_into().ok()?;
-                let value = u16::from_ne_bytes(bytes).min(max_value);
+            for sample in data[start..start + row_bytes].as_chunks::<2>().0 {
+                let value = u16::from_ne_bytes(*sample).min(max_value);
                 if let Some(count) = counts.get_mut(usize::from(value)) {
                     *count = count.saturating_add(1);
                 }

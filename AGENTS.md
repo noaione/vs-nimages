@@ -136,9 +136,12 @@ keep both in `crate-type`, or the integration tests stop linking.
 ```powershell
 cargo build --release --locked
 cargo test --locked
-cargo clippy --all-targets
+cargo clippy --all-targets --locked -- -D warnings
 cargo fmt --check
 ```
+
+clippy warnings are failures. keep the `-D warnings` flag so clippy cannot
+report success while emitting warnings.
 
 the development python is `.venv\Scripts\python.exe` (3.12, VapourSynth R80). the
 test extras add numpy, which the validator needs:

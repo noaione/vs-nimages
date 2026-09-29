@@ -52,7 +52,10 @@ enum CurveDomain {
 /// inline so a constant `Levels` never dereferences a pointer per frame, and
 /// `create_video_filter` moves the whole filter behind a `Box`, so the larger
 /// variant never lands on the stack.
-#[allow(clippy::large_enum_variant)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "inline LUT storage avoids a pointer dereference for every frame"
+)]
 enum Curve {
     /// One table, built once and shared by every frame.
     Constant(Resolved),
