@@ -294,6 +294,100 @@ def check_posterize(fixtures: dict) -> None:
         same(sorted(set(table.tolist())), case["levels"], f"bits={case['bits']}: distinct levels")
 
 
+def lloyd_reference(counts: np.ndarray, colors: int) -> np.ndarray:
+    """The `lloyd.py` solver over one histogram, as a full code-value table.
+
+    This is an independent description of the reference the plugin's Lloyd path
+    is checked against: 40 passes move every interior level to the mean of its
+    bucket, both ends stay pinned, and the last assignment maps each code value
+    to its nearest level.
+    """
+    maximum = counts.size - 1
+    hist = counts.astype(np.float64)
+    x = np.arange(counts.size)
+    levels = np.linspace(0, maximum, colors)
+    for _ in range(40):
+        edges = np.concatenate([[-1.0], (levels[:-1] + levels[1:]) / 2, [maximum + 1.0]])
+        bucket = np.digitize(x, edges) - 1
+        for j in range(1, colors - 1):
+            mask = bucket == j
+            if hist[mask].sum() > 0:
+                levels[j] = (hist[mask] * x[mask]).sum() / hist[mask].sum()
+    edges = np.concatenate([[-1.0], (levels[:-1] + levels[1:]) / 2, [maximum + 1.0]])
+    return np.round(levels[np.digitize(x, edges) - 1]).astype(np.uint16)
+
+
+def check_lloyd_posterize() -> None:
+    section("Lloyd-Max levels from the frame histogram")
+    # Four clusters, one per bucket at four levels, so every interior level has
+    # mass and the pinned ends stay on the code-value extremes.
+    page = np.zeros((32, 64), dtype=np.uint8)
+    page[:8, :] = 40
+    page[8:16, :] = 90
+    page[16:24, :] = 200
+    page[24:, :] = 250
+    clip = clip_of(page)
+    counts = np.bincount(page.ravel(), minlength=256)
+
+    for bits in (1, 2, 3, 4, 6):
+        expected = lloyd_reference(counts, 1 << bits)
+        mapped = array_of(core.nimages.Posterize(clip, bits=bits, method=1))
+        same(mapped.tolist(), expected[page].tolist(), f"GRAY8 bits={bits}")
+
+    # The default still spaces the levels evenly, so the two methods differ here.
+    even = array_of(core.nimages.Posterize(clip, bits=3))
+    lloyd = array_of(core.nimages.Posterize(clip, bits=3, method=1))
+    check(even.tolist() != lloyd.tolist(), "method=1 must not repeat the even levels")
+
+    # `bits` equal to the sample depth is the identity for both methods.
+    identity = array_of(core.nimages.Posterize(clip, bits=8, method=1))
+    same(identity.tolist(), page.tolist(), "GRAY8 bits=8 method=1 is the identity")
+
+    # Two clusters leave a bucket empty, and it keeps the even level it started
+    # on, which is what the reference does.
+    sparse = np.zeros((8, 8), dtype=np.uint8)
+    sparse[:, :4] = 40
+    sparse[:, 4:] = 200
+    sparse_clip = clip_of(sparse)
+    sparse_counts = np.bincount(sparse.ravel(), minlength=256)
+    expected = lloyd_reference(sparse_counts, 4)
+    same(
+        array_of(core.nimages.Posterize(sparse_clip, bits=2, method=1)).tolist(),
+        expected[sparse].tolist(),
+        "GRAY8 bits=2 on a two-cluster page",
+    )
+
+    # The same solver on a 16-bit page, whose histogram has one bin per code value.
+    values = np.zeros((16, 16), dtype=np.uint16)
+    values[:4, :] = 1_000
+    values[4:8, :] = 9_000
+    values[8:12, :] = 40_000
+    values[12:, :] = 60_000
+    wide = clip_of_planes([values], vs.GRAY16, width=16, height=16)
+    wide_counts = np.bincount(values.ravel(), minlength=65_536)
+    expected = lloyd_reference(wide_counts, 16)
+    with core.nimages.Posterize(wide, bits=4, method=1).get_frame(0) as frame:
+        same(np.asarray(frame[0]).tolist(), expected[values].tolist(), "GRAY16 bits=4")
+
+    # `use_props` still picks the level count from the shades, and Lloyd picks
+    # where the levels sit.
+    shades = core.nimages.PeakGrayShades(clip)
+    shade_count = len(as_list(props_of(shades)["NImagesGrayShades"]))
+    bits = 1 if shade_count <= 2 else math.ceil(math.log2(shade_count))
+    expected = lloyd_reference(counts, 1 << bits)
+    same(
+        array_of(core.nimages.Posterize(shades, use_props=True, method=1)).tolist(),
+        expected[page].tolist(),
+        "use_props picks the count and Lloyd the levels",
+    )
+
+    expect_error(
+        "Posterize method 2",
+        lambda: core.nimages.Posterize(clip, bits=2, method=2),
+        contains="method must be 0 (even levels) or 1 (Lloyd-Max)",
+    )
+
+
 def check_levels_from_properties() -> None:
     section("levels driven by PeakStats properties")
     # A page with a black peak at 12 and a white peak at 245.
@@ -497,7 +591,7 @@ def check_errors() -> None:
     expect_error(
         "Levels auto_gamma above the domain",
         lambda: core.nimages.Levels(gray, black=200, white=255, auto_gamma=1),
-        contains="half the sample range",
+        contains="half of the sample range",
     )
     expect_error(
         "Levels peak_offset below zero",
@@ -621,8 +715,11 @@ def check_high_depth_integer_mapping() -> None:
     }
     values = np.asarray([0, 1_024, 30_500, 60_000, 65_535], dtype=np.uint16)
 
+    # 4:2:0 subsamples chroma, and VapourSynth refuses an odd width or height
+    # for it, so every format in the map is built at an even size.
+    width, height = 6, 4
     for name, fmt in formats.items():
-        blank = core.std.BlankClip(width=5, height=3, format=fmt, length=1)
+        blank = core.std.BlankClip(width=width, height=height, format=fmt, length=1)
         shapes = [
             np.asarray(blank.get_frame(0)[plane]).shape
             for plane in range(blank.format.num_planes)
@@ -631,7 +728,7 @@ def check_high_depth_integer_mapping() -> None:
             np.resize(np.roll(values, plane), shape).astype(np.uint16, copy=True)
             for plane, shape in enumerate(shapes)
         ]
-        source = clip_of_planes(planes, fmt, width=5, height=3)
+        source = clip_of_planes(planes, fmt, width=width, height=height)
 
         identity = core.nimages.Levels(source, gamma=1.0)
         with identity.get_frame(0) as frame:
@@ -909,6 +1006,7 @@ def main() -> int:
     check_histogram_shades(shades)
     check_levels(levels)
     check_posterize(posterize)
+    check_lloyd_posterize()
     check_levels_from_properties()
     check_property_preservation()
     check_analysis_leaves_pixels_alone()

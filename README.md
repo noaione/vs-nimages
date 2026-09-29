@@ -214,7 +214,7 @@ such a black point.
 
 ### `Posterize`
 
-maps every plane of each frame to `2 ** bits` evenly spaced values, without
+by default maps every plane of each frame to `2 ** bits` evenly spaced values,
 dithering. Like `Levels` it takes 8 to 16 bit integer Gray, RGB or YUV formats.
 
 ```python
@@ -230,6 +230,7 @@ first, as in [use](#use) above.
 | `bits` | required | number of bits, from 1 through the input sample depth |
 | `use_props` | `false` | read `NImagesGrayShades` from each input frame instead, this is the same as auto bits detection. |
 | `debug` | `false` | log the resolved depth and each frame's stage timings |
+| `method` | `0` | `0` spaces the levels evenly, `1` solves them from the frame's histogram with Lloyd-Max |
 
 `bits` equal to the input sample depth is the identity. the mapping uses the
 full native sample maximum `Q`:
@@ -243,6 +244,15 @@ out    = round(level * Q / (colors - 1))
 the pillow path follows this with `quantize(colors, dither=NONE)`, which is
 provably redundant here: the mapping already produces exactly `colors` distinct
 values, and pillow's quantized output is byte-identical to its input.
+
+`method=1` solves the levels instead of spacing them. it runs the Lloyd-Max
+solver over the frame's own histogram: 40 passes move each interior level to
+the mean of its bucket, both endpoints stay pinned to `0` and the sample maximum,
+and a bucket holding no sample keeps its even level. the histogram comes from
+plane 0, which is the gray plane of a Gray clip and the luma plane of a YUV one,
+and the solved table then applies to every plane. the levels are solved per
+frame, so a clip whose frames differ gets a level set each, which a page-per-frame
+caller wants and a moving clip would show as flicker.
 
 **note**: when `bits` equals the sample depth, the frame is returned unchanged.
 

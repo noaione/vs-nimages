@@ -75,7 +75,8 @@ carries a `parity` of `nmanga`, `diverges` or `reference-only` plus the
   assembled in a fixed `[u64; 258]` buffer, so frame evaluation allocates nothing.
 - `src/gray_shades.rs`: `analyze_gray_shades` over the fixed `0..=255` binning.
 - `src/levels.rs`: the level lookup table, `automatic_gamma`, and `validate`.
-- `src/posterize.rs`: the posterization lookup table.
+- `src/posterize.rs`: the posterization lookup table and the Lloyd-Max level
+  solver.
 - `src/round.rs`: the ties-to-even helper `levels` and `posterize` share.
 - `tests/test_golden.rs`: replays every fixture through the algorithms. frame
   fixtures are rebuilt into a stride-padded buffer whose padding byte is not a
@@ -192,6 +193,8 @@ argument and property tables.
   `docs/FINDINGS.md` §7.
 - `auto_gamma` refuses a black point of 128 or more, because the expression is
   undefined there.
+- `Posterize(method=1)` solves the levels for each frame from plane 0's
+  histogram with Lloyd-Max, and `method=0`, the default, spaces them evenly.
 - every filter takes `debug:int:opt`. it writes a settings line on the first
   frame it is asked for and a stage timing line per frame, both through
   `core.log`, so a host collects them with `add_log_handler`. `tools/bench.py`

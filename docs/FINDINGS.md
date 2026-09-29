@@ -430,6 +430,57 @@ No exact `.5` ties occur in either rounding step for `bits = 1..=8`, so Rust's
 `f64::round` would in practice also agree — but the explicit helper is kept for
 the same reason as in §4.1.
 
+### 6.3 Lloyd-Max levels (`method=1`)
+
+`Posterize(method=1)` does not use the §6.2 table. It solves the levels per
+frame from the frame's own histogram with the Lloyd-Max solver in `lloyd.py`,
+which sits beside `posterize_image_by_bits` as the second reference for this
+filter:
+
+```text
+counts[i] = how many samples of plane 0 hold code value i
+levels    = linspace(0, maximum, colors)
+repeat 40 times:
+    edges[j]  = (levels[j-1] + levels[j]) / 2
+    levels[j] = sum(counts[i] * i) / sum(counts[i])   over bucket j, interior j only
+out[x]    = round_ties_even(levels[bucket of x])
+```
+
+Vectors taken from running `lloyd.py` itself on 8 bit pages:
+
+| page | colors | levels |
+| --- | ---: | --- |
+| mass at 40, 90, 200 and 250, one cluster per bucket | 4 | 0, 90, 200, 255 |
+| mass at 40 and 200 only | 4 | 0, 85, 200, 255 |
+| every code value, one sample each | 256 | 0..=255, the identity |
+
+- Both ends are **pinned**. Level 0 and level `colors-1` never move, whatever
+  mass sits there, so the 40/90/200/250 page maps 0 and 255 rather than the
+  outermost cluster means.
+- A bucket with **no mass** keeps the evenly spaced level it was initialised
+  with. On the 40/200 page, bucket 1 spans 43..=127 and stays at 85, and 40
+  itself lands on the pinned 0.
+- The levels stay strictly ascending, because a bucketed mean can never cross
+  the midpoint that bounds its own bucket. They also stay distinct, so an empty
+  bucket widens a gap instead of collapsing two levels.
+- The rounding in the last step is ties-to-even, so a level exactly on `.5`
+  rounds to the even integer. The Rust solver keeps the levels as `f64` and
+  rounds only the emitted value, which matters: the bucket boundary stays at
+  the *unrounded* midpoint, as it does in the reference.
+- `bits` equal to the sample depth is the identity for this method too, because
+  `2^depth` levels with pinned ends assign every code value to itself. The
+  filter then returns the input frame without building a table.
+- The levels come from **the frame being processed**, not from the clip. A clip
+  whose frames differ gets a level set each, which is what a page-per-frame
+  caller wants and what a moving clip would show as flicker.
+
+The accumulator and the monotone edge scan that the Rust solver uses were
+checked against `lloyd.py` over 200 random histograms of 8, 16, 32, 256 and
+1024 code values with color counts from 2 through 64: 0 mismatches. The Rust
+unit tests freeze the vectors above, and `tests/check-nimages.py` re-derives
+the same algorithm in numpy and compares it against the built plugin for an
+8 bit and a 16 bit page.
+
 ---
 
 ## 7. Gaps in `IMPLEMENTATIONS.md` to resolve

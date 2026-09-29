@@ -5,6 +5,11 @@
 //! format is accepted and every plane is rewritten. Posterizing the planes of
 //! an RGB clip independently is not the same operation as posterizing its
 //! luma, so an RGB caller that wants the grayscale behaviour converts first.
+//!
+//! `method=0`, the default, spaces the levels evenly. `method=1` solves them
+//! from each frame's own histogram with the Lloyd-Max solver in
+//! [`crate::posterize::lloyd_max_levels`], so the levels sit where the page has
+//! mass rather than at fixed intervals.
 
 use std::borrow::Cow;
 use std::ffi::{CStr, c_void};
@@ -18,12 +23,13 @@ use vapoursynth4_rs::{core::CoreRef, ffi, key};
 
 use crate::error::{NImagesError, Result};
 use crate::posterize::{
-    MAX_INTEGER_SAMPLE_BITS, MIN_BITS, PosterizeError, posterize_lut, posterize_lut_u16,
+    MAX_INTEGER_SAMPLE_BITS, MIN_BITS, PosterizeError, lloyd_max_levels, posterize_lut,
+    posterize_lut_from_levels_u8, posterize_lut_from_levels_u16, posterize_lut_u16,
 };
 
 use super::{
     Accept, FrameTrace, MappingTable, add_filter, check_frame_format, checked_info, describe_frame,
-    input_failed, map_frame, read_clip, read_int, report_settings_once,
+    input_failed, map_frame, plane_histogram, read_clip, read_int, report_settings_once,
 };
 
 // Hardcoded table
@@ -35,6 +41,25 @@ const TABLE_BITS_5: [u8; 256] = posterize_lut(5).unwrap();
 const TABLE_BITS_6: [u8; 256] = posterize_lut(6).unwrap();
 const TABLE_BITS_7: [u8; 256] = posterize_lut(7).unwrap();
 const TABLE_BITS_8: [u8; 256] = posterize_lut(8).unwrap();
+
+/// How a posterization picks its levels.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Method {
+    /// `2^bits` levels spaced evenly over the sample range.
+    Even,
+    /// Levels solved from each frame's histogram with Lloyd-Max.
+    Lloyd,
+}
+
+impl Method {
+    /// The name the debug settings line reports.
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Even => "even",
+            Self::Lloyd => "lloyd",
+        }
+    }
+}
 
 /// A posterization operation, fixed by bits or automatically inferred from gray shades
 enum Bits {
@@ -51,10 +76,11 @@ struct ResolvedBits {
     table: MappingTable,
 }
 
-/// Maps each frame to `2^bits` evenly spaced gray values, without dithering.
+/// Maps each frame to a fixed number of gray values, without dithering.
 pub struct Posterize {
     source: VideoNode,
     bits: Bits,
+    method: Method,
     resolved: Option<ResolvedBits>,
     debug: bool,
     /// Set once the settings line has been written for this instance.
@@ -67,7 +93,8 @@ impl Filter for Posterize {
     type FilterData = ();
 
     const NAME: &'static CStr = c"Posterize";
-    const ARGS: &'static CStr = c"clip:vnode;bits:int:opt;use_props:int:opt;debug:int:opt;";
+    const ARGS: &'static CStr =
+        c"clip:vnode;bits:int:opt;use_props:int:opt;method:int:opt;debug:int:opt;";
     const RETURN_TYPE: &'static CStr = c"clip:vnode;";
 
     fn create(
@@ -118,9 +145,22 @@ impl Filter for Posterize {
 
             Bits::Fixed(bpc_u8)
         };
+
+        // `method` only changes where the levels sit. The level count still comes
+        // from `bits`, or from the shades `PeakGrayShades` attached.
+        let method = match read_int(&input, key!(c"method"))?.unwrap_or(0) {
+            0 => Method::Even,
+            1 => Method::Lloyd,
+            other => {
+                return Err(NImagesError::new(format!(
+                    "Posterize: method must be 0 (even levels) or 1 (Lloyd-Max), got {other}"
+                )));
+            }
+        };
         let resolved = match &bits {
             Bits::Fixed(bits)
-                if info.format.color_family != vapoursynth4_rs::ColorFamily::Undefined =>
+                if method == Method::Even
+                    && info.format.color_family != vapoursynth4_rs::ColorFamily::Undefined =>
             {
                 Some(resolve_from_bits(*bits, info.format.bits_per_sample as u8)?)
             }
@@ -139,6 +179,7 @@ impl Filter for Posterize {
                 source,
                 bits,
                 resolved,
+                method,
                 debug,
                 reported: AtomicBool::new(false),
             },
@@ -167,21 +208,12 @@ impl Filter for Posterize {
                 check_frame_format(&input, "Posterize", Accept::Integer8To16)?;
                 let sample_depth = input.get_video_format().bits_per_sample as u8;
 
-                let resolved: Cow<'_, ResolvedBits> = match &self.resolved {
-                    Some(resolved) if resolved.sample_depth == sample_depth => {
-                        Cow::Borrowed(resolved)
+                let bits = match &self.bits {
+                    Bits::Fixed(bits) => {
+                        validate_bits(*bits, sample_depth)?;
+                        *bits
                     }
-                    Some(_) => {
-                        return Err(NImagesError::new(
-                            "Posterize: the input sample depth changed after filter creation",
-                        ));
-                    }
-                    None => match &self.bits {
-                        Bits::Fixed(bits) => Cow::Owned(resolve_from_bits(*bits, sample_depth)?),
-                        Bits::FromShades => {
-                            Cow::Owned(resolve_from_properties(&input, sample_depth)?)
-                        }
-                    },
+                    Bits::FromShades => shade_bits(&input, sample_depth)?,
                 };
 
                 let settings = describe_frame(&input);
@@ -190,15 +222,32 @@ impl Filter for Posterize {
                     &self.reported,
                     &mut core,
                     format_args!(
-                        "Posterize: bits={} colors={} input={settings}",
-                        resolved.bits,
-                        1u32 << resolved.bits
+                        "Posterize: bits={bits} colors={} method={} input={settings}",
+                        1u32 << bits,
+                        self.method.name()
                     ),
                 );
 
-                if resolved.bits == sample_depth {
+                // `2^depth` levels cover every code value, so both methods are the
+                // identity there and the frame needs no table.
+                if bits == sample_depth {
                     return Ok(Some(input));
                 }
+
+                let resolved: Cow<'_, ResolvedBits> = match self.method {
+                    Method::Even => match &self.resolved {
+                        Some(resolved) if resolved.sample_depth == sample_depth => {
+                            Cow::Borrowed(resolved)
+                        }
+                        Some(_) => {
+                            return Err(NImagesError::new(
+                                "Posterize: the input sample depth changed after filter creation",
+                            ));
+                        }
+                        None => Cow::Owned(resolve_from_bits(bits, sample_depth)?),
+                    },
+                    Method::Lloyd => Cow::Owned(resolve_lloyd(&input, bits, sample_depth)?),
+                };
 
                 let mark = Instant::now();
                 let output = map_frame(&core, &input, &resolved.table)?;
@@ -213,8 +262,8 @@ impl Filter for Posterize {
     }
 }
 
-/// Resolves the lookup table for one frame from `PeakGrayShades` properties.
-fn resolve_from_properties(frame: &VideoFrame, sample_depth: u8) -> Result<ResolvedBits> {
+/// The level count `PeakGrayShades` implies for one frame.
+fn shade_bits(frame: &VideoFrame, sample_depth: u8) -> Result<u8> {
     let properties = frame
         .properties()
         .ok_or_else(|| NImagesError::new("Posterize: the input frame holds no properties"))?;
@@ -237,21 +286,55 @@ fn resolve_from_properties(frame: &VideoFrame, sample_depth: u8) -> Result<Resol
     }
 
     // Pick the smallest power-of-two level count that can cover all shades.
-    let bits = if shade_count <= 2 {
-        MIN_BITS
-    } else {
-        (usize::BITS - (shade_count - 1).leading_zeros()) as u8
-    };
-
-    resolve_from_bits(bits, sample_depth)
+    if shade_count <= 2 {
+        return Ok(MIN_BITS);
+    }
+    Ok((usize::BITS - (shade_count - 1).leading_zeros()) as u8)
 }
 
-fn resolve_from_bits(bits: u8, sample_depth: u8) -> Result<ResolvedBits> {
-    if bits == 0 || bits > sample_depth {
+/// Solves one frame's levels with Lloyd-Max and builds its lookup table.
+///
+/// The histogram comes from plane 0, which is the gray plane of a Gray clip and
+/// the luma plane of a YUV one. The table then applies to every plane, exactly as
+/// the evenly spaced table does, so an RGB caller that wants gray behaviour
+/// converts first.
+fn resolve_lloyd(frame: &VideoFrame, bits: u8, sample_depth: u8) -> Result<ResolvedBits> {
+    let histogram = plane_histogram(frame)?;
+    let colors = 1usize << bits;
+    let levels = lloyd_max_levels(histogram.counts(), colors).map_err(table_error)?;
+
+    let table = if sample_depth == 8 {
+        MappingTable::U8(posterize_lut_from_levels_u8(&levels).map_err(table_error)?)
+    } else {
+        MappingTable::U16(
+            posterize_lut_from_levels_u16(&levels, histogram.max_value()).map_err(table_error)?,
+        )
+    };
+
+    Ok(ResolvedBits {
+        bits,
+        sample_depth,
+        table,
+    })
+}
+
+/// Checks one level count against the frame's sample depth.
+fn validate_bits(bits: u8, sample_depth: u8) -> Result<()> {
+    if !(MIN_BITS..=sample_depth).contains(&bits) {
         return Err(NImagesError::new(format!(
             "Posterize needs between {MIN_BITS} and {sample_depth} bits, got {bits}"
         )));
     }
+    Ok(())
+}
+
+/// Wraps a lookup-table failure with the filter's name.
+fn table_error(error: PosterizeError) -> NImagesError {
+    NImagesError::new(format!("Posterize: {}", error.message()))
+}
+
+fn resolve_from_bits(bits: u8, sample_depth: u8) -> Result<ResolvedBits> {
+    validate_bits(bits, sample_depth)?;
 
     if sample_depth == 8 {
         return match bits {
@@ -301,15 +384,7 @@ fn resolve_from_bits(bits: u8, sample_depth: u8) -> Result<ResolvedBits> {
         };
     }
 
-    let table = posterize_lut_u16(bits, sample_depth).map_err(|error| {
-        let message = match error {
-            PosterizeError::InvalidBits => {
-                "posterization bits must be between 1 and the sample depth"
-            }
-            PosterizeError::Allocation => "could not allocate the posterization lookup table",
-        };
-        NImagesError::new(format!("Posterize: {message}"))
-    })?;
+    let table = posterize_lut_u16(bits, sample_depth).map_err(table_error)?;
     Ok(ResolvedBits {
         table: MappingTable::U16(table),
         bits,

@@ -135,6 +135,13 @@ pixel has already been mapped to one of exactly `colors` gray values. It must
 be proven redundant with golden tests before it is omitted from the native
 implementation.
 
+A second mapping, `method=1`, does not space the levels evenly. It solves them
+from the frame's own histogram with the Lloyd-Max solver in `lloyd.py`: 40
+passes, both endpoints pinned, and a bucket holding no sample keeps the level it
+started on. `docs/FINDINGS.md` §6.3 records the verified vectors. The default
+stays `method=0`, the mapping above, so the committed posterize golden tables and
+`nmanga` parity are unchanged.
+
 ## 5. Proposed public plugin interface
 
 Configure the plugin with:
@@ -276,6 +283,13 @@ posterized = core.nimages.Posterize(clip, bits=4)
 It requires `bits` in `1..=sample_depth`, disables dithering, and maps every
 plane independently over its full native sample range. RGB input is not
 converted to gray.
+
+`method=0` (the default) spaces the levels evenly, and `method=1` solves them for
+each frame from plane 0's histogram with Lloyd-Max. Plane 0 is the gray plane of
+a Gray clip and the luma plane of a YUV one, and the solved table then applies to
+every plane; an RGB caller that wants the grayscale behaviour converts first. The
+levels are recomputed for every frame, so a clip whose frames differ gets a level
+set each.
 
 Peak analysis and levels deliberately remain separate. Users should compose
 `PeakStats` and `Levels(use_props=True)` when automatic per-frame levels are
