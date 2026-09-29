@@ -7,10 +7,12 @@ Run it against an installed plugin:
 
 It replays the committed golden vectors from `tests/fixtures/` through the real
 filters, so a passing run means the plugin agrees with the reference python
-implementation and with the Rust unit tests. It needs numpy and VapourSynth and
-nothing else.
+implementation and with the Rust unit tests. It needs numpy, VapourSynth, and the
+`imgseqs` plugin, which the two sequence sections read pages through.
 
-`uv sync --extra dev --extra dev-tests` builds and installs the plugin first.
+`uv sync --extra dev --extra dev-tests` builds and installs the plugin and imgseqs
+first. Without imgseqs the run stops with exit code 2 instead of reporting a pass
+it did not earn.
 """
 
 from __future__ import annotations
@@ -39,6 +41,34 @@ FUNCTIONS = ("Deblur", "Levels", "PeakGrayShades", "PeakStats", "Posterize")
 MAX_SYNTHETIC_PIXELS = 1 << 16
 
 core = vs.core
+
+# Two sections read a page sequence through `core.imgseqs.Read`, which is the only
+# way to hand a filter a clip whose dimensions or depths vary per frame. A run
+# that cannot reach it stops before the first check.
+IMGSEQS_MISSING = """\
+the imgseqs plugin is not registered, and two sections need it: variable
+dimensions and mixed depths come from a page sequence, not from a BlankClip.
+
+install the test extra, which builds the plugin and imgseqs together:
+
+    uv sync --locked --extra dev --extra dev-tests
+
+or imgseqs on its own:
+
+    python -m pip install vapoursynth-imageseqs
+
+the wheel links the codec libraries at runtime instead of bundling them.
+
+linux:
+
+    sudo apt-get install --yes libde265-0 libdav1d7
+
+macos:
+
+    brew install dav1d libde265
+
+the windows wheel carries its own libraries and needs nothing.
+"""
 
 failures: list[str] = []
 checks = 0
@@ -1362,6 +1392,10 @@ def check_deblur_errors() -> None:
 
 
 def main() -> int:
+    if not hasattr(core, "imgseqs"):
+        print(IMGSEQS_MISSING, file=sys.stderr)
+        return 2
+
     frames = load("frames.json")
     peaks = load("peaks.json")
     shades = load("shades.json")

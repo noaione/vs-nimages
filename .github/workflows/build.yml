@@ -91,7 +91,11 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: install build and integration dependencies
-        run: python -m pip install --upgrade build numpy "VapourSynth>=79,<81"
+        run: python -m pip install --upgrade build numpy "VapourSynth>=79,<81" "vapoursynth-imageseqs>=0.2.0"
+
+      - name: install image sequence codec libraries
+        if: runner.os == 'macOS'
+        run: brew install dav1d libde265
 
       - name: build wheel
         run: python -m build --wheel --outdir dist
