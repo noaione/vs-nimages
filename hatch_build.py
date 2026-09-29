@@ -72,7 +72,7 @@ def wheel_platform_tag() -> str:
 class NativePluginHook(BuildHookInterface):  # type: ignore[type-arg]
     """Build the Cargo plugin and place it in VapourSynth's plugin tree."""
 
-    plugin_directory = Path("vapoursynth") / "plugins" / "nimages"
+    plugin_directory = Path("vapoursynth") / "plugins"
 
     def initialize(self, version: str, build_data: dict[str, object]) -> None:
         root = Path(self.root)
@@ -83,10 +83,6 @@ class NativePluginHook(BuildHookInterface):  # type: ignore[type-arg]
         destination_directory.mkdir(parents=True, exist_ok=True)
         staged_plugin = destination_directory / artifact.name
         shutil.copy2(artifact, staged_plugin)
-        manifest = destination_directory / "manifest.vs"
-        manifest.write_text(
-            f"[VapourSynth Manifest V1]\n{artifact.stem}\n", encoding="utf-8", newline="\n"
-        )
 
         force_include = build_data.setdefault("force_include", {})
         if not isinstance(force_include, dict):
@@ -94,7 +90,6 @@ class NativePluginHook(BuildHookInterface):  # type: ignore[type-arg]
         force_include[str(staged_plugin)] = str(
             self.plugin_directory / artifact.name
         )
-        force_include[str(manifest)] = str(self.plugin_directory / manifest.name)
 
         # Keep the license and attribution files beside the native artifact in
         # every wheel. Hatch's normal package selection does not include
