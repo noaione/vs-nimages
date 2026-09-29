@@ -1,4 +1,4 @@
-//! Level adjustment: a 256-entry lookup table for `GRAY8`.
+//! Level adjustment for integer and single-precision float samples.
 //!
 //! For an input `x`, black point `b`, white point `w`, output maximum `Q = 255`
 //! and gamma `g` the transfer curve is
@@ -175,6 +175,27 @@ pub fn levels_lut_u16(
     Ok(table)
 }
 
+/// Applies a validated level curve to one float sample.
+///
+/// Values outside the endpoints clamp to zero or one. NaN remains NaN, while
+/// infinities clamp through the endpoint comparisons. The filter validates the
+/// parameters once when it creates the curve, so this function does not repeat
+/// those checks for every sample.
+#[must_use]
+pub fn apply_float_level(value: f32, black: f64, white: f64, gamma: f64) -> f32 {
+    if value.is_nan() {
+        return value;
+    }
+    let value = f64::from(value);
+    if value < black {
+        0.0
+    } else if value > white {
+        1.0
+    } else {
+        (((value - black) / (white - black)).powf(1.0 / gamma)).clamp(0.0, 1.0) as f32
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,5 +332,18 @@ mod tests {
         assert!(levels_lut(0.0, 255.0, 1e-9).is_ok());
         assert!(levels_lut(0.0, 255.0, 1e9).is_ok());
         assert!(levels_lut(-1e6, 1e6, 1.0).is_ok());
+    }
+
+    #[test]
+    fn float_levels_clamp_curve_and_preserve_nan() {
+        assert_eq!(apply_float_level(-1.0, 0.25, 0.75, 1.0), 0.0);
+        assert_eq!(apply_float_level(0.25, 0.25, 0.75, 1.0), 0.0);
+        assert_eq!(apply_float_level(0.5, 0.25, 0.75, 1.0), 0.5);
+        assert_eq!(apply_float_level(0.75, 0.25, 0.75, 1.0), 1.0);
+        assert_eq!(apply_float_level(2.0, 0.25, 0.75, 1.0), 1.0);
+        assert!(apply_float_level(f32::NAN, 0.25, 0.75, 1.0).is_nan());
+        assert_eq!(apply_float_level(f32::NEG_INFINITY, 0.25, 0.75, 1.0), 0.0);
+        assert_eq!(apply_float_level(f32::INFINITY, 0.25, 0.75, 1.0), 1.0);
+        assert!((apply_float_level(0.5, 0.25, 0.75, 2.0) - 0.5f32.sqrt()).abs() < f32::EPSILON);
     }
 }

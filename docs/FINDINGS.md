@@ -1,6 +1,6 @@
 # vapoursynth-nimages — Pre-implementation Findings & Plan
 
-Status: findings verified, decisions pending
+Status: original findings verified; M6 extension in progress
 Companion to: [IMPLEMENTATIONS.md](./IMPLEMENTATIONS.md)
 
 Reference implementation under study:
@@ -374,9 +374,11 @@ values". The doc's §2 goal — "Match the existing Python behavior where it is
 intentional, while documenting and correcting existing validation and
 unit-conversion bugs" — covers it.
 
-**Proposed contract:** use the fixed `0..=255` binning that `find_local_peak`
+**Locked 8-bit contract:** use the fixed `0..=255` binning that `find_local_peak`
 already uses, the same `[u64; 256]` histogram as every other filter, and true
-gray values in `NImagesGrayShades`.
+gray values in `NImagesGrayShades`. M6 extends wider integer input to one bin per
+native code value and reports shades in native sample units without changing
+the `GRAY8` behavior.
 
 The golden generator has already been written against this contract and records
 the divergence rather than hiding it: every shade case carries
@@ -549,31 +551,33 @@ encoder.
 ### 8.1 Input surface, widened after review
 
 The first M3 draft took `GRAY8` only and refused a clip whose dimensions vary.
-Both were wrong for how the filters are used, so the surface is:
+Both were wrong for how the filters are used. M3 widened the family surface to
+8-bit formats; M6 adds integer formats through 16 bits and float `Levels`:
 
 | filter | families | planes | variable dimensions |
 |---|---|---|---|
-| `PeakStats` | Gray | plane 0 | yes |
-| `PeakGrayShades` | Gray | plane 0 | yes |
-| `Levels` | Gray, RGB, YUV | all | yes |
-| `Posterize` | Gray, RGB, YUV | all | yes |
+| `PeakStats` | Gray integer 8–16 bit | plane 0 | yes |
+| `PeakGrayShades` | Gray integer 8–16 bit | plane 0 | yes |
+| `Levels` | Gray/RGB/YUV integer 8–16 bit; GrayS/RGBS | all | yes |
+| `Posterize` | Gray/RGB/YUV integer 8–16 bit | all | yes |
 
-Anything not an 8 bit integer format is refused, with the message naming what was
-received.
+Formats outside those rows are refused, with the message naming what was
+received. Float `Levels` uses `black_float` and `white_float`; peak properties,
+`peak_offset`, and `auto_gamma` remain integer-only.
 
 A clip whose dimensions or format vary reports `Undefined` at the node, so the
 format is checked twice: once at creation when the node declares one, and again
 per frame when it does not. The output `VideoInfo` is the input's own, which is
 what carries `width = height = 0` through.
 
-**`getFrameWidth` is the sample count for every plane.** VapourSynth gives an
-RGB24 frame three *separate* plane buffers rather than one interleaved buffer:
+**`getFrameWidth` is the sample count for every plane.** VapourSynth gives RGB
+frames three *separate* plane buffers rather than one interleaved buffer.
 `getReadPtr` for planes 0, 1 and 2 of a 6x4 RGB24 frame returned addresses
-differing by whole plane allocations, not by one byte. Samples are therefore one
-byte apart for Gray, RGB and YUV alike, and the walk is the same for all of them.
-The first implementation assumed the interleaved layout and used a three byte
-sample stride for RGB, which mixed the channels; the RGB channel-separation check
-in `tests/check-nimages.py` is what catches that, and it stays in the suite.
+differing by whole plane allocations, not by one byte. Each plane walk advances
+by its sample width (one byte for 8-bit integer, two for wider integer, four for
+32-bit float) and its own byte stride. The first implementation assumed an
+interleaved layout and mixed RGB channels; the RGB channel-separation check in
+`tests/check-nimages.py` is what catches that, and it stays in the suite.
 
 ### M4 — `nmanga` integration — **deferred, out of scope**
 

@@ -40,6 +40,7 @@ use vapoursynth4_rs::{ColorFamily, SampleType, VideoInfo, core::CoreRef, ffi, ke
 
 use crate::error::{NImagesError, Result};
 use crate::histogram::Histogram;
+use crate::levels::apply_float_level;
 
 /// The sample-depth range the integer mapping filters accept.
 const MIN_INTEGER_BITS: i32 = 8;
@@ -51,20 +52,24 @@ const TRACE_STAGES: usize = 4;
 /// What a filter accepts as input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Accept {
-    /// Gray, 8 bit integer, one plane. what the analyzers take, because a
+    /// Gray, 8 to 16 bit integer, one plane. what the analyzers take, because a
     /// histogram of one plane only means something for a gray clip.
-    Gray8,
+    GrayInteger8To16,
     /// Any color family, 8 to 16 bit integer, every plane. what the lookup-table
     /// filters take, because a curve applies per sample whatever the family.
     Integer8To16,
+    /// Inputs supported by `Levels`: all integer formats above plus Gray and
+    /// RGB single-precision float formats.
+    Levels,
 }
 
 impl Accept {
     /// Wording for an error message.
     fn describe(self) -> &'static str {
         match self {
-            Self::Gray8 => "a constant Gray 8 bit clip",
+            Self::GrayInteger8To16 => "a constant Gray 8 to 16 bit integer clip",
             Self::Integer8To16 => "an 8 to 16 bit integer clip",
+            Self::Levels => "an 8 to 16 bit integer clip or a Gray/RGB 32 bit float clip",
         }
     }
 
@@ -81,9 +86,18 @@ impl Accept {
                 format.sample_type == SampleType::Integer
                     && (MIN_INTEGER_BITS..=MAX_INTEGER_BITS).contains(&format.bits_per_sample)
             }
-            Self::Gray8 => {
+            Self::Levels => {
+                (format.sample_type == SampleType::Integer
+                    && (MIN_INTEGER_BITS..=MAX_INTEGER_BITS).contains(&format.bits_per_sample))
+                    || (format.sample_type == SampleType::Float
+                        && format.bits_per_sample == 32
+                        && matches!(format.color_family, ColorFamily::Gray | ColorFamily::RGB)
+                        && format.sub_sampling_w == 0
+                        && format.sub_sampling_h == 0)
+            }
+            Self::GrayInteger8To16 => {
                 format.sample_type == SampleType::Integer
-                    && format.bits_per_sample == 8
+                    && (MIN_INTEGER_BITS..=MAX_INTEGER_BITS).contains(&format.bits_per_sample)
                     && format.color_family == ColorFamily::Gray
                     && format.sub_sampling_w == 0
                     && format.sub_sampling_h == 0
@@ -215,13 +229,20 @@ fn plane_shape(frame: &VideoFrame, plane: i32) -> Result<(usize, usize)> {
     Ok((stride, height))
 }
 
-/// Builds the 256-bin histogram of plane 0 without reading stride padding.
+/// Builds plane 0's native-range histogram without reading stride padding.
 pub(super) fn plane_histogram(frame: &VideoFrame) -> Result<Histogram> {
     let width = usize::try_from(frame.frame_width(0))
         .map_err(|_| NImagesError::new("plane 0 has a negative width"))?;
     let (stride, height) = plane_shape(frame, 0)?;
+    let format = frame.get_video_format();
+    let max_value = max_sample_value(format.bits_per_sample)?;
     if width == 0 || height == 0 {
-        return Ok(Histogram::new());
+        let empty = if format.bits_per_sample == 8 {
+            Histogram::from_plane(&[], 0, 0, 0)
+        } else {
+            Histogram::from_u16_plane(&[], 0, 0, 0, max_value)
+        };
+        return empty.ok_or_else(|| NImagesError::new("could not allocate the empty histogram"));
     }
 
     let length = stride
@@ -235,8 +256,16 @@ pub(super) fn plane_histogram(frame: &VideoFrame) -> Result<Histogram> {
     // SAFETY: VapourSynth guarantees a readable plane buffer of `stride * height`
     // bytes for as long as the frame is alive, and the caller holds the frame.
     let bytes = unsafe { std::slice::from_raw_parts(pointer, length) };
-    Histogram::from_plane(bytes, stride, width, height)
-        .ok_or_else(|| NImagesError::new("plane 0 is smaller than its reported stride"))
+    let histogram = if format.bits_per_sample == 8 {
+        Histogram::from_plane(bytes, stride, width, height)
+    } else {
+        Histogram::from_u16_plane(bytes, stride, width, height, max_value)
+    };
+    histogram.ok_or_else(|| {
+        NImagesError::new(
+            "plane 0 is smaller than its reported stride or its histogram could not be allocated",
+        )
+    })
 }
 
 /// Lookup table selected for the input's integer sample width.
@@ -246,6 +275,8 @@ pub(super) enum MappingTable {
     U8([u8; 256]),
     /// Nine through sixteen bit code values stored in 16-bit words.
     U16(Vec<u16>),
+    /// Per-sample float curve parameters. NaN samples pass through unchanged.
+    F32 { black: f64, white: f64, gamma: f64 },
 }
 
 /// Rewrites every sample of one plane through `table`.
@@ -262,8 +293,13 @@ fn map_plane(
     if samples == 0 || height == 0 {
         return Ok(());
     }
-    let bits_per_sample = source.get_video_format().bits_per_sample;
-    let bytes_per_sample = if bits_per_sample <= 8 { 1usize } else { 2usize };
+    let format = source.get_video_format();
+    let bytes_per_sample = match format.sample_type {
+        SampleType::Integer if format.bits_per_sample <= 8 => 1usize,
+        SampleType::Integer => 2usize,
+        SampleType::Float if format.bits_per_sample == 32 => 4usize,
+        _ => return Err(NImagesError::new("the input sample width is unsupported")),
+    };
     let row_bytes = samples
         .checked_mul(bytes_per_sample)
         .ok_or_else(|| NImagesError::new(format!("plane {plane} row is too large")))?;
@@ -310,7 +346,10 @@ fn map_plane(
         match (bytes_per_sample, table) {
             (1, MappingTable::U8(table)) => {
                 for (input, target) in source_row.iter().zip(output_row.iter_mut()) {
-                    *target = table[*input as usize];
+                    *target = table
+                        .get(usize::from(*input))
+                        .copied()
+                        .ok_or_else(|| NImagesError::new("the 8 bit lookup table is incomplete"))?;
                 }
             }
             (2, MappingTable::U16(table)) if !table.is_empty() => {
@@ -318,9 +357,15 @@ fn map_plane(
                     .chunks_exact(2)
                     .zip(output_row.chunks_exact_mut(2))
                 {
-                    let value = u16::from_ne_bytes([input[0], input[1]]);
+                    let input: [u8; 2] = input
+                        .try_into()
+                        .map_err(|_| NImagesError::new("the 16 bit input sample is incomplete"))?;
+                    let value = u16::from_ne_bytes(input);
                     let index = usize::from(value).min(table.len() - 1);
-                    target.copy_from_slice(&table[index].to_ne_bytes());
+                    let mapped = table.get(index).ok_or_else(|| {
+                        NImagesError::new("the 16 bit lookup table is incomplete")
+                    })?;
+                    target.copy_from_slice(&mapped.to_ne_bytes());
                 }
             }
             (1, MappingTable::U16(_)) => {
@@ -333,10 +378,34 @@ fn map_plane(
                     "a wider integer frame needs a 16 bit lookup table",
                 ));
             }
+            (
+                4,
+                MappingTable::F32 {
+                    black,
+                    white,
+                    gamma,
+                },
+            ) => {
+                for (input, target) in source_row
+                    .chunks_exact(4)
+                    .zip(output_row.chunks_exact_mut(4))
+                {
+                    let input: [u8; 4] = input
+                        .try_into()
+                        .map_err(|_| NImagesError::new("the float input sample is incomplete"))?;
+                    let value = f32::from_ne_bytes(input);
+                    let mapped = apply_float_level(value, *black, *white, *gamma);
+                    target.copy_from_slice(&mapped.to_ne_bytes());
+                }
+            }
             (2, MappingTable::U16(_)) => {
                 return Err(NImagesError::new("the 16 bit lookup table is empty"));
             }
-            _ => return Err(NImagesError::new("the input sample width is unsupported")),
+            _ => {
+                return Err(NImagesError::new(
+                    "the lookup table does not match the input sample width",
+                ));
+            }
         }
     }
 

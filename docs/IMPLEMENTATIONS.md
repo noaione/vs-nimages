@@ -1,6 +1,6 @@
 # vapoursynth-nimages Implementation Plan
 
-Status: proposed  
+Status: M6 implementation in progress
 Project: `vapoursynth-nimages`  
 Description: A collection of analyzer and tooling to manipulate images  
 Reverse-domain namespace / plugin identifier: `xyz.n4o.nimages`  
@@ -22,11 +22,10 @@ NumPy, or SciPy after they have been ported. The `vapoursynth-rs` project
 supports VapourSynth API 4 filter creation, frame access, properties, and
 plugin export. None of the proposed filters require the API 4.3 GPU additions.
 
-For `GRAY8` input, levels and posterization should use 256-entry lookup tables.
-Peak and gray-shade analysis should use the same reusable 256-bin histogram
-implementation and attach their results as frame properties. Because they are
-independent filters, each scans its own requested input frame. A future version
-may add 9-16-bit integer and 32-bit float support.
+The first version uses 256-entry lookup tables and a reusable 256-bin histogram
+for `GRAY8`. M6 extends integer mapping and analysis through 16 bits and adds
+per-sample float levels for `GRAYS` and `RGBS`. Analysis results stay attached
+to frames as properties, and each filter scans only its requested frame.
 
 ## 2. Goals
 
@@ -69,6 +68,10 @@ The current `find_local_peak` implementation:
    `(255 - upper_limit)..=255`, unless white detection is disabled.
 10. Defaults to black 0 and white 255 when a peak is unavailable.
 
+For integer input above 8 bits, the plugin scales `upper_limit` from its 8-bit
+units to the native sample range, mirrors that range for white detection, and
+returns peaks in native code units. `skip_white` reports the sample maximum.
+
 Both percentage parameters represent percentages, not fractions. For example,
 `0.25` means 0.25 percent of all pixels:
 
@@ -78,10 +81,12 @@ minimum_count = ceil(total_pixels * percentage / 100)
 
 ### 4.2 Gray-shade analysis
 
-The current `analyze_gray_shades` implementation:
+The Python reference builds 256 bins. The plugin uses fixed `0..=255` bins for
+8-bit input and every native code value for wider integer input. Both:
 
 1. Converts non-`L` Pillow images to grayscale.
-2. Builds a 256-bin histogram.
+2. Builds a 256-bin histogram for 8-bit input and a native-range histogram for
+   wider integer input in the plugin.
 3. Calculates `pixel_threshold = ceil(total_pixels * threshold / 100)`.
 4. Includes a shade only when its count is strictly greater than the pixel
    threshold.
@@ -185,6 +190,10 @@ Frame properties are required because VapourSynth evaluates frames lazily. A
 filter-construction call cannot return statistics that have not yet been
 calculated for every requested frame.
 
+For Gray formats above 8 bits, peak property values use the frame's native code
+units. `upper_limit` remains in 8-bit-equivalent units and scales to the sample
+maximum.
+
 ### 5.2 `PeakGrayShades`
 
 ```python
@@ -241,6 +250,22 @@ When `use_props=True`, the filter reads `NImagesBlackLevel` and
 `NImagesWhiteLevel` from the current input frame. For 8-bit frames it uses the
 existing 256-entry LUT; for wider integer frames it uses a native-range LUT.
 
+Float `Levels` accepts `GRAYS` and `RGBS` with `black_float` and `white_float`:
+
+```python
+leveled = core.nimages.Levels(
+    clip,
+    black_float=0.02,
+    white_float=0.94,
+    gamma=1.18,
+)
+```
+
+It evaluates each sample without an integer LUT, maps the selected interval to
+`0..=1`, clamps outside it, and preserves NaN samples. Float `Levels` does not
+accept integer endpoints, `use_props=True`, nonzero `peak_offset`, or
+`auto_gamma=True`.
+
 ### 5.4 `Posterize`
 
 ```python
@@ -292,25 +317,22 @@ reasonable match for Pillow-style grayscale conversion. Golden tests must
 still verify whether its rounding matches Pillow closely enough for peak
 selection near bin boundaries.
 
-### 6.2 Later extensions
+### 6.2 Beyond M6
 
-- Integer `GRAY9` through `GRAY16`.
-- `RGB24` input.
-- RGB levels applied independently to each plane.
+- Float `Posterize` and float peak analysis.
 - Internal RGB-to-gray conversion for peak statistics and grayscale
   posterization.
-- `GRAYS` and `RGBS` float processing for HDRI-like levels.
-- Dynamic/variable-format clip handling.
 
-For higher-depth peak detection, use one bin per native integer sample and
-return native levels. This is more precise than quantizing into 256 bins. Keep
+Integer Gray analysis through 16 bits uses one bin per native code value and
+returns native levels. This is more precise than quantizing into 256 bins. Keep
 the existing `GRAY8` binning, properties, and output unchanged.
 
 ## 7. Peak detection algorithm
 
 ### 7.1 Histogram
 
-- Use `[u64; 256]` for `GRAY8` counts.
+- Use `[u64; 256]` for `GRAY8` counts and one bin per sample value for wider
+  integer formats.
 - Count pixels row-by-row, respecting stride.
 - Calculate `total_pixels` using a checked or sufficiently wide integer.
 - Derive threshold counts with `ceil`, matching Python.
@@ -337,8 +359,8 @@ Prominence can be implemented directly without a signal-processing library:
 4. The reference base height is the higher of the two side minima.
 5. Prominence is `peak_height - reference_base_height`.
 
-The ROI contains at most 256 samples, so a straightforward scan for each peak
-is preferable to a more complex optimization.
+The ROI contains at most 256 samples for Gray8 or 65,536 for Gray16. The current
+implementation scans the native bins directly and allocates no ROI copy.
 
 ### 7.4 Selection and fallback
 
@@ -348,12 +370,13 @@ is preferable to a more complex optimization.
   behavior of `numpy.argmax`.
 - If no candidate qualifies, repeat peak selection without the height or
   prominence thresholds.
-- If no fallback candidate exists, return black 0 or white 255 and set the
-  corresponding `PeakFound` property to false.
+- If no fallback candidate exists, return black 0 or the sample maximum and set
+  the corresponding `PeakFound` property to false.
 
 ### 7.5 Gray-shade analysis
 
-`PeakGrayShades` reuses the same `[u64; 256]` histogram implementation:
+`PeakGrayShades` reuses the Gray histogram implementation, with 256 bins for
+Gray8 and one bin per native sample value for wider formats:
 
 1. Validate that `threshold` is finite and non-negative.
 2. Calculate `pixel_threshold = ceil(total_pixels * threshold / 100)`.
@@ -412,10 +435,9 @@ Therefore:
 - A 256-entry LUT is not HDRI-equivalent for 16-bit, float, or multi-operation
   processing because it discards intermediate precision.
 
-To provide genuine HDRI-like behavior later, accept `GRAYS`/`RGBS`, calculate
-the formula per floating-point sample, and clamp only where required by the
-defined filter contract. A 65536-entry LUT is also viable for 16-bit integer
-input, but not for float input.
+A 65536-entry LUT provides native integer precision for 16-bit input. `GRAYS`
+and `RGBS` use the formula per floating-point sample, because a finite integer
+table cannot represent their input domain.
 
 ### 8.2 Colorspace and channel behavior
 
@@ -424,15 +446,14 @@ the stored channel values to linear light before applying the curve. HDRI
 describes storage and calculation precision, not automatic colorspace
 linearization.
 
-The native filter must define its channel behavior explicitly:
+The native filter applies the curve independently to each plane:
 
-- `GRAY8`: process plane 0.
-- Future RGB: process R, G, and B independently.
-- Alpha: leave unchanged unless a future explicit `planes`/`process_alpha`
-  option requests otherwise.
+- Gray: process plane 0.
+- RGB: process R, G, and B independently.
+- YUV integer: process Y, U, and V independently.
 
-This differs from blindly multiplying a Pillow point table by the number of
-bands, which can modify alpha as well.
+VapourSynth represents alpha as a separate clip/output rather than a fourth
+plane in these formats, so the filter has no alpha-specific behavior.
 
 ## 9. Existing issues to fix or define
 
@@ -544,34 +565,32 @@ struct PeakOptions {
 }
 
 struct PeakResult {
-    black: u8,
-    white: u8,
+    black: u16,
+    white: u16,
     black_found: bool,
     white_found: bool,
 }
 
-fn histogram_u8(
+fn histogram(
     data: &[u8],
     stride: usize,
     width: usize,
     height: usize,
-) -> [u64; 256];
+) -> Histogram;
 
 fn find_local_peaks(
-    histogram: &[u64; 256],
-    total_pixels: u64,
+    histogram: &Histogram,
     options: &PeakOptions,
 ) -> PeakResult;
 
 struct GrayShade {
-    shade: u8,
+    shade: u16,
     count: u64,
     percentage: f64,
 }
 
 fn peak_gray_shades(
-    histogram: &[u64; 256],
-    total_pixels: u64,
+    histogram: &Histogram,
     threshold: f64,
 ) -> Vec<GrayShade>;
 
@@ -655,9 +674,9 @@ current 8-bit argument meanings. RGB and YUV already work for 8-bit
 `Levels` and `Posterize`; M6 extends their per-plane behavior to higher sample
 depths and adds a separate floating-point path for `Levels`.
 
-The current implementation increment extends `Levels` and `Posterize` to
-integer formats through 16 bits. Native-value analysis and floating-point
-`Levels` remain to be implemented.
+The active implementation increment extends integer mapping and analysis
+through 16 bits and adds float `Levels`. The release build passes; integration
+validation is pending for this increment.
 
 #### Proposed scope
 
@@ -685,10 +704,14 @@ integer formats through 16 bits. Native-value analysis and floating-point
 - Keep integer `black`, `white`, and `peak_offset` in native code units above
   8 bits. For float `Levels`, choose typed float endpoint arguments that do not
   change the existing integer arguments. Use `black_float` and `white_float`.
+- Default float endpoints are 0.0 and 1.0. Float outputs are clamped to
+  `0..=1`; NaN samples remain NaN.
 - Validate finite float endpoints with `black_float < white_float` and finite
-  positive `gamma`. Map values below/above the endpoints to 0/1. NaN sample
-  handling is not a current requirement; the existing 8-bit path cannot receive
-  NaN samples.
+  positive `gamma`. Map values below/above the endpoints to 0/1. Preserve NaN
+  samples as NaN; positive and negative infinity clamp through the endpoint
+  comparisons. Float `Levels` does not accept integer endpoints,
+  `use_props=True`, nonzero `peak_offset`, or `auto_gamma=True` because the peak
+  properties are integer-only.
 - VapourSynth carries alpha as a separate clip/output, not as a fourth plane in
   an RGB video format. M6 operates on the planes in the input video format; it
   does not add alpha-specific arguments.
@@ -724,7 +747,7 @@ integer formats through 16 bits. Native-value analysis and floating-point
   stride padding and distinct plane values. Verify pixels outside each plane's
   active row are neither read nor written.
 - Test `GRAYS` and `RGBS` with fractional samples, endpoint clipping, gamma,
-  and multiple consecutive `Levels` operations.
+  NaN and infinity samples, and multiple consecutive `Levels` operations.
 - Test property preservation through the built plugin, including concurrent,
   repeated, and out-of-order frame requests.
 - Compare scalar performance with the current 8-bit path and record the tested
@@ -805,18 +828,12 @@ integer formats through 16 bits. Native-value analysis and floating-point
 - Results are deterministic regardless of thread count or frame request order.
 - No out-of-bounds reads occur on stride-padded frames.
 
-## 14. Performance expectations
+## 14. Performance plan
 
-These filters are primarily memory-bandwidth-bound:
-
-- Histogram: one input read per pixel plus a small in-cache 256-bin table.
-- Gray-shade analysis: the same histogram pass plus sorting at most 256 entries.
-- Levels/posterize: one input read, one LUT lookup, and one output write.
-
-Parallelize across frames through VapourSynth. Avoid internal per-frame
-threading initially; manga image sequences naturally supply many independent
-frames. SIMD is unlikely to materially improve 8-bit LUT application before
-memory bandwidth becomes the limit and should only be added after benchmarks.
+The performance plan is maintained in
+[01-performance-plan.md](improvements/01-performance-plan.md). Future
+improvement documents use the numbered filename pattern
+`XX-plan-name.md` in `docs/improvements/`.
 
 ## 15. Suggested usage
 
@@ -862,18 +879,18 @@ Unless new requirements appear, use these defaults:
 
 - Implement in Rust using `vapoursynth-rs`.
 - Target the baseline VapourSynth API 4 plugin ABI.
-- Ship `GRAY8` first.
+- Preserve `GRAY8` results while supporting the M6 integer and float formats.
 - Use frame properties for all per-frame statistics.
 - Configure `xyz.n4o.nimages` as the unique plugin identifier and `nimages` as
   the callable namespace.
 - Export the four filters `PeakStats`, `PeakGrayShades`, `Levels`, and
   `Posterize`.
 - Define first-version LUT output using Pillow-compatible ties-to-even rounding.
-- Leave alpha untouched in all future multi-plane implementations unless
-  explicitly requested.
+- Process every plane present in the VapourSynth video format independently;
+  alpha is a separate clip/output rather than a fourth plane.
 - Correct CLI `peak_offset` unit conversion independently of the plugin.
-- Treat HDRI float support as a later, separate capability rather than calling
-  an 8-bit LUT HDRI-equivalent.
+- Use per-sample math for `GRAYS` and `RGBS`; never route float samples through
+  an integer LUT.
 
 ## 17. References
 

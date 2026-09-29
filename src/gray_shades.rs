@@ -4,8 +4,8 @@
 //! Two deliberate differences from the reference are documented in
 //! [`FINDINGS.md`] §5 and `IMPLEMENTATIONS.md` §4.2:
 //!
-//! * the histogram is binned over the fixed range `0..=255` rather than over
-//!   the frame's observed `min..max`, so `shade` is a real gray value
+//! * 8-bit input uses the fixed range `0..=255`, while wider integer input
+//!   uses every native code value, so `shade` is always a real gray value
 //! * the shade/percentage pair is returned as a value instead of being written
 //!   into a frame property by the caller
 //!
@@ -15,13 +15,13 @@
 //!
 //! [`FINDINGS.md`]: ../../docs/FINDINGS.md
 
-use crate::histogram::{BINS, Histogram};
+use crate::histogram::Histogram;
 
 /// One significant gray shade.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GrayShade {
     /// The gray value, in source sample units.
-    pub shade: u8,
+    pub shade: u16,
     /// How many pixels have it.
     pub count: u64,
     /// Its share of the complete frame, in percent.
@@ -51,11 +51,14 @@ pub fn analyze_gray_shades(histogram: &Histogram, threshold: f64) -> Vec<GraySha
         0
     };
 
-    let mut shades: Vec<GrayShade> = (0..BINS)
-        .filter_map(|shade| {
-            let count = histogram.counts()[shade];
+    let mut shades: Vec<GrayShade> = histogram
+        .counts()
+        .iter()
+        .copied()
+        .enumerate()
+        .filter_map(|(shade, count)| {
             (count > required).then_some(GrayShade {
-                shade: shade as u8,
+                shade: shade as u16,
                 count,
                 percentage: (count as f64 / total_pixels as f64) * 100.0,
             })
@@ -71,6 +74,7 @@ pub fn analyze_gray_shades(histogram: &Histogram, threshold: f64) -> Vec<GraySha
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::histogram::BINS;
 
     fn histogram(counts: &[(u8, u64)], total_pixels: u64) -> Histogram {
         let mut bins = [0u64; BINS];
@@ -97,7 +101,7 @@ mod tests {
         for value in [0u8, 1, 128, 200, 255] {
             let result = analyze_gray_shades(&histogram(&[(value, 100)], 100), 0.01);
             assert_eq!(result.len(), 1, "shade {value}");
-            assert_eq!(result[0].shade, value);
+            assert_eq!(result[0].shade, u16::from(value));
             assert_eq!(result[0].percentage, 100.0);
         }
     }
@@ -179,5 +183,24 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].shade, 10);
         assert_eq!(result[1].shade, 200);
+    }
+
+    #[test]
+    fn wide_shades_keep_native_code_values_and_sort_ties_by_value() {
+        let mut bins = vec![0u64; 65_536];
+        bins[60_000] = 50;
+        bins[300] = 50;
+        bins[1_000] = 100;
+        let histogram = Histogram::from_counts_for_range(bins, 200, 65_535)
+            .expect("the bins cover the 16-bit range");
+
+        let result = analyze_gray_shades(&histogram, 0.01);
+        assert_eq!(
+            result.iter().map(|shade| shade.shade).collect::<Vec<_>>(),
+            [1_000, 300, 60_000]
+        );
+        assert_eq!(result[0].percentage, 50.0);
+        assert_eq!(result[1].percentage, 25.0);
+        assert_eq!(result[2].percentage, 25.0);
     }
 }

@@ -95,8 +95,8 @@ struct PeakCase {
 
 #[derive(Deserialize)]
 struct PeakExpect {
-    black: u8,
-    white: u8,
+    black: u16,
+    white: u16,
     black_found: bool,
     white_found: bool,
 }
@@ -162,7 +162,7 @@ struct ShadeCase {
 
 #[derive(Deserialize, Debug, PartialEq)]
 struct ShadeEntry {
-    shade: u8,
+    shade: u16,
     percentage: f64,
 }
 
@@ -422,9 +422,10 @@ fn load_frame(info: &FrameInfo) -> Histogram {
     let histogram = Histogram::from_plane(&padded, stride, info.width, info.height)
         .unwrap_or_else(|| panic!("{}: the padded rows must fit", info.file));
 
+    let expected_counts = counts_from(&info.hist);
     assert_eq!(
-        histogram.counts().as_slice(),
-        counts_from(&info.hist).as_slice(),
+        histogram.counts(),
+        expected_counts.as_slice(),
         "{}: the histogram must ignore stride padding",
         info.file
     );

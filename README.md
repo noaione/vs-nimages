@@ -12,10 +12,10 @@ a rust vapoursynth plugin that analyzes and manipulates images.
   scipy, including plateau-aware maxima and prominence
 - peak statistics attached to frames as properties, so analysis stays observable
   and `Levels` can consume it
-- significant gray shades as parallel property arrays, binned over the real
-  `0..=255` range
+- significant gray shades as parallel property arrays, binned over the full
+  integer sample range
 - levels matching the ImageMagick `-level` curve for integer samples through
-  16 bits
+  16 bits, with per-sample float support for `GRAYS` and `RGBS`
 - posterization to any depth from 1 through the input sample depth, without
   dithering
 - automatic gamma derived from the detected black point
@@ -25,9 +25,9 @@ a rust vapoursynth plugin that analyzes and manipulates images.
 - VapourSynth R79 or newer
 - Python 3.12 or newer when installing the wheel
 - Rust 1.88 or newer when building from source
-- `PeakStats` and `PeakGrayShades` currently need a Gray 8 bit integer clip;
+- `PeakStats` and `PeakGrayShades` need a Gray integer clip from 8 to 16 bits;
   `Levels` and `Posterize` take Gray, RGB or YUV integer samples from 8 to 16
-  bits
+  bits; `Levels` also accepts `GRAYS` and `RGBS`
 - a clip whose dimensions are not known until a frame is asked for, such as
   `imgseqs.Read(..., mismatch=True)` over pages of different sizes
 - normalize an image sequence as in [use](#use) below
@@ -111,10 +111,10 @@ with stats.get_frame(n) as frame:
 
 | argument | default | meaning |
 | --- | --- | --- |
-| `upper_limit` | `60` | highest shade searched for the black peak, mirrored for the white peak |
+| `upper_limit` | `60` | highest 8-bit-equivalent shade searched for the black peak, scaled to the sample range and mirrored for the white peak |
 | `peak_percentage` | `0.25` | minimum share of the frame a peak covers, in percent |
 | `peak_prominence` | none | minimum prominence of a peak, in percent; unset disables it |
-| `skip_white` | `false` | skip the white analysis and report 255 |
+| `skip_white` | `false` | skip the white analysis and report the sample maximum |
 | `debug` | `false` | log the resolved arguments and each frame's stage timings |
 
 | property | type | meaning |
@@ -162,13 +162,17 @@ order.
 
 ### `Levels`
 
-applies the ImageMagick `-level` curve as a 256-entry table, to every plane of
-every frame. Gray, RGB and YUV clips are all accepted, subsampled or not, and the
-curve applies to each sample as it stands rather than to luma.
+applies the ImageMagick `-level` curve to every plane of every frame. Integer
+Gray, RGB and YUV clips from 8 to 16 bits use native-range tables. `GRAYS` and
+`RGBS` use per-sample float math without quantizing through an integer lookup
+table. The curve applies to each sample as it stands rather than to luma.
 
 ```python
-# constant parameters, table built once
+# integer parameters, table built once
 leveled = core.nimages.Levels(clip, black=12, white=245, gamma=1.18)
+
+# float clips use floating-point sample endpoints
+leveled = core.nimages.Levels(clip, black_float=0.02, white_float=0.94, gamma=1.18)
 
 # per-frame parameters read from PeakStats
 leveled = core.nimages.Levels(stats, use_props=True, peak_offset=0, auto_gamma=True)
@@ -178,6 +182,8 @@ leveled = core.nimages.Levels(stats, use_props=True, peak_offset=0, auto_gamma=T
 | --- | --- | --- |
 | `black` | `0` | black point, in source sample units |
 | `white` | sample maximum | white point, in source sample units (`255` for 8 bit) |
+| `black_float` | `0.0` | float black point for `GRAYS` or `RGBS` |
+| `white_float` | `1.0` | float white point for `GRAYS` or `RGBS` |
 | `gamma` | `1.0` | gamma of the curve |
 | `use_props` | `false` | read `NImagesBlackLevel` and `NImagesWhiteLevel` from each input frame instead |
 | `peak_offset` | `0` | added to the black point, in source sample units |
@@ -195,6 +201,12 @@ else   -> round(Q * ((x - b) / (w - b)) ** (1 / gamma))
 rounding is ties-to-even at every step, matching the pillow path. `peak_offset`
 is a code-value offset, so `peak_offset=1` on `black=12` levels from 13 rather
 than from one percentage point, which is about 2.55 code values.
+
+float clips use `black_float` and `white_float` and produce floating-point
+outputs in `[0, 1]`. Values outside the endpoints clamp to 0 or 1, and NaN
+samples remain NaN. Float `Levels` does not accept integer `black`/`white`,
+`use_props=True`, nonzero `peak_offset`, or `auto_gamma=True`; integer `Levels`
+does not accept the float endpoint arguments.
 
 `auto_gamma` normalizes the black point by `Q` before applying its formula. the
 expression is undefined at or above half the sample range, so the filter rejects
@@ -264,11 +276,13 @@ same lines to split a workflow into stages.
 the filters port `nmanga/autolevel.py`. two places deliberately differ, both
 recorded in `docs/FINDINGS.md` with fixtures that pin the divergence:
 
-- **gray shades use the fixed `0..=255` binning.** the reference calls
+- **gray shades use fixed native-range bins.** the reference calls
   `np.histogram(arr, bins=256)` with no `range=`, so numpy bins over the frame's
   observed min..max and `shade` comes back as a bin index rather than a gray
-  value. a constant image always reports shade 128 at 100%, and an image holding
-  only 10 and 20 reports shades 0 and 255. this plugin reports 10 and 20.
+  value. this plugin bins 8-bit input over `0..=255` and wider input over every
+  native code value. a constant image reports shade 128 at 100% in the
+  reference, and an image holding only 10 and 20 reports shades 0 and 255. this
+  plugin reports the actual sample values.
 - **invalid arguments are rejected.** the reference's percentage guard is
   `value <= 0 and value >= 100`, a conjunction of opposites that never fires, so
   out-of-range values reach the analysis unchanged.

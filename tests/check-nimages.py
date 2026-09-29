@@ -443,11 +443,13 @@ def check_errors() -> None:
     rgb = core.std.BlankClip(width=8, height=8, format=vs.RGB24, length=1)
     gray16 = core.std.BlankClip(width=8, height=8, format=vs.GRAY16, length=1)
 
-    expect_error("PeakStats on RGB", lambda: core.nimages.PeakStats(rgb), contains="Gray 8 bit")
+    expect_error(
+        "PeakStats on RGB", lambda: core.nimages.PeakStats(rgb), contains="Gray 8 to 16 bit"
+    )
     expect_error(
         "PeakGrayShades on YUV",
         lambda: core.nimages.PeakGrayShades(core.std.BlankClip(width=8, height=8, format=vs.YUV420P8)),
-        contains="Gray 8 bit",
+        contains="Gray 8 to 16 bit",
     )
     expect_error(
         "Posterize bits above GRAY16 depth",
@@ -456,8 +458,10 @@ def check_errors() -> None:
     )
     expect_error(
         "Levels on float RGB",
-        lambda: core.nimages.Levels(core.std.BlankClip(width=8, height=8, format=vs.RGBS)),
-        contains="8 to 16 bit integer",
+        lambda: core.nimages.Levels(
+            core.std.BlankClip(width=8, height=8, format=vs.RGBS), black=10
+        ),
+        contains="float Levels does not support",
     )
     expect_error("PeakStats without a clip", lambda: core.nimages.PeakStats())  # type: ignore
     expect_error("PeakStats upper_limit 0", lambda: core.nimages.PeakStats(gray, upper_limit=0))
@@ -647,8 +651,10 @@ def check_high_depth_integer_mapping() -> None:
                     np.where(
                         input_values > 60_000,
                         65_535,
-                        np.rint((input_values.astype(np.float64) - 1_024)
-                                * (65_535 / (60_000 - 1_024))),
+                        np.rint(
+                            (input_values.astype(np.float64) - 1_024)
+                            * (65_535 / (60_000 - 1_024))
+                        ),
                     ),
                 ).astype(np.uint16)
                 same(
@@ -665,6 +671,77 @@ def check_high_depth_integer_mapping() -> None:
                     expected_posterize_u16(input_values, 5).tolist(),
                     f"{name}: Posterize plane {plane}",
                 )
+
+
+def check_high_depth_analysis() -> None:
+    section("higher-depth gray analysis")
+    values = np.full((7, 5), 32_768, dtype=np.uint16)
+    values[:3, :] = 15_420
+    values[3:5, :] = 50_115
+    source = clip_of_planes([values], vs.GRAY16, width=5, height=7)
+
+    stats = core.nimages.PeakStats(source, upper_limit=60, peak_percentage=1.0)
+    props = props_of(stats)
+    same(props["NImagesBlackLevel"], 15_420, "native black peak above 255")
+    same(props["NImagesWhiteLevel"], 50_115, "native white peak above 255")
+    same(array_of(stats).tolist(), values.tolist(), "16-bit analysis leaves pixels alone")
+
+    leveled = core.nimages.Levels(stats, use_props=True, auto_gamma=False)
+    adjusted = array_of(leveled)
+    same(int(adjusted[0, 0]), 0, "native use_props maps the black level to zero")
+    same(int(adjusted[3, 0]), 65_535, "native use_props maps the white level to maximum")
+    check(0 < int(adjusted[6, 0]) < 65_535, "native use_props maps midtones between endpoints")
+
+    shades = props_of(core.nimages.PeakGrayShades(source, threshold=20.0))
+    same(
+        as_list(shades["NImagesGrayShades"]),
+        [15_420, 32_768, 50_115],
+        "native shade values",
+    )
+    same(
+        as_list(shades["NImagesGrayShadePercentages"]),
+        [15 / 35 * 100, 10 / 35 * 100, 10 / 35 * 100],
+        "native shade percentages follow count order",
+    )
+
+
+def check_float_levels() -> None:
+    section("GrayS and RGBS levels")
+    values = np.asarray(
+        [[-np.inf, -0.5, 0.0, 0.25, 0.5], [0.75, 1.0, 1.5, np.inf, np.nan]],
+        dtype=np.float32,
+    )
+    source = clip_of_planes([values], vs.GRAYS, width=5, height=2)
+    output = array_of(core.nimages.Levels(source, black_float=0.25, white_float=0.75))
+    expected = np.asarray(
+        [[0.0, 0.0, 0.0, 0.0, 0.5], [1.0, 1.0, 1.0, 1.0, np.nan]],
+        dtype=np.float32,
+    )
+    same(np.isnan(output).tolist(), np.isnan(expected).tolist(), "NaN samples stay NaN")
+    same(
+        np.nan_to_num(output, nan=-99).tolist(),
+        np.nan_to_num(expected, nan=-99).tolist(),
+        "float samples are clamped and mapped per sample",
+    )
+
+    rgb_planes = [
+        np.asarray([[0.0, 0.5, 1.0]], dtype=np.float32),
+        np.asarray([[0.25, 0.5, 0.75]], dtype=np.float32),
+        np.asarray([[1.0, 0.5, 0.0]], dtype=np.float32),
+    ]
+    rgb = clip_of_planes(rgb_planes, vs.RGBS, width=3, height=1)
+    adjusted = core.nimages.Levels(rgb, black_float=0.25, white_float=0.75, gamma=2.0)
+    with adjusted.get_frame(0) as frame:
+        expected_planes = [
+            np.asarray([[0.0, np.sqrt(0.5), 1.0]], dtype=np.float32),
+            np.asarray([[0.0, np.sqrt(0.5), 1.0]], dtype=np.float32),
+            np.asarray([[1.0, np.sqrt(0.5), 0.0]], dtype=np.float32),
+        ]
+        for plane, expected_plane in enumerate(expected_planes):
+            check(
+                np.allclose(np.asarray(frame[plane]), expected_plane, rtol=0, atol=1e-7),
+                f"RGBS plane {plane} is mapped independently",
+            )
 
 
 def clip_of_rgb(shape: tuple[int, int], *, base: int, step: int):
@@ -841,6 +918,8 @@ def main() -> int:
     check_errors()
     check_color_families(posterize)
     check_high_depth_integer_mapping()
+    check_high_depth_analysis()
+    check_float_levels()
     check_dynamic_dimensions(posterize)
     check_debug_logging()
     check_determinism()

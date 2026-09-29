@@ -1,21 +1,21 @@
-//! `Levels`: the ImageMagick `-level` curve as a native-range lookup table.
+//! `Levels`: the ImageMagick `-level` curve for integer and float samples.
 //!
-//! The curve applies per sample, so any 8 to 16 bit integer format is accepted
-//! and every plane is rewritten. That covers Gray, RGB and YUV, subsampled or
-//! not, and leaves the choice of family and matrix to the caller.
+//! The curve applies per sample. Integer Gray, RGB and YUV formats through 16
+//! bits use native-range tables. GrayS and RGBS use per-sample float math.
 
 use std::borrow::Cow;
 use std::ffi::{CStr, c_void};
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
+use vapoursynth4_rs::frame::VideoFormat;
 use vapoursynth4_rs::frame::{Frame, FrameContext, VideoFrame};
 use vapoursynth4_rs::map::{KeyStr, MapRef};
 use vapoursynth4_rs::node::{Filter, Node, VideoNode};
-use vapoursynth4_rs::{core::CoreRef, ffi, key};
+use vapoursynth4_rs::{ColorFamily, SampleType, core::CoreRef, ffi, key};
 
 use crate::error::{NImagesError, Result};
-use crate::levels::{automatic_gamma_for_range, levels_lut, levels_lut_u16};
+use crate::levels::{automatic_gamma_for_range, levels_lut, levels_lut_u16, validate};
 
 use super::{
     Accept, FrameTrace, MappingTable, add_filter, check_frame_format, checked_info, describe_frame,
@@ -33,10 +33,16 @@ const DEFAULT_GAMMA: f64 = 1.0;
 #[derive(Clone)]
 struct Resolved {
     table: MappingTable,
-    max_sample: u16,
-    black: i64,
-    white: i64,
+    domain: CurveDomain,
+    black: f64,
+    white: f64,
     gamma: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CurveDomain {
+    Integer(u16),
+    Float32,
 }
 
 /// A level operation, either fixed at creation or read from each input frame's
@@ -81,7 +87,7 @@ impl Filter for Levels {
     type FilterData = ();
 
     const NAME: &'static CStr = c"Levels";
-    const ARGS: &'static CStr = c"clip:vnode;black:int:opt;white:int:opt;gamma:float:opt;use_props:int:opt;peak_offset:int:opt;auto_gamma:int:opt;debug:int:opt;";
+    const ARGS: &'static CStr = c"clip:vnode;black:int:opt;white:int:opt;black_float:float:opt;white_float:float:opt;gamma:float:opt;use_props:int:opt;peak_offset:int:opt;auto_gamma:int:opt;debug:int:opt;";
     const RETURN_TYPE: &'static CStr = c"clip:vnode;";
 
     fn create(
@@ -91,22 +97,45 @@ impl Filter for Levels {
         mut core: CoreRef,
     ) -> Result<()> {
         let source = read_clip(&input, "Levels")?;
-        let info = checked_info(&source, "Levels", Accept::Integer8To16)?;
+        let info = checked_info(&source, "Levels", Accept::Levels)?;
 
         let peak_offset = read_int(&input, key!(c"peak_offset"))?.unwrap_or(0);
         let auto_gamma = read_int(&input, key!(c"auto_gamma"))?.unwrap_or(0) != 0;
         let use_props = read_int(&input, key!(c"use_props"))?.unwrap_or(0) != 0;
+        let black = read_int(&input, key!(c"black"))?;
+        let white = read_int(&input, key!(c"white"))?;
+        let black_float = read_float(&input, key!(c"black_float"))?;
+        let white_float = read_float(&input, key!(c"white_float"))?;
+        let gamma = read_float(&input, key!(c"gamma"))?.unwrap_or(DEFAULT_GAMMA);
+        let float_args = black_float.is_some() || white_float.is_some();
+        let known_float = info.format.color_family != ColorFamily::Undefined
+            && info.format.sample_type == SampleType::Float;
+        let known_integer = info.format.color_family != ColorFamily::Undefined
+            && info.format.sample_type == SampleType::Integer;
 
-        let curve = if use_props {
+        let curve = if known_float || float_args {
+            if (known_integer && float_args)
+                || black.is_some()
+                || white.is_some()
+                || use_props
+                || auto_gamma
+                || peak_offset != 0
+            {
+                return Err(float_mode_error());
+            }
+            Curve::Constant(resolve_float(
+                black_float.unwrap_or(0.0),
+                white_float.unwrap_or(1.0),
+                gamma,
+            )?)
+        } else if use_props {
             Curve::FromProperties {
-                gamma: read_float(&input, key!(c"gamma"))?.unwrap_or(DEFAULT_GAMMA),
+                gamma,
                 peak_offset,
                 auto_gamma,
             }
         } else {
-            let black = read_int(&input, key!(c"black"))?.unwrap_or(DEFAULT_BLACK);
-            let white = read_int(&input, key!(c"white"))?;
-            let gamma = read_float(&input, key!(c"gamma"))?.unwrap_or(DEFAULT_GAMMA);
+            let black = black.unwrap_or(DEFAULT_BLACK);
             if info.format.color_family == vapoursynth4_rs::ColorFamily::Undefined {
                 Curve::ConstantForFormat {
                     black,
@@ -163,8 +192,8 @@ impl Filter for Levels {
                 let mut trace = FrameTrace::new(self.debug, "Levels");
 
                 let input = self.source.get_frame_filter(n, &mut frame_ctx);
-                check_frame_format(&input, "Levels", Accept::Integer8To16)?;
-                let max_sample = max_sample_value(input.get_video_format().bits_per_sample)?;
+                check_frame_format(&input, "Levels", Accept::Levels)?;
+                let domain = curve_domain(input.get_video_format())?;
 
                 if self.debug {
                     let settings = describe_frame(&input);
@@ -202,7 +231,7 @@ impl Filter for Levels {
 
                 let mark = Instant::now();
                 let resolved: Cow<'_, Resolved> = match &self.curve {
-                    Curve::Constant(resolved) if resolved.max_sample == max_sample => {
+                    Curve::Constant(resolved) if resolved.domain == domain => {
                         Cow::Borrowed(resolved)
                     }
                     Curve::Constant(_) => {
@@ -216,25 +245,39 @@ impl Filter for Levels {
                         gamma,
                         peak_offset,
                         auto_gamma,
-                    } => Cow::Owned(resolve(
-                        *black,
-                        white.unwrap_or(i64::from(max_sample)),
-                        *gamma,
-                        *peak_offset,
-                        *auto_gamma,
-                        max_sample,
-                    )?),
+                    } => match domain {
+                        CurveDomain::Integer(max_sample) => Cow::Owned(resolve(
+                            *black,
+                            white.unwrap_or(i64::from(max_sample)),
+                            *gamma,
+                            *peak_offset,
+                            *auto_gamma,
+                            max_sample,
+                        )?),
+                        CurveDomain::Float32 => {
+                            return Err(NImagesError::new(
+                                "Levels: integer endpoints cannot be applied to a float frame",
+                            ));
+                        }
+                    },
                     Curve::FromProperties {
                         gamma,
                         peak_offset,
                         auto_gamma,
-                    } => Cow::Owned(resolve_from_properties(
-                        &input,
-                        *gamma,
-                        *peak_offset,
-                        *auto_gamma,
-                        max_sample,
-                    )?),
+                    } => match domain {
+                        CurveDomain::Integer(max_sample) => Cow::Owned(resolve_from_properties(
+                            &input,
+                            *gamma,
+                            *peak_offset,
+                            *auto_gamma,
+                            max_sample,
+                        )?),
+                        CurveDomain::Float32 => {
+                            return Err(NImagesError::new(
+                                "Levels(use_props=True) needs an integer Gray frame from PeakStats",
+                            ));
+                        }
+                    },
                 };
                 trace.mark("curve", mark);
 
@@ -276,7 +319,7 @@ fn resolve(
     } else {
         gamma
     };
-    let table = if max_sample == u8::MAX.into() {
+    let table = if max_sample == u16::from(u8::MAX) {
         MappingTable::U8(
             levels_lut(black as f64, white as f64, gamma)
                 .map_err(|error| NImagesError::new(format!("Levels: {}", error.message())))?,
@@ -289,11 +332,50 @@ fn resolve(
     };
     Ok(Resolved {
         table,
-        max_sample,
+        domain: CurveDomain::Integer(max_sample),
+        black: black as f64,
+        white: white as f64,
+        gamma,
+    })
+}
+
+/// Resolves the per-sample float curve without quantizing through a table.
+fn resolve_float(black: f64, white: f64, gamma: f64) -> Result<Resolved> {
+    validate(black, white, gamma)
+        .map_err(|error| NImagesError::new(format!("Levels: {}", error.message())))?;
+    Ok(Resolved {
+        table: MappingTable::F32 {
+            black,
+            white,
+            gamma,
+        },
+        domain: CurveDomain::Float32,
         black,
         white,
         gamma,
     })
+}
+
+fn curve_domain(format: &VideoFormat) -> Result<CurveDomain> {
+    if format.sample_type == SampleType::Float {
+        if format.bits_per_sample == 32
+            && matches!(format.color_family, ColorFamily::Gray | ColorFamily::RGB)
+        {
+            return Ok(CurveDomain::Float32);
+        }
+        return Err(NImagesError::new(
+            "Levels: only GrayS and RGBS float formats are supported",
+        ));
+    }
+    Ok(CurveDomain::Integer(max_sample_value(
+        format.bits_per_sample,
+    )?))
+}
+
+fn float_mode_error() -> NImagesError {
+    NImagesError::new(
+        "Levels: choose black/white for integer clips or black_float/white_float for float clips; float Levels does not support use_props=True, nonzero peak_offset, or auto_gamma=True",
+    )
 }
 
 /// Resolves the curve for one frame from the properties `PeakStats` wrote.

@@ -90,21 +90,21 @@ decode instead. read the plugin's `decode + resize` against the reference's
 <!-- bench:start -->
 | pages | workflow | pipeline | decode | resize | analyze | apply | total | per page | peak rss |
 | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 129 | levels (levels) | nmanga | 2.05 s | 0.00 s | 4.66 s | 0.26 s | **6.97 s** | 54.0 ms | 119 MiB |
-| 129 | levels (levels) | vapoursynth | 2.11 s | 0.33 s | 0.45 s | 0.14 s | **3.02 s** | 23.4 ms | 128 MiB |
-| 49 | shades (posterize) | nmanga | 2.02 s | 0.00 s | 13.15 s | 0.00 s | **15.17 s** | 309.5 ms | 146 MiB |
-| 49 | shades (posterize) | vapoursynth | 2.18 s | 0.38 s | 0.77 s | 0.00 s | **3.32 s** | 67.8 ms | 488 MiB |
-| 49 | posterize (posterize) | nmanga | 2.10 s | 0.00 s | 0.00 s | 17.05 s | **19.16 s** | 391.0 ms | 274 MiB |
-| 49 | posterize (posterize) | vapoursynth | 2.24 s | 0.36 s | 0.00 s | 0.23 s | **2.84 s** | 57.9 ms | 511 MiB |
-| 44 | levels (webp) | nmanga | 11.76 s | 0.00 s | 6.81 s | 0.34 s | **18.91 s** | 429.9 ms | 283 MiB |
-| 44 | levels (webp) | vapoursynth | 7.37 s | 1.52 s | 0.69 s | 0.22 s | **9.80 s** | 222.7 ms | 399 MiB |
+| 129 | levels (levels) | nmanga | 3.92 s | 0.00 s | 6.65 s | 0.31 s | **10.89 s** | 84.4 ms | 119 MiB |
+| 129 | levels (levels) | vapoursynth | 2.59 s | 0.44 s | 0.52 s | 0.18 s | **3.74 s** | 29.0 ms | 128 MiB |
+| 49 | shades (posterize) | nmanga | 3.08 s | 0.00 s | 15.51 s | 0.00 s | **18.59 s** | 379.4 ms | 146 MiB |
+| 49 | shades (posterize) | vapoursynth | 4.12 s | 0.64 s | 1.06 s | 0.00 s | **5.82 s** | 118.8 ms | 488 MiB |
+| 49 | posterize (posterize) | nmanga | 2.49 s | 0.00 s | 0.00 s | 19.77 s | **22.25 s** | 454.2 ms | 273 MiB |
+| 49 | posterize (posterize) | vapoursynth | 3.06 s | 0.57 s | 0.00 s | 0.32 s | **3.95 s** | 80.5 ms | 511 MiB |
+| 44 | levels (webp) | nmanga | 12.71 s | 0.00 s | 6.94 s | 0.36 s | **20.00 s** | 454.6 ms | 283 MiB |
+| 44 | levels (webp) | vapoursynth | 6.99 s | 1.35 s | 0.74 s | 0.19 s | **9.27 s** | 210.7 ms | 399 MiB |
 
 | pages | workflow | pipeline | speedup | memory ratio | levels agreed |
 | ---: | --- | --- | ---: | ---: | --- |
-| 129 | levels (levels) | vapoursynth vs nmanga | 2.30x | 1.07x | 129/129 |
-| 49 | shades (posterize) | vapoursynth vs nmanga | 4.56x | 3.35x | 49/49 |
-| 49 | posterize (posterize) | vapoursynth vs nmanga | 6.75x | 1.87x | 49/49 |
-| 44 | levels (webp) | vapoursynth vs nmanga | 1.93x | 1.41x | 44/44 |
+| 129 | levels (levels) | vapoursynth vs nmanga | 2.91x | 1.07x | 129/129 |
+| 49 | shades (posterize) | vapoursynth vs nmanga | 3.19x | 3.35x | 49/49 |
+| 49 | posterize (posterize) | vapoursynth vs nmanga | 5.64x | 1.87x | 49/49 |
+| 44 | levels (webp) | vapoursynth vs nmanga | 2.16x | 1.41x | 44/44 |
 <!-- bench:end -->
 
 ## what a webp actually hands out

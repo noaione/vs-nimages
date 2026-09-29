@@ -19,7 +19,7 @@ use super::{
 
 /// Lower bound of `upper_limit`, matching the `nmanga` cli and orchestrator.
 const MIN_UPPER_LIMIT: i64 = 1;
-/// Upper bound of `upper_limit`, the last shade an 8 bit sample holds.
+/// Upper bound of `upper_limit`, the last shade in its 8-bit-equivalent units.
 const MAX_UPPER_LIMIT: i64 = 255;
 /// Default `upper_limit`, matching `nmanga`.
 const DEFAULT_UPPER_LIMIT: i64 = 60;
@@ -53,7 +53,7 @@ impl Filter for PeakStats {
         mut core: CoreRef,
     ) -> Result<()> {
         let source = read_clip(&input, "PeakStats")?;
-        let info = checked_info(&source, "PeakStats", Accept::Gray8)?;
+        let info = checked_info(&source, "PeakStats", Accept::GrayInteger8To16)?;
 
         let upper_limit = read_int(&input, key!(c"upper_limit"))?.unwrap_or(DEFAULT_UPPER_LIMIT);
         if !(MIN_UPPER_LIMIT..=MAX_UPPER_LIMIT).contains(&upper_limit) {
@@ -118,7 +118,7 @@ impl Filter for PeakStats {
                 let mut trace = FrameTrace::new(self.debug, "PeakStats");
 
                 let input = self.source.get_frame_filter(n, &mut frame_ctx);
-                check_frame_format(&input, "PeakStats", Accept::Gray8)?;
+                check_frame_format(&input, "PeakStats", Accept::GrayInteger8To16)?;
                 let settings = describe_frame(&input);
                 let options = &self.options;
                 let line = format!(
@@ -150,12 +150,12 @@ impl Filter for PeakStats {
                     set_property(
                         &mut properties,
                         key!(c"NImagesBlackPeakFound"),
-                        u8::from(peaks.black_found),
+                        if peaks.black_found { 1 } else { 0 },
                     )?;
                     set_property(
                         &mut properties,
                         key!(c"NImagesWhitePeakFound"),
-                        u8::from(peaks.white_found),
+                        if peaks.white_found { 1 } else { 0 },
                     )?;
                 }
                 trace.mark("copy", mark);
@@ -174,7 +174,7 @@ impl Filter for PeakStats {
 }
 
 /// Writes one integer property, replacing anything already there.
-fn set_property(properties: &mut MapRef<'_>, name: &KeyStr, value: u8) -> Result<()> {
+fn set_property(properties: &mut MapRef<'_>, name: &KeyStr, value: u16) -> Result<()> {
     properties
         .set(name, Value::Int(i64::from(value)), AppendMode::Replace)
         .map_err(|error| NImagesError::property(name, error))

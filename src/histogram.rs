@@ -1,80 +1,152 @@
-//! The 256-bin `GRAY8` histogram shared by every analyzer.
+//! A stride-aware histogram for integer gray samples through 16 bits.
 //!
-//! Counts are `u64` so that a very large frame cannot overflow, and pixels are
-//! read row by row over `width` samples only: stride padding is never counted.
+//! `GRAY8` keeps its fixed 256-bin array. Wider formats allocate one bin for
+//! every native code value, and all plane readers visit active samples only.
 
 /// Number of shades in an 8-bit sample.
 pub const BINS: usize = 256;
 
-/// Pixel counts for every shade from 0 to 255.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Counts {
+    U8([u64; BINS]),
+    Wide(Vec<u64>),
+}
+
+impl Counts {
+    fn as_slice(&self) -> &[u64] {
+        match self {
+            Self::U8(counts) => counts,
+            Self::Wide(counts) => counts,
+        }
+    }
+}
+
+/// Pixel counts for every shade from zero through `max_value`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Histogram {
-    counts: [u64; BINS],
+    counts: Counts,
     total_pixels: u64,
+    max_value: u16,
 }
 
 impl Histogram {
-    /// An empty histogram.
+    /// An empty 8-bit histogram.
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            counts: [0; BINS],
+            counts: Counts::U8([0; BINS]),
             total_pixels: 0,
+            max_value: u8::MAX as u16,
         }
     }
 
-    /// Counts `height` rows of `width` samples each, skipping `stride - width`
-    /// padding bytes at the end of every row.
+    /// Counts `height` rows of `width` 8-bit samples, skipping stride padding.
     ///
-    /// Returns [`None`] when the described rows do not fit in `data`, so a
-    /// malformed frame cannot cause an out-of-bounds read.
+    /// Returns [`None`] when the described rows do not fit in `data`.
     #[must_use]
     pub fn from_plane(data: &[u8], stride: usize, width: usize, height: usize) -> Option<Self> {
         if width > stride {
             return None;
         }
-
-        if height > 0 {
-            let last_row = height - 1;
-            let end = last_row.checked_mul(stride)?.checked_add(width)?;
-            if end > data.len() {
-                return None;
-            }
-        }
+        validate_plane_length(data.len(), stride, width, height)?;
 
         let mut counts = [0u64; BINS];
         for row in 0..height {
             let start = row * stride;
-            let row_data = &data[start..start + width];
-            for &value in row_data {
-                // A frame cannot hold enough pixels to overflow u64.
-                counts[value as usize] += 1;
+            for &value in &data[start..start + width] {
+                if let Some(count) = counts.get_mut(usize::from(value)) {
+                    *count = count.saturating_add(1);
+                }
             }
         }
 
         Some(Self {
-            counts,
-            total_pixels: (width as u64).saturating_mul(height as u64),
+            counts: Counts::U8(counts),
+            total_pixels: pixel_count(width, height),
+            max_value: u8::MAX as u16,
         })
     }
 
-    /// Builds a histogram from counts and an independent pixel total.
+    /// Counts 16-bit words in rows whose stride is measured in bytes.
     ///
-    /// The total is normally `counts.iter().sum()`, but the analyzer's
-    /// thresholds are defined against the frame's pixel count, so tests and
-    /// callers may pass a different value.
+    /// Values above `max_value` are clamped to the format maximum. Returns
+    /// [`None`] when a row does not fit or the bounded histogram cannot be
+    /// allocated.
+    #[must_use]
+    pub fn from_u16_plane(
+        data: &[u8],
+        stride: usize,
+        width: usize,
+        height: usize,
+        max_value: u16,
+    ) -> Option<Self> {
+        let row_bytes = width.checked_mul(2)?;
+        if row_bytes > stride {
+            return None;
+        }
+        validate_plane_length(data.len(), stride, row_bytes, height)?;
+
+        let mut counts = Vec::new();
+        let length = usize::from(max_value).checked_add(1)?;
+        counts.try_reserve_exact(length).ok()?;
+        counts.resize(length, 0u64);
+
+        for row in 0..height {
+            let start = row * stride;
+            for sample in data[start..start + row_bytes].chunks_exact(2) {
+                let bytes: [u8; 2] = sample.try_into().ok()?;
+                let value = u16::from_ne_bytes(bytes).min(max_value);
+                if let Some(count) = counts.get_mut(usize::from(value)) {
+                    *count = count.saturating_add(1);
+                }
+            }
+        }
+
+        Some(Self {
+            counts: Counts::Wide(counts),
+            total_pixels: pixel_count(width, height),
+            max_value,
+        })
+    }
+
+    /// Builds an 8-bit histogram from counts and an independent pixel total.
     #[must_use]
     pub const fn from_counts(counts: [u64; BINS], total_pixels: u64) -> Self {
         Self {
-            counts,
+            counts: Counts::U8(counts),
             total_pixels,
+            max_value: u8::MAX as u16,
         }
     }
 
-    /// The count of every shade.
+    /// Builds a wider histogram from counts and an independent pixel total.
     #[must_use]
-    pub const fn counts(&self) -> &[u64; BINS] {
-        &self.counts
+    pub fn from_counts_for_range(
+        counts: Vec<u64>,
+        total_pixels: u64,
+        max_value: u16,
+    ) -> Option<Self> {
+        let length = usize::from(max_value).checked_add(1)?;
+        if counts.len() != length {
+            return None;
+        }
+        Some(Self {
+            counts: Counts::Wide(counts),
+            total_pixels,
+            max_value,
+        })
+    }
+
+    /// The count of every shade in ascending code-value order.
+    #[must_use]
+    pub fn counts(&self) -> &[u64] {
+        self.counts.as_slice()
+    }
+
+    /// The maximum code value represented by this histogram.
+    #[must_use]
+    pub const fn max_value(&self) -> u16 {
+        self.max_value
     }
 
     /// The number of pixels the histogram was built from.
@@ -83,19 +155,19 @@ impl Histogram {
         self.total_pixels
     }
 
-    /// The count of one shade.
+    /// The count of one shade, or zero when it is outside the range.
     #[must_use]
-    pub const fn count(&self, shade: u8) -> u64 {
-        self.counts[shade as usize]
+    pub fn count(&self, shade: u16) -> u64 {
+        self.counts().get(usize::from(shade)).copied().unwrap_or(0)
     }
 
     /// The region of interest `first..=last`, if it is a valid bin range.
     #[must_use]
-    pub fn region(&self, first: u8, last: u8) -> Option<&[u64]> {
+    pub fn region(&self, first: u16, last: u16) -> Option<&[u64]> {
         if first > last {
             return None;
         }
-        self.counts.get(first as usize..=last as usize)
+        self.counts().get(usize::from(first)..=usize::from(last))
     }
 }
 
@@ -105,23 +177,45 @@ impl Default for Histogram {
     }
 }
 
+fn pixel_count(width: usize, height: usize) -> u64 {
+    (width as u64).saturating_mul(height as u64)
+}
+
+fn validate_plane_length(
+    data_length: usize,
+    stride: usize,
+    row_bytes: usize,
+    height: usize,
+) -> Option<()> {
+    if row_bytes > stride {
+        return None;
+    }
+    if height > 0 {
+        let last_row = height - 1;
+        let end = last_row.checked_mul(stride)?.checked_add(row_bytes)?;
+        if end > data_length {
+            return None;
+        }
+    }
+    Some(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn counts_ignore_stride_padding() {
-        // Two rows of three samples, padded to a stride of eight.
         let data = [
             1, 2, 3, 200, 200, 200, 200, 200, //
             4, 5, 6, 201, 201, 201, 201, 201,
         ];
         let histogram = Histogram::from_plane(&data, 8, 3, 2).expect("the rows fit");
         assert_eq!(histogram.total_pixels(), 6, "padding is not a pixel");
-        for shade in [1u8, 2, 3, 4, 5, 6] {
+        for shade in [1u16, 2, 3, 4, 5, 6] {
             assert_eq!(histogram.count(shade), 1);
         }
-        for shade in [200u8, 201] {
+        for shade in [200u16, 201] {
             assert_eq!(histogram.count(shade), 0, "padding must not be counted");
         }
         assert_eq!(histogram.counts().iter().sum::<u64>(), 6);
@@ -136,6 +230,33 @@ mod tests {
     }
 
     #[test]
+    fn wide_words_ignore_byte_stride_padding() {
+        let samples = [1u16, 2, 3, 4, 5, 6];
+        let mut data = vec![0xff; 16];
+        for (index, value) in samples.iter().enumerate() {
+            let row = index / 3;
+            let column = index % 3;
+            let offset = row * 8 + column * 2;
+            data[offset..offset + 2].copy_from_slice(&value.to_ne_bytes());
+        }
+        let histogram =
+            Histogram::from_u16_plane(&data, 8, 3, 2, u16::MAX).expect("the padded rows fit");
+        assert_eq!(histogram.total_pixels(), 6);
+        for shade in 1u16..=6 {
+            assert_eq!(histogram.count(shade), 1);
+        }
+        assert_eq!(histogram.count(u16::MAX), 0, "padding is not a sample");
+    }
+
+    #[test]
+    fn values_above_the_declared_sample_maximum_are_clamped() {
+        let data = [u16::MAX.to_ne_bytes()].concat();
+        let histogram = Histogram::from_u16_plane(&data, 2, 1, 1, 1023).expect("one sample");
+        assert_eq!(histogram.count(1023), 1);
+        assert_eq!(histogram.max_value(), 1023);
+    }
+
+    #[test]
     fn zero_sized_planes_are_accepted() {
         let histogram = Histogram::from_plane(&[], 0, 0, 0).expect("nothing is read");
         assert_eq!(histogram.total_pixels(), 0);
@@ -147,14 +268,16 @@ mod tests {
         assert!(Histogram::from_plane(&[0; 7], 8, 8, 1).is_none());
         assert!(Histogram::from_plane(&[0; 15], 8, 8, 2).is_none());
         assert!(Histogram::from_plane(&[0; 16], 8, 8, 2).is_some());
-        // A width larger than the stride would read the next row's pixels.
         assert!(Histogram::from_plane(&[0; 64], 4, 8, 1).is_none());
+        assert!(Histogram::from_u16_plane(&[0; 7], 8, 4, 1, 1023).is_none());
+        assert!(Histogram::from_u16_plane(&[0; 16], 6, 4, 1, 1023).is_none());
     }
 
     #[test]
     fn absurd_sizes_do_not_panic() {
         assert!(Histogram::from_plane(&[0; 8], usize::MAX, usize::MAX, 2).is_none());
         assert!(Histogram::from_plane(&[0; 8], usize::MAX, 0, 2).is_none());
+        assert!(Histogram::from_u16_plane(&[0; 8], usize::MAX, usize::MAX, 2, 65_535).is_none());
     }
 
     #[test]
@@ -168,5 +291,14 @@ mod tests {
         assert_eq!(histogram.region(0, 255).map(<[u64]>::len), Some(256));
         assert_eq!(histogram.region(195, 255).map(<[u64]>::len), Some(61));
         assert!(histogram.region(60, 0).is_none());
+    }
+
+    #[test]
+    fn a_wide_histogram_requires_one_bin_per_code_value() {
+        assert!(Histogram::from_counts_for_range(vec![0; 1023], 0, 1023).is_none());
+        let histogram = Histogram::from_counts_for_range(vec![0; 1024], 0, 1023)
+            .expect("1024 bins cover 10 bits");
+        assert_eq!(histogram.counts().len(), 1024);
+        assert_eq!(histogram.max_value(), 1023);
     }
 }

@@ -16,10 +16,7 @@
 //!
 //! [`IMPLEMENTATIONS.md`]: ../../docs/IMPLEMENTATIONS.md
 
-use crate::histogram::{BINS, Histogram};
-
-/// The largest region of interest plus its two padding bins.
-const PADDED_CAPACITY: usize = BINS + 2;
+use crate::histogram::Histogram;
 
 /// Parameters of one automatic level analysis.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -33,7 +30,7 @@ pub struct PeakOptions {
     /// Minimum prominence a peak must have, as a percentage of the frame.
     /// `None` disables the prominence threshold.
     pub peak_prominence: Option<f64>,
-    /// Skip the white analysis and report 255.
+    /// Skip the white analysis and report the sample maximum.
     pub skip_white: bool,
 }
 
@@ -52,12 +49,12 @@ impl Default for PeakOptions {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PeakResult {
     /// Selected black level in source sample units.
-    pub black: u8,
+    pub black: u16,
     /// Selected white level in source sample units.
-    pub white: u8,
+    pub white: u16,
     /// Whether a black peak was found, rather than falling back to 0.
     pub black_found: bool,
-    /// Whether a white peak was found, rather than falling back to 255.
+    /// Whether a white peak was found, rather than falling back to the sample maximum.
     pub white_found: bool,
 }
 
@@ -81,19 +78,69 @@ fn minimum_count(total_pixels: u64, percentage: Option<f64>) -> u64 {
     }
 }
 
+trait CountSequence {
+    fn len(&self) -> usize;
+    fn at(&self, index: usize) -> u64;
+}
+
+impl CountSequence for &[u64] {
+    fn len(&self) -> usize {
+        <[u64]>::len(self)
+    }
+
+    fn at(&self, index: usize) -> u64 {
+        self.get(index).copied().unwrap_or(0)
+    }
+}
+
+impl<const N: usize> CountSequence for [u64; N] {
+    fn len(&self) -> usize {
+        N
+    }
+
+    fn at(&self, index: usize) -> u64 {
+        self.get(index).copied().unwrap_or(0)
+    }
+}
+
+/// Presents one histogram region with a zero bin on each side, without copying it.
+struct PaddedCounts<'a> {
+    values: &'a [u64],
+}
+
+impl<'a> PaddedCounts<'a> {
+    fn new(values: &'a [u64]) -> Self {
+        Self { values }
+    }
+}
+
+impl CountSequence for PaddedCounts<'_> {
+    fn len(&self) -> usize {
+        self.values.len().saturating_add(2)
+    }
+
+    fn at(&self, index: usize) -> u64 {
+        if index == 0 {
+            0
+        } else {
+            self.values.get(index - 1).copied().unwrap_or(0)
+        }
+    }
+}
+
 /// Iterates the plateau-aware local maxima of `counts`, ascending.
-struct LocalMaxima<'a> {
-    counts: &'a [u64],
+struct LocalMaxima<'a, C> {
+    counts: &'a C,
     index: usize,
 }
 
-impl<'a> LocalMaxima<'a> {
-    fn new(counts: &'a [u64]) -> Self {
+impl<'a, C: CountSequence> LocalMaxima<'a, C> {
+    fn new(counts: &'a C) -> Self {
         Self { counts, index: 1 }
     }
 }
 
-impl Iterator for LocalMaxima<'_> {
+impl<C: CountSequence> Iterator for LocalMaxima<'_, C> {
     type Item = usize;
 
     fn next(&mut self) -> Option<usize> {
@@ -105,15 +152,15 @@ impl Iterator for LocalMaxima<'_> {
 
         let mut index = self.index;
         while index < length - 1 {
-            if counts[index - 1] < counts[index] {
+            if counts.at(index - 1) < counts.at(index) {
                 let mut end = index + 1;
-                while end < length && counts[end] == counts[index] {
+                while end < length && counts.at(end) == counts.at(index) {
                     end += 1;
                 }
                 if end == length {
                     break;
                 }
-                if counts[end] < counts[index] {
+                if counts.at(end) < counts.at(index) {
                     // Plateau spanning index..end, centre rounded down.
                     let peak = (index + end - 1) / 2;
                     self.index = end;
@@ -134,26 +181,26 @@ impl Iterator for LocalMaxima<'_> {
 ///
 /// Walking each side stops at the first sample *strictly* higher than the peak;
 /// the base is the higher of the two side minima.
-fn prominence(counts: &[u64], peak: usize) -> u64 {
-    let height = counts[peak];
+fn prominence<C: CountSequence>(counts: &C, peak: usize) -> u64 {
+    let height = counts.at(peak);
 
     let mut left_min = height;
     let mut index = peak;
     while index > 0 {
         index -= 1;
-        if counts[index] > height {
+        if counts.at(index) > height {
             break;
         }
-        left_min = left_min.min(counts[index]);
+        left_min = left_min.min(counts.at(index));
     }
 
     let mut right_min = height;
     let mut index = peak + 1;
     while index < counts.len() {
-        if counts[index] > height {
+        if counts.at(index) > height {
             break;
         }
-        right_min = right_min.min(counts[index]);
+        right_min = right_min.min(counts.at(index));
         index += 1;
     }
 
@@ -161,8 +208,8 @@ fn prominence(counts: &[u64], peak: usize) -> u64 {
 }
 
 /// Picks the tallest candidate in a padded region, returning its bin index.
-fn select(
-    padded: &[u64],
+fn select<C: CountSequence>(
+    padded: &C,
     minimum_height: u64,
     minimum_prominence: u64,
     use_prominence: bool,
@@ -170,7 +217,7 @@ fn select(
     let mut best: Option<(usize, u64)> = None;
 
     for peak in LocalMaxima::new(padded) {
-        let height = padded[peak];
+        let height = padded.at(peak);
         if height < minimum_height {
             continue;
         }
@@ -192,27 +239,40 @@ fn select(
 /// Analyses one padded region of interest, returning a bin index in
 /// `first..=last`.
 fn analyse_region(
-    counts: &[u64; BINS],
-    first: u8,
-    last: u8,
+    counts: &[u64],
+    first: u16,
+    last: u16,
     options: &PeakOptions,
     total_pixels: u64,
 ) -> Option<usize> {
-    let region = counts.get(first as usize..=last as usize)?;
-
-    // One virtual zero bin at each end, so region boundaries can be peaks.
-    let mut padded = [0u64; PADDED_CAPACITY];
-    padded[1..=region.len()].copy_from_slice(region);
-    let padded = &padded[..region.len() + 2];
+    let region = counts.get(usize::from(first)..=usize::from(last))?;
+    let padded = PaddedCounts::new(region);
 
     let minimum_height = minimum_count(total_pixels, options.peak_percentage);
     let minimum_prominence = minimum_count(total_pixels, options.peak_prominence);
     let use_prominence = options.peak_prominence.is_some();
 
-    let found = select(padded, minimum_height, minimum_prominence, use_prominence)
-        .or_else(|| select(padded, 0, 0, false));
+    let found = select(&padded, minimum_height, minimum_prominence, use_prominence)
+        .or_else(|| select(&padded, 0, 0, false));
 
-    found.map(|index| first as usize + index)
+    found.map(|index| usize::from(first) + index)
+}
+
+/// Scales the public 8-bit-equivalent limit to a native sample maximum.
+fn scale_upper_limit(upper_limit: u8, max_value: u16) -> u16 {
+    let numerator = u32::from(upper_limit) * u32::from(max_value);
+    let denominator = u32::from(u8::MAX);
+    let quotient = numerator / denominator;
+    let remainder = numerator % denominator;
+    let doubled_remainder = remainder * 2;
+    let rounded = if doubled_remainder > denominator
+        || (doubled_remainder == denominator && quotient % 2 != 0)
+    {
+        quotient + 1
+    } else {
+        quotient
+    };
+    rounded.min(u32::from(max_value)) as u16
 }
 
 /// Finds the black and white levels of a frame.
@@ -220,22 +280,24 @@ fn analyse_region(
 pub fn find_local_peak(histogram: &Histogram, options: &PeakOptions) -> PeakResult {
     let counts = histogram.counts();
     let total_pixels = histogram.total_pixels();
+    let max_value = histogram.max_value();
+    let upper_limit = scale_upper_limit(options.upper_limit, max_value);
 
-    let black_index = analyse_region(counts, 0, options.upper_limit, options, total_pixels);
-    let black = black_index.map_or(0, |index| index as u8);
+    let black_index = analyse_region(counts, 0, upper_limit, options, total_pixels);
+    let black = black_index.map_or(0, |index| index.min(usize::from(max_value)) as u16);
 
     if options.skip_white {
         return PeakResult {
             black,
-            white: 255,
+            white: max_value,
             black_found: black_index.is_some(),
             white_found: false,
         };
     }
 
-    let white_first = 255 - options.upper_limit;
-    let white_index = analyse_region(counts, white_first, 255, options, total_pixels);
-    let white = white_index.map_or(255, |index| index as u8);
+    let white_first = max_value - upper_limit;
+    let white_index = analyse_region(counts, white_first, max_value, options, total_pixels);
+    let white = white_index.map_or(max_value, |index| index.min(usize::from(max_value)) as u16);
 
     PeakResult {
         black,
@@ -248,6 +310,7 @@ pub fn find_local_peak(histogram: &Histogram, options: &PeakOptions) -> PeakResu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::histogram::BINS;
 
     fn histogram(counts: &[(u8, u64)], total_pixels: u64) -> Histogram {
         let mut bins = [0u64; BINS];
@@ -523,5 +586,60 @@ mod tests {
         let narrow = defaults(0);
         assert!(find_local_peak(&full, &narrow).black_found);
         assert!(find_local_peak(&full, &narrow).white_found);
+    }
+
+    fn wide_histogram(counts: &[(u16, u64)], total: u64, max_value: u16) -> Histogram {
+        let mut bins = vec![0u64; usize::from(max_value) + 1];
+        for &(shade, count) in counts {
+            if let Some(bin) = bins.get_mut(usize::from(shade)) {
+                *bin = count;
+            }
+        }
+        Histogram::from_counts_for_range(bins, total, max_value).expect("range matches bins")
+    }
+
+    #[test]
+    fn upper_limit_scales_from_its_eight_bit_units() {
+        assert_eq!(scale_upper_limit(60, 255), 60);
+        assert_eq!(scale_upper_limit(60, 65_535), 15_420);
+        assert_eq!(scale_upper_limit(255, 65_535), 65_535);
+    }
+
+    #[test]
+    fn native_depth_roi_boundaries_are_inclusive() {
+        let max_value = u16::MAX;
+        let black_edge = scale_upper_limit(60, max_value);
+        let white_edge = max_value - black_edge;
+        let histogram = wide_histogram(&[(black_edge, 100), (white_edge, 100)], 200, max_value);
+        let options = PeakOptions {
+            peak_percentage: None,
+            peak_prominence: None,
+            skip_white: false,
+            ..PeakOptions::default()
+        };
+        let result = find_local_peak(&histogram, &options);
+        assert_eq!(result.black, black_edge);
+        assert_eq!(result.white, white_edge);
+        assert!(result.black_found && result.white_found);
+    }
+
+    #[test]
+    fn wide_empty_histograms_fall_back_to_native_endpoints() {
+        let max_value = 65_535;
+        let histogram = wide_histogram(&[], 1_000, max_value);
+        let result = find_local_peak(&histogram, &PeakOptions::default());
+        assert_eq!(result.black, 0);
+        assert_eq!(result.white, max_value);
+        assert!(!result.black_found && !result.white_found);
+
+        let skipped = find_local_peak(
+            &histogram,
+            &PeakOptions {
+                skip_white: true,
+                ..PeakOptions::default()
+            },
+        );
+        assert_eq!(skipped.white, max_value);
+        assert!(!skipped.white_found);
     }
 }
