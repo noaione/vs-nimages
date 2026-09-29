@@ -1,0 +1,691 @@
+{
+  "page": 64,
+  "cases": [
+    {
+      "name": "gray8/method0",
+      "vapour": "GRAY8",
+      "format": "Gray",
+      "sample": "u8",
+      "width": 64,
+      "height": 64,
+      "planes": [
+        {
+          "file": "deblur/gray8-method0.in0.bin",
+          "width": 64,
+          "height": 64,
+          "bytes": 4096,
+          "sha256": "225e70d4f6435ead1433ce64519ee9dd746d93be9b96aa770d11c4e8ac6cff41"
+        }
+      ],
+      "expect": [
+        {
+          "file": "deblur/gray8-method0.out0.bin",
+          "width": 64,
+          "height": 64,
+          "bytes": 4096,
+          "sha256": "be705daa28f4bfcf7d95d8760fe26d55f167292d0761fc6ded80b98e13cefdcf"
+        }
+      ],
+      "tolerance": {
+        "max_abs_diff": 1.0,
+        "mean_abs_diff": 0.05,
+        "zero_fraction": 0.999
+      },
+      "method": 0,
+      "radius": 0.8,
+      "strength": 0.65,
+      "iterations": 6,
+      "threshold": 2.0,
+      "overshoot": 0.0
+    },
+    {
+      "name": "gray8/method1",
+      "vapour": "GRAY8",
+      "format": "Gray",
+      "sample": "u8",
+      "width": 64,
+      "height": 64,
+      "planes": [
+        {
+          "file": "deblur/gray8-method1.in0.bin",
+          "width": 64,
+          "height": 64,
+          "bytes": 4096,
+          "sha256": "225e70d4f6435ead1433ce64519ee9dd746d93be9b96aa770d11c4e8ac6cff41"
+        }
+      ],
+      "expect": [
+        {
+          "file": "deblur/gray8-method1.out0.bin",
+          "width": 64,
+          "height": 64,
+          "bytes": 4096,
+          "sha256": "3d78e9ac4bb24f62c03a4f934bac38d478b12f4ac19a1c79899322d092326f4b"
+        }
+      ],
+      "tolerance": {
+        "max_abs_diff": 1.0,
+        "mean_abs_diff": 0.05,
+        "zero_fraction": 0.999
+      },
+      "method": 1,
+      "radius": 0.8,
+      "strength": 0.85,
+      "iterations": 6,
+      "threshold": 2.0,
+      "overshoot": 0.0
+    },
+    {
+      "name": "gray8/wide",
+      "vapour": "GRAY8",
+      "format": "Gray",
+      "sample": "u8",
+      "width": 64,
+      "height": 64,
+      "planes": [
+        {
+          "file": "deblur/gray8-wide.in0.bin",
+          "width": 64,
+          "height": 64,
+          "bytes": 4096,
+          "sha256": "225e70d4f6435ead1433ce64519ee9dd746d93be9b96aa770d11c4e8ac6cff41"
+        }
+      ],
+      "expect": [
+        {
+          "file": "deblur/gray8-wide.out0.bin",
+          "width": 64,
+          "height": 64,
+          "bytes": 4096,
+          "sha256": "a0cf85627dfa565ed744d5cdebe65796f1a4f32da00dc56bfaf40820f5682ce4"
+        }
+      ],
+      "tolerance": {
+        "max_abs_diff": 1.0,
+        "mean_abs_diff": 0.05,
+        "zero_fraction": 0.999
+      },
+      "method": 0,
+      "radius": 2.0,
+      "strength": 0.9,
+      "iterations": 3,
+      "threshold": 1.0,
+      "overshoot": 1.0
+    },
+    {
+      "name": "gray8/threshold0",
+      "vapour": "GRAY8",
+      "format": "Gray",
+      "sample": "u8",
+      "width": 64,
+      "height": 64,
+      "planes": [
+        {
+          "file": "deblur/gray8-threshold0.in0.bin",
+          "width": 64,
+          "height": 64,
+          "bytes": 4096,
+          "sha256": "225e70d4f6435ead1433ce64519ee9dd746d93be9b96aa770d11c4e8ac6cff41"
+        }
+      ],
+      "expect": [
+        {
+          "file": "deblur/gray8-threshold0.out0.bin",
+          "width": 64,
+          "height": 64,
+          "bytes": 4096,
+          "sha256": "12790100f070809635a11d829ea6d234160db62fbbd4c2bde1b92f349c832abb"
+        }
+      ],
+      "tolerance": {
+        "max_abs_diff": 1.0,
+        "mean_abs_diff": 0.05,
+        "zero_fraction": 0.999
+      },
+      "method": 1,
+      "radius": 0.8,
+      "strength": 0.85,
+      "iterations": 6,
+      "threshold": 0.0,
+      "overshoot": 0.0
+    },
+    {
+      "name": "gray16/method0",
+      "vapour": "GRAY16",
+      "format": "Gray",
+      "sample": "u16",
+      "width": 64,
+      "height": 64,
+      "planes": [
+        {
+          "file": "deblur/gray16-method0.in0.bin",
+          "width": 64,
+          "height": 64,
+          "bytes": 8192,
+          "sha256": "1bb5a65725b06eefd7bbc37274ef92f0f246e2c973b25df101c324347bdca3af"
+        }
+      ],
+      "expect": [
+        {
+          "file": "deblur/gray16-method0.out0.bin",
+          "width": 64,
+          "height": 64,
+          "bytes": 8192,
+          "sha256": "0f39e6fc27bba0c1d3727daa7729d48f0efaeeaa6aa415f5089470c3c5b0641f"
+        }
+      ],
+      "tolerance": {
+        "max_abs_diff": 257.0,
+        "mean_abs_diff": 1.0,
+        "zero_fraction": 0.99
+      },
+      "method": 0,
+      "radius": 0.8,
+      "strength": 0.65,
+      "iterations": 6,
+      "threshold": 2.0,
+      "overshoot": 0.0
+    },
+    {
+      "name": "gray16/method1",
+      "vapour": "GRAY16",
+      "format": "Gray",
+      "sample": "u16",
+      "width": 64,
+      "height": 64,
+      "planes": [
+        {
+          "file": "deblur/gray16-method1.in0.bin",
+          "width": 64,
+          "height": 64,
+          "bytes": 8192,
+          "sha256": "1bb5a65725b06eefd7bbc37274ef92f0f246e2c973b25df101c324347bdca3af"
+        }
+      ],
+      "expect": [
+        {
+          "file": "deblur/gray16-method1.out0.bin",
+          "width": 64,
+          "height": 64,
+          "bytes": 8192,
+          "sha256": "fc3ee9c13946d70e7f7f10a969501ab304ec010e87462eadd7cb055e531c1181"
+        }
+      ],
+      "tolerance": {
+        "max_abs_diff": 257.0,
+        "mean_abs_diff": 1.0,
+        "zero_fraction": 0.99
+      },
+      "method": 1,
+      "radius": 0.8,
+      "strength": 0.85,
+      "iterations": 6,
+      "threshold": 2.0,
+      "overshoot": 0.0
+    },
+    {
+      "name": "gray32/method0",
+      "vapour": "GRAYS",
+      "format": "Gray",
+      "sample": "f32",
+      "width": 64,
+      "height": 64,
+      "planes": [
+        {
+          "file": "deblur/gray32-method0.in0.bin",
+          "width": 64,
+          "height": 64,
+          "bytes": 16384,
+          "sha256": "8e59866124e3c8080d901441fd32de906325bbe4191b15b46dd33b1b1000d37b"
+        }
+      ],
+      "expect": [
+        {
+          "file": "deblur/gray32-method0.out0.bin",
+          "width": 64,
+          "height": 64,
+          "bytes": 16384,
+          "sha256": "984171af8e5b6290a1e2d96a8ca6a31d35a8d5cf4e1de7c0a6bf33b1a60e0cc0"
+        }
+      ],
+      "tolerance": {
+        "max_abs_diff": 0.00392156862745098,
+        "mean_abs_diff": 1e-05,
+        "zero_fraction": 0.0
+      },
+      "method": 0,
+      "radius": 0.8,
+      "strength": 0.65,
+      "iterations": 6,
+      "threshold": 2.0,
+      "overshoot": 0.0
+    },
+    {
+      "name": "gray32/method1",
+      "vapour": "GRAYS",
+      "format": "Gray",
+      "sample": "f32",
+      "width": 64,
+      "height": 64,
+      "planes": [
+        {
+          "file": "deblur/gray32-method1.in0.bin",
+          "width": 64,
+          "height": 64,
+          "bytes": 16384,
+          "sha256": "8e59866124e3c8080d901441fd32de906325bbe4191b15b46dd33b1b1000d37b"
+        }
+      ],
+      "expect": [
+        {
+          "file": "deblur/gray32-method1.out0.bin",
+          "width": 64,
+          "height": 64,
+          "bytes": 16384,
+          "sha256": "82b5afc9eed0cca86d2b6bb9c913d315e268bea2d38632f8feceeaa659053af7"
+        }
+      ],
+      "tolerance": {
+        "max_abs_diff": 0.00392156862745098,
+        "mean_abs_diff": 1e-05,
+        "zero_fraction": 0.0
+      },
+      "method": 1,
+      "radius": 0.8,
+      "strength": 0.85,
+      "iterations": 6,
+      "threshold": 2.0,
+      "overshoot": 0.0
+    },
+    {
+      "name": "rgb24/method0",
+      "vapour": "RGB24",
+      "format": "RGB",
+      "sample": "u8",
+      "width": 64,
+      "height": 64,
+      "planes": [
+        {
+          "file": "deblur/rgb24-method0.in0.bin",
+          "width": 64,
+          "height": 64,
+          "bytes": 4096,
+          "sha256": "225e70d4f6435ead1433ce64519ee9dd746d93be9b96aa770d11c4e8ac6cff41"
+        },
+        {
+          "file": "deblur/rgb24-method0.in1.bin",
+          "width": 64,
+          "height": 64,
+          "bytes": 4096,
+          "sha256": "bf986ffefe16b1107f17c4a656d49acf592c741ac76c654af71824aa7d4482aa"
+        },
+        {
+          "file": "deblur/rgb24-method0.in2.bin",
+          "width": 64,
+          "height": 64,
+          "bytes": 4096,
+          "sha256": "b19c602758318b489e8aad2fcb6408eeed335b7a47543206a8576c7cf26e30d1"
+        }
+      ],
+      "expect": [
+        {
+          "file": "deblur/rgb24-method0.out0.bin",
+          "width": 64,
+          "height": 64,
+          "bytes": 4096,
+          "sha256": "d0998e9157c37eefa79de314711b178ee4e19825c9ddb88c7830e3b4bfc431d0"
+        },
+        {
+          "file": "deblur/rgb24-method0.out1.bin",
+          "width": 64,
+          "height": 64,
+          "bytes": 4096,
+          "sha256": "33dc13cdffb65cdb71625e3b815b854973225298185722912b89b1ecff5e7e2e"
+        },
+        {
+          "file": "deblur/rgb24-method0.out2.bin",
+          "width": 64,
+          "height": 64,
+          "bytes": 4096,
+          "sha256": "e5d58eda3da3de129871631f0dd6aca50c64779b8c0ea93f0db5321ec56b1cdf"
+        }
+      ],
+      "tolerance": {
+        "max_abs_diff": 1.0,
+        "mean_abs_diff": 0.05,
+        "zero_fraction": 0.999
+      },
+      "method": 0,
+      "radius": 0.8,
+      "strength": 0.65,
+      "iterations": 6,
+      "threshold": 2.0,
+      "overshoot": 0.0
+    },
+    {
+      "name": "rgb24/method1",
+      "vapour": "RGB24",
+      "format": "RGB",
+      "sample": "u8",
+      "width": 64,
+      "height": 64,
+      "planes": [
+        {
+          "file": "deblur/rgb24-method1.in0.bin",
+          "width": 64,
+          "height": 64,
+          "bytes": 4096,
+          "sha256": "225e70d4f6435ead1433ce64519ee9dd746d93be9b96aa770d11c4e8ac6cff41"
+        },
+        {
+          "file": "deblur/rgb24-method1.in1.bin",
+          "width": 64,
+          "height": 64,
+          "bytes": 4096,
+          "sha256": "bf986ffefe16b1107f17c4a656d49acf592c741ac76c654af71824aa7d4482aa"
+        },
+        {
+          "file": "deblur/rgb24-method1.in2.bin",
+          "width": 64,
+          "height": 64,
+          "bytes": 4096,
+          "sha256": "b19c602758318b489e8aad2fcb6408eeed335b7a47543206a8576c7cf26e30d1"
+        }
+      ],
+      "expect": [
+        {
+          "file": "deblur/rgb24-method1.out0.bin",
+          "width": 64,
+          "height": 64,
+          "bytes": 4096,
+          "sha256": "a89a66d393e9bd5ceb82b304466b3b8c83d9f49c304c8c02629ba118dc9de62c"
+        },
+        {
+          "file": "deblur/rgb24-method1.out1.bin",
+          "width": 64,
+          "height": 64,
+          "bytes": 4096,
+          "sha256": "a718ec35293af9dccad178a537cbdf6d590bbdb677dc9289a377bd86e455487d"
+        },
+        {
+          "file": "deblur/rgb24-method1.out2.bin",
+          "width": 64,
+          "height": 64,
+          "bytes": 4096,
+          "sha256": "580fd565bcf0acad4a78f922326be5f8e3efbcbef8e806876a2b7dba61db6f23"
+        }
+      ],
+      "tolerance": {
+        "max_abs_diff": 1.0,
+        "mean_abs_diff": 0.05,
+        "zero_fraction": 0.999
+      },
+      "method": 1,
+      "radius": 0.8,
+      "strength": 0.85,
+      "iterations": 6,
+      "threshold": 2.0,
+      "overshoot": 0.0
+    },
+    {
+      "name": "yuv444p8/method0",
+      "vapour": "YUV444P8",
+      "format": "YUV",
+      "sample": "u8",
+      "width": 64,
+      "height": 64,
+      "planes": [
+        {
+          "file": "deblur/yuv444p8-method0.in0.bin",
+          "width": 64,
+          "height": 64,
+          "bytes": 4096,
+          "sha256": "225e70d4f6435ead1433ce64519ee9dd746d93be9b96aa770d11c4e8ac6cff41"
+        },
+        {
+          "file": "deblur/yuv444p8-method0.in1.bin",
+          "width": 64,
+          "height": 64,
+          "bytes": 4096,
+          "sha256": "14dcfd84d11009de4ea46071a9b9e902ca7c8c18b397494686c80dfd4f62398b"
+        },
+        {
+          "file": "deblur/yuv444p8-method0.in2.bin",
+          "width": 64,
+          "height": 64,
+          "bytes": 4096,
+          "sha256": "e85f62c98ee4880bc32f628a3be1132836f7b0d921fa5bbd2197f7c7e3699263"
+        }
+      ],
+      "expect": [
+        {
+          "file": "deblur/yuv444p8-method0.out0.bin",
+          "width": 64,
+          "height": 64,
+          "bytes": 4096,
+          "sha256": "be705daa28f4bfcf7d95d8760fe26d55f167292d0761fc6ded80b98e13cefdcf"
+        },
+        {
+          "file": "deblur/yuv444p8-method0.out1.bin",
+          "width": 64,
+          "height": 64,
+          "bytes": 4096,
+          "sha256": "14dcfd84d11009de4ea46071a9b9e902ca7c8c18b397494686c80dfd4f62398b"
+        },
+        {
+          "file": "deblur/yuv444p8-method0.out2.bin",
+          "width": 64,
+          "height": 64,
+          "bytes": 4096,
+          "sha256": "e85f62c98ee4880bc32f628a3be1132836f7b0d921fa5bbd2197f7c7e3699263"
+        }
+      ],
+      "tolerance": {
+        "max_abs_diff": 1.0,
+        "mean_abs_diff": 0.05,
+        "zero_fraction": 0.999
+      },
+      "method": 0,
+      "radius": 0.8,
+      "strength": 0.65,
+      "iterations": 6,
+      "threshold": 2.0,
+      "overshoot": 0.0
+    },
+    {
+      "name": "yuv422p8/method0",
+      "vapour": "YUV422P8",
+      "format": "YUV",
+      "sample": "u8",
+      "width": 64,
+      "height": 64,
+      "planes": [
+        {
+          "file": "deblur/yuv422p8-method0.in0.bin",
+          "width": 64,
+          "height": 64,
+          "bytes": 4096,
+          "sha256": "225e70d4f6435ead1433ce64519ee9dd746d93be9b96aa770d11c4e8ac6cff41"
+        },
+        {
+          "file": "deblur/yuv422p8-method0.in1.bin",
+          "width": 32,
+          "height": 64,
+          "bytes": 2048,
+          "sha256": "65cefe9d563b916349be7440d9c8b8a567ab3fcc2693882b96adb644f45d37c0"
+        },
+        {
+          "file": "deblur/yuv422p8-method0.in2.bin",
+          "width": 32,
+          "height": 64,
+          "bytes": 2048,
+          "sha256": "b34e3e8f8f2ce8ab6cf392c02194b54fbe4d5aaa67a34fdec29c06116d6fb713"
+        }
+      ],
+      "expect": [
+        {
+          "file": "deblur/yuv422p8-method0.out0.bin",
+          "width": 64,
+          "height": 64,
+          "bytes": 4096,
+          "sha256": "be705daa28f4bfcf7d95d8760fe26d55f167292d0761fc6ded80b98e13cefdcf"
+        },
+        {
+          "file": "deblur/yuv422p8-method0.out1.bin",
+          "width": 32,
+          "height": 64,
+          "bytes": 2048,
+          "sha256": "65cefe9d563b916349be7440d9c8b8a567ab3fcc2693882b96adb644f45d37c0"
+        },
+        {
+          "file": "deblur/yuv422p8-method0.out2.bin",
+          "width": 32,
+          "height": 64,
+          "bytes": 2048,
+          "sha256": "b34e3e8f8f2ce8ab6cf392c02194b54fbe4d5aaa67a34fdec29c06116d6fb713"
+        }
+      ],
+      "tolerance": {
+        "max_abs_diff": 1.0,
+        "mean_abs_diff": 0.05,
+        "zero_fraction": 0.999
+      },
+      "method": 0,
+      "radius": 0.8,
+      "strength": 0.65,
+      "iterations": 6,
+      "threshold": 2.0,
+      "overshoot": 0.0
+    },
+    {
+      "name": "yuv420p8/method0",
+      "vapour": "YUV420P8",
+      "format": "YUV",
+      "sample": "u8",
+      "width": 64,
+      "height": 64,
+      "planes": [
+        {
+          "file": "deblur/yuv420p8-method0.in0.bin",
+          "width": 64,
+          "height": 64,
+          "bytes": 4096,
+          "sha256": "225e70d4f6435ead1433ce64519ee9dd746d93be9b96aa770d11c4e8ac6cff41"
+        },
+        {
+          "file": "deblur/yuv420p8-method0.in1.bin",
+          "width": 32,
+          "height": 32,
+          "bytes": 1024,
+          "sha256": "a605807b0db11f6e977948135c9b59f6d57c18c28076ccd65faade9308238f9e"
+        },
+        {
+          "file": "deblur/yuv420p8-method0.in2.bin",
+          "width": 32,
+          "height": 32,
+          "bytes": 1024,
+          "sha256": "f5533bec014e3ae916d7ab26344eba1ee5444bff04d0c0d5caa3026debe524bc"
+        }
+      ],
+      "expect": [
+        {
+          "file": "deblur/yuv420p8-method0.out0.bin",
+          "width": 64,
+          "height": 64,
+          "bytes": 4096,
+          "sha256": "be705daa28f4bfcf7d95d8760fe26d55f167292d0761fc6ded80b98e13cefdcf"
+        },
+        {
+          "file": "deblur/yuv420p8-method0.out1.bin",
+          "width": 32,
+          "height": 32,
+          "bytes": 1024,
+          "sha256": "a605807b0db11f6e977948135c9b59f6d57c18c28076ccd65faade9308238f9e"
+        },
+        {
+          "file": "deblur/yuv420p8-method0.out2.bin",
+          "width": 32,
+          "height": 32,
+          "bytes": 1024,
+          "sha256": "f5533bec014e3ae916d7ab26344eba1ee5444bff04d0c0d5caa3026debe524bc"
+        }
+      ],
+      "tolerance": {
+        "max_abs_diff": 1.0,
+        "mean_abs_diff": 0.05,
+        "zero_fraction": 0.999
+      },
+      "method": 0,
+      "radius": 0.8,
+      "strength": 0.65,
+      "iterations": 6,
+      "threshold": 2.0,
+      "overshoot": 0.0
+    },
+    {
+      "name": "yuv420p8/overshoot",
+      "vapour": "YUV420P8",
+      "format": "YUV",
+      "sample": "u8",
+      "width": 64,
+      "height": 64,
+      "planes": [
+        {
+          "file": "deblur/yuv420p8-overshoot.in0.bin",
+          "width": 64,
+          "height": 64,
+          "bytes": 4096,
+          "sha256": "225e70d4f6435ead1433ce64519ee9dd746d93be9b96aa770d11c4e8ac6cff41"
+        },
+        {
+          "file": "deblur/yuv420p8-overshoot.in1.bin",
+          "width": 32,
+          "height": 32,
+          "bytes": 1024,
+          "sha256": "a605807b0db11f6e977948135c9b59f6d57c18c28076ccd65faade9308238f9e"
+        },
+        {
+          "file": "deblur/yuv420p8-overshoot.in2.bin",
+          "width": 32,
+          "height": 32,
+          "bytes": 1024,
+          "sha256": "f5533bec014e3ae916d7ab26344eba1ee5444bff04d0c0d5caa3026debe524bc"
+        }
+      ],
+      "expect": [
+        {
+          "file": "deblur/yuv420p8-overshoot.out0.bin",
+          "width": 64,
+          "height": 64,
+          "bytes": 4096,
+          "sha256": "e389cc8079edd88316e7aff27f6d577a9b0831bdd594249332fb72cc99ec3f24"
+        },
+        {
+          "file": "deblur/yuv420p8-overshoot.out1.bin",
+          "width": 32,
+          "height": 32,
+          "bytes": 1024,
+          "sha256": "a605807b0db11f6e977948135c9b59f6d57c18c28076ccd65faade9308238f9e"
+        },
+        {
+          "file": "deblur/yuv420p8-overshoot.out2.bin",
+          "width": 32,
+          "height": 32,
+          "bytes": 1024,
+          "sha256": "f5533bec014e3ae916d7ab26344eba1ee5444bff04d0c0d5caa3026debe524bc"
+        }
+      ],
+      "tolerance": {
+        "max_abs_diff": 1.0,
+        "mean_abs_diff": 0.05,
+        "zero_fraction": 0.999
+      },
+      "method": 0,
+      "radius": 0.8,
+      "strength": 0.65,
+      "iterations": 6,
+      "threshold": 2.0,
+      "overshoot": 2.0
+    }
+  ]
+}

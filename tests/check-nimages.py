@@ -32,7 +32,7 @@ FIXTURES = REPO_ROOT / "tests" / "fixtures"
 
 PLUGIN_ID = "xyz.n4o.nimages"
 NAMESPACE = "nimages"
-FUNCTIONS = ("Levels", "PeakGrayShades", "PeakStats", "Posterize")
+FUNCTIONS = ("Deblur", "Levels", "PeakGrayShades", "PeakStats", "Posterize")
 
 # Histogram cases above this many pixels are left to the Rust tests; building a
 # frame that wide is not worth the time here.
@@ -1143,10 +1143,229 @@ def check_determinism() -> None:
     same(array_of(chain, 1).tolist(), first.tolist(), "both frames hold the same page")
 
 
+# ---------------------------------------------------------------------------
+# deblur
+# ---------------------------------------------------------------------------
+
+#: Numpy dtype of one sample, keyed by the fixture's sample name.
+DEBLUR_SAMPLES = {"u8": np.uint8, "u16": np.uint16, "f32": np.float32}
+
+
+def deblur_plane(info: dict, sample: str) -> np.ndarray:
+    """One fixture plane, decoded to its own sample type."""
+    data = (FIXTURES / info["file"]).read_bytes()
+    check(len(data) == info["bytes"], f"{info['file']}: unexpected size on disk")
+    values = np.frombuffer(data, dtype=DEBLUR_SAMPLES[sample])
+    return values.reshape(info["height"], info["width"]).copy()
+
+
+def deblur_compare(got: np.ndarray, want: np.ndarray, tolerance: dict, name: str) -> None:
+    """Checks one plane against the reference within a frozen tolerance."""
+    difference = np.abs(got.astype(np.float64) - want.astype(np.float64))
+    check(
+        float(difference.max()) <= tolerance["max_abs_diff"],
+        f"{name}: worst sample differs by {difference.max()}, over {tolerance['max_abs_diff']}",
+    )
+    check(
+        float(difference.mean()) <= tolerance["mean_abs_diff"],
+        f"{name}: mean sample differs by {difference.mean()}, over {tolerance['mean_abs_diff']}",
+    )
+    exact = float((difference == 0).mean())
+    check(
+        exact >= tolerance["zero_fraction"],
+        f"{name}: only {exact} of the samples match exactly, under {tolerance['zero_fraction']}",
+    )
+
+
+def check_deblur(fixtures: dict) -> None:
+    section("deblur against the reference")
+    for case in fixtures["cases"]:
+        planes = [deblur_plane(plane, case["sample"]) for plane in case["planes"]]
+        expected = [deblur_plane(plane, case["sample"]) for plane in case["expect"]]
+        clip = clip_of_planes(
+            planes, getattr(vs, case["vapour"]), width=case["width"], height=case["height"]
+        )
+        output = core.nimages.Deblur(
+            clip,
+            method=case["method"],
+            radius=case["radius"],
+            strength=case["strength"],
+            iterations=case["iterations"],
+            threshold=case["threshold"],
+            overshoot=case["overshoot"],
+        )
+        with output.get_frame(0) as frame:
+            for index, want in enumerate(expected):
+                deblur_compare(
+                    np.asarray(frame[index]), want, case["tolerance"], f"{case['name']}: plane {index}"
+                )
+
+
+def deblur_page() -> np.ndarray:
+    """A small page with a soft edge, a hard step and flat areas."""
+    page = np.full((32, 32), 128.0)
+    page[:, 0:8] = 40.0
+    page[:, 8:16] = np.linspace(40.0, 220.0, 8)
+    page[:, 16:24] = 220.0
+    page[4:12, 20] = 255.0
+    page[20:28, 4:8] = 0.0
+    return np.rint(page).clip(0, 255).astype(np.uint8)
+
+
+def check_deblur_behaviour() -> None:
+    section("deblur behaviour")
+    page = deblur_page()
+    clip = clip_of(page)
+
+    # The default strength follows the method that is in effect.
+    same(
+        array_of(core.nimages.Deblur(clip, method=1)).tolist(),
+        array_of(core.nimages.Deblur(clip, method=1, strength=0.85)).tolist(),
+        "method=1 defaults to strength 0.85",
+    )
+    same(
+        array_of(core.nimages.Deblur(clip, method=0)).tolist(),
+        array_of(core.nimages.Deblur(clip, method=0, strength=0.65)).tolist(),
+        "method=0 defaults to strength 0.65",
+    )
+    check(
+        array_of(core.nimages.Deblur(clip, method=1)).tolist()
+        != array_of(core.nimages.Deblur(clip, method=1, strength=0.65)).tolist(),
+        "an explicit strength overrides the method's default",
+    )
+
+    # Only the deconvolution has a refinement loop.
+    same(
+        array_of(core.nimages.Deblur(clip, method=1, iterations=1)).tolist(),
+        array_of(core.nimages.Deblur(clip, method=1, iterations=40)).tolist(),
+        "method=1 ignores iterations",
+    )
+    same(
+        array_of(core.nimages.Deblur(clip, method=1, iterations=1000)).tolist(),
+        array_of(core.nimages.Deblur(clip, method=1)).tolist(),
+        "method=1 ignores an out of range iterations",
+    )
+    check(
+        array_of(core.nimages.Deblur(clip, method=0, iterations=1)).tolist()
+        != array_of(core.nimages.Deblur(clip, method=0, iterations=6)).tolist(),
+        "method=0 honours iterations",
+    )
+
+    # Chroma is carried through untouched at every subsampling.
+    for name, format_, sub_w, sub_h in (
+        ("YUV444P8", vs.YUV444P8, 0, 0),
+        ("YUV422P8", vs.YUV422P8, 1, 0),
+        ("YUV420P8", vs.YUV420P8, 1, 1),
+    ):
+        u = np.tile(np.arange(32 >> sub_w, dtype=np.uint8), (32 >> sub_h, 1))
+        v = np.tile(np.arange(32 >> sub_h, dtype=np.uint8).reshape(-1, 1), (1, 32 >> sub_w))
+        source = clip_of_planes([page, u, v], format_, width=32, height=32)
+        with core.nimages.Deblur(source).get_frame(0) as frame:
+            same(np.asarray(frame[1]).tolist(), u.tolist(), f"{name}: U is untouched")
+            same(np.asarray(frame[2]).tolist(), v.tolist(), f"{name}: V is untouched")
+
+    # A flat page has no gradient, so the mask is shut whatever the fill.
+    for method in (0, 1):
+        for level in (0, 128, 255):
+            flat = np.full((16, 16), level, dtype=np.uint8)
+            output = array_of(core.nimages.Deblur(clip_of(flat), method=method))
+            same(output.tolist(), flat.tolist(), f"method={method} leaves a flat {level} alone")
+
+    # The threshold decides how much of the page the blend reaches.
+    same(
+        array_of(core.nimages.Deblur(clip, threshold=255.0)).tolist(),
+        page.tolist(),
+        "a threshold above every gradient leaves the page alone",
+    )
+    check(
+        array_of(core.nimages.Deblur(clip, threshold=0.0)).tolist() != page.tolist(),
+        "threshold=0 opens the mask",
+    )
+
+    # Without overshoot the blend never passes the 3x3 extremes of the page.
+    padded = np.pad(page.astype(np.int16), 1, mode="edge")
+    windows = np.stack(
+        [
+            padded[row : row + 32, column : column + 32]
+            for row in range(3)
+            for column in range(3)
+        ]
+    )
+    low = windows.min(axis=0)
+    high = windows.max(axis=0)
+    for method in (0, 1):
+        output = array_of(core.nimages.Deblur(clip, method=method, overshoot=0.0)).astype(np.int16)
+        check(
+            bool(((output >= low) & (output <= high)).all()),
+            f"method={method} allows no excursion past the local extremes",
+        )
+
+    # The float path is the same operation on the reference's own range.
+    float_page = page.astype(np.float32) / np.float32(255.0)
+    source = clip_of_planes([float_page], vs.GRAYS, width=32, height=32)
+    output = array_of(core.nimages.Deblur(source))
+    check(bool(np.isfinite(output).all()), "a float page stays finite")
+    check(
+        bool(((output >= 0.0) & (output <= 1.0)).all()),
+        "a float page stays inside the reference's range",
+    )
+    check(
+        not np.array_equal(output, float_page),
+        "the deconvolution moves a float page",
+    )
+
+
+def check_deblur_errors() -> None:
+    section("invalid deblur arguments")
+    gray = clip_of(deblur_page())
+    expect_error(
+        "Deblur method 2",
+        lambda: core.nimages.Deblur(gray, method=2),
+        contains="method must be 0",
+    )
+    expect_error(
+        "Deblur radius 0",
+        lambda: core.nimages.Deblur(gray, radius=0.0),
+        contains="radius must be greater than 0",
+    )
+    expect_error(
+        "Deblur radius above the bound",
+        lambda: core.nimages.Deblur(gray, radius=17.0),
+        contains="radius must be greater than 0",
+    )
+    expect_error(
+        "Deblur infinite strength",
+        lambda: core.nimages.Deblur(gray, strength=float("inf")),
+        contains="strength must be a finite number",
+    )
+    expect_error(
+        "Deblur iterations above the bound",
+        lambda: core.nimages.Deblur(gray, iterations=100),
+        contains="iterations must be between 0 and 64",
+    )
+    expect_error(
+        "Deblur negative iterations",
+        lambda: core.nimages.Deblur(gray, iterations=-1),
+        contains="iterations must be between 0 and 64",
+    )
+    expect_error(
+        "Deblur negative threshold",
+        lambda: core.nimages.Deblur(gray, threshold=-1.0),
+        contains="threshold must be a finite number",
+    )
+    expect_error(
+        "Deblur negative overshoot",
+        lambda: core.nimages.Deblur(gray, overshoot=-1.0),
+        contains="overshoot must be a finite number",
+    )
+    expect_error("Deblur without a clip", lambda: core.nimages.Deblur())  # type: ignore
+
+
 def main() -> int:
     frames = load("frames.json")
     peaks = load("peaks.json")
     shades = load("shades.json")
+    deblur = load("deblur.json")
     levels = load("levels.json")
     posterize = load("posterize.json")
 
@@ -1174,6 +1393,9 @@ def main() -> int:
     check_dynamic_dimensions(posterize)
     check_debug_logging()
     check_determinism()
+    check_deblur(deblur)
+    check_deblur_behaviour()
+    check_deblur_errors()
 
     print()
     if failures:

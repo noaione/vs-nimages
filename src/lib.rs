@@ -2,9 +2,9 @@
 //!
 //! The crate is split in two halves:
 //!
-//! * safe, VapourSynth-free algorithm modules ([`histogram`], [`peaks`],
-//!   [`gray_shades`], [`levels`], [`posterize`]) that hold all of the behaviour,
-//!   so they can be tested without a core
+//! * safe, VapourSynth-free algorithm modules ([`deblur`], [`gray_shades`],
+//!   [`histogram`], [`levels`], [`peaks`], [`posterize`]) that hold all of the
+//!   behaviour, so they can be tested without a core
 //! * the filter layer in [`filters`], the only place that touches the plugin API
 //!
 //! `PeakStats` and `PeakGrayShades` leave pixels alone and attach their results
@@ -14,6 +14,7 @@
 mod error;
 mod filters;
 
+pub mod deblur;
 pub mod gray_shades;
 pub mod histogram;
 pub mod levels;
@@ -21,7 +22,7 @@ pub mod peaks;
 pub mod posterize;
 pub mod round;
 
-use filters::{Levels, PeakGrayShades, PeakStats, Posterize};
+use filters::{Deblur, Levels, PeakGrayShades, PeakStats, Posterize};
 
 vapoursynth4_rs::declare_plugin!(
     c"xyz.n4o.nimages",
@@ -33,5 +34,6 @@ vapoursynth4_rs::declare_plugin!(
     (PeakStats, None),
     (PeakGrayShades, None),
     (Levels, None),
-    (Posterize, None)
+    (Posterize, None),
+    (Deblur, None)
 );

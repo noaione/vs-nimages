@@ -18,11 +18,13 @@
 //! written, and an RGB frame's interleaved channels are stepped over rather than
 //! mixed.
 
+mod deblur;
 mod levels;
 mod peak_gray_shades;
 mod peak_stats;
 mod posterize;
 
+pub use deblur::Deblur;
 pub use levels::Levels;
 pub use peak_gray_shades::PeakGrayShades;
 pub use peak_stats::PeakStats;
@@ -61,6 +63,9 @@ pub(super) enum Accept {
     /// Inputs supported by `Levels`: all integer formats above plus Gray and
     /// RGB single-precision float formats.
     Levels,
+    /// Inputs supported by `Deblur`: Gray, RGB and YUV at any integer depth from
+    /// 8 to 16 bits, and the 32 bit float formats of the same families.
+    Deblur,
 }
 
 impl Accept {
@@ -70,6 +75,9 @@ impl Accept {
             Self::GrayInteger8To16 => "a constant Gray 8 to 16 bit integer clip",
             Self::Integer8To16 => "an 8 to 16 bit integer clip",
             Self::Levels => "an 8 to 16 bit integer clip or a Gray/RGB 32 bit float clip",
+            Self::Deblur => {
+                "a Gray, RGB or YUV 8 to 16 bit integer clip or its 32 bit float equivalent"
+            }
         }
     }
 
@@ -94,6 +102,14 @@ impl Accept {
                         && matches!(format.color_family, ColorFamily::Gray | ColorFamily::RGB)
                         && format.sub_sampling_w == 0
                         && format.sub_sampling_h == 0)
+            }
+            Self::Deblur => {
+                matches!(
+                    format.color_family,
+                    ColorFamily::Gray | ColorFamily::RGB | ColorFamily::YUV
+                ) && ((format.sample_type == SampleType::Integer
+                    && (MIN_INTEGER_BITS..=MAX_INTEGER_BITS).contains(&format.bits_per_sample))
+                    || (format.sample_type == SampleType::Float && format.bits_per_sample == 32))
             }
             Self::GrayInteger8To16 => {
                 format.sample_type == SampleType::Integer

@@ -207,17 +207,19 @@ class Nmanga:
 
     def __init__(self, path: Path) -> None:
         module_path = path / "nmanga" / "autolevel.py"
-        if not module_path.is_file():
-            raise SystemExit(f"cannot find {module_path}; pass --nmanga-path")
+        if not module_path.is_file() or not (path / "nmanga" / "deblur.py").is_file():
+            raise SystemExit(f"cannot find nmanga under {path}; pass --nmanga-path")
         sys.path.insert(0, str(path))
         try:
             import nmanga.autolevel  # ruff: ignore[unused-import]
+            import nmanga.deblur  # ruff: ignore[unused-import]
         except ImportError as error:  # pragma: no cover - depends on the checkout
             raise SystemExit(
-                f"cannot import nmanga.autolevel from {path}: {error}\n"
+                f"cannot import nmanga from {path}: {error}\n"
                 "run this script with the interpreter that has numpy, scipy and Pillow"
             ) from error
         self.module = sys.modules["nmanga.autolevel"]
+        self.deblur = sys.modules["nmanga.deblur"]
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.module, name)
@@ -639,6 +641,292 @@ def build_posterize_fixtures(nmanga: Nmanga) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Deblur cases
+# ---------------------------------------------------------------------------
+
+#: Side of the synthetic page every deblur case runs on.
+DEBLUR_SIZE = 64
+#: Where the deblur inputs and expectations are written.
+DEBLUR_DIR = FIXTURES / "deblur"
+
+#: The tolerance each case is frozen at, keyed by how one sample is stored. One
+#: 8 bit code value is 257 samples at 16 bits, and a float sample is measured in
+#: the reference's own `[0, 1]` units, where one 8 bit step is `1 / 255`.
+#:
+#: The exact-match fraction is the 8 bit rule: the reference is float64 and the
+#: plugin is float32, so at 16 bits a handful of samples land on the other side
+#: of a rounding boundary and only the bounds hold.
+DEBLUR_TOLERANCE = {
+    "u8": {"max_abs_diff": 1.0, "mean_abs_diff": 0.05, "zero_fraction": 0.999},
+    "u16": {"max_abs_diff": 257.0, "mean_abs_diff": 1.0, "zero_fraction": 0.99},
+    "f32": {"max_abs_diff": 1.0 / 255.0, "mean_abs_diff": 1.0e-5, "zero_fraction": 0.0},
+}
+
+
+def deblur_page() -> np.ndarray:
+    """The 64x64 page every deblur case starts from, in 0..255."""
+    plane = np.zeros((DEBLUR_SIZE, DEBLUR_SIZE), dtype=np.float64)
+
+    # A soft ramp, which is the shape the deconvolution is there to undo.
+    plane[:, 0:16] = np.linspace(60.0, 200.0, 16)
+    # A hard step, a one pixel line beside it, and a low contrast step.
+    plane[:, 16:32] = 40.0
+    plane[:, 24:32] = 220.0
+    plane[8:24, 28] = 255.0
+    plane[40:56, 20:22] = 48.0
+    # Flat mid gray holding a black square and a white square.
+    plane[:, 32:48] = 128.0
+    plane[16:32, 34:40] = 0.0
+    plane[40:52, 42:46] = 255.0
+    # A soft dark to light edge, with a striped texture across it.
+    plane[:, 48:64] = np.linspace(20.0, 240.0, 16)
+    plane[::4, 48:64] = 0.0
+    return plane
+
+
+def deblur_gray8() -> np.ndarray:
+    return np.rint(deblur_page()).clip(0, 255).astype(np.uint8)
+
+
+def deblur_rgb8() -> np.ndarray:
+    """The same page in colour, so the equal-offset rule and its gamut limit
+    have channel differences and clipped pixels to act on."""
+    page = deblur_page()
+    rgb = np.stack([page, page * 0.88 + 8.0, page * 0.70 + 26.0], axis=-1)
+    return np.rint(np.clip(rgb, 0.0, 255.0)).astype(np.uint8)
+
+
+def deblur_chroma(width: int, height: int) -> tuple[np.ndarray, np.ndarray]:
+    """Two distinct chroma planes, so "chroma is untouched" means something."""
+    row = np.broadcast_to(np.arange(height, dtype=np.float64).reshape(-1, 1), (height, width))
+    column = np.broadcast_to(np.arange(width, dtype=np.float64).reshape(1, -1), (height, width))
+    return (90.0 + column, 160.0 - row * 0.5)
+
+
+def deblur_smoothstep(values: np.ndarray) -> np.ndarray:
+    values = np.clip(values, 0, 1)
+    return values * values * (3 - 2 * values)
+
+
+def deblur_edge_mask(y: np.ndarray, threshold: float) -> np.ndarray:
+    """`nmanga.deblur.edge_mask`, over `[0, 1]` values."""
+    ndimage = scipy.ndimage
+    base = ndimage.gaussian_filter(y, 0.5, mode="reflect")
+    gradient = np.hypot(
+        ndimage.sobel(base, axis=0, mode="reflect"),
+        ndimage.sobel(base, axis=1, mode="reflect"),
+    )
+    magnitude = gradient * (255.0 / 8.0)
+    mask = deblur_smoothstep((magnitude - threshold) / max(3 * threshold, 1e-6))
+    return ndimage.gaussian_filter(mask, 0.45, mode="reflect")
+
+
+def deblur_luma_stage(
+    y: np.ndarray,
+    *,
+    method: int,
+    radius: float,
+    strength: float,
+    iterations: int,
+    threshold: float,
+    overshoot: float,
+) -> np.ndarray:
+    """`nmanga.deblur`, over the luma plane in `[0, 1]`."""
+    ndimage = scipy.ndimage
+    if method == 0:
+        # Positive pedestal: it keeps the multiplicative update away from
+        # zero-locking at pure black.
+        pedestal = 1 / 255
+        observed = y + pedestal
+        estimate = observed.copy()
+        for _ in range(iterations):
+            blurred = ndimage.gaussian_filter(estimate, radius, mode="reflect", truncate=4)
+            ratio = observed / np.maximum(blurred, 1e-7)
+            estimate = estimate * ndimage.gaussian_filter(ratio, radius, mode="reflect", truncate=4)
+        candidate = y + strength * (estimate - pedestal - y)
+    else:
+        candidate = y + strength * (y - ndimage.gaussian_filter(y, radius, mode="reflect", truncate=4))
+
+    low = ndimage.minimum_filter(y, size=3, mode="reflect") - overshoot / 255
+    high = ndimage.maximum_filter(y, size=3, mode="reflect") + overshoot / 255
+    candidate = np.clip(candidate, low, high)
+    return np.clip(y + deblur_edge_mask(y, threshold) * (candidate - y), 0, 1)
+
+
+def deblur_luma_expect(plane: np.ndarray, max_value: float, params: dict[str, Any]) -> np.ndarray:
+    """The restored plane for a format whose luma is a plane of its own."""
+    y = plane.astype(np.float64) / max_value
+    return deblur_luma_stage(y, **params)
+
+
+def deblur_rgb_expect(rgb: np.ndarray, params: dict[str, Any]) -> np.ndarray:
+    """`nmanga.deblur`: one equal offset per pixel, limited to the gamut the
+    pixel has left."""
+    page = rgb.astype(np.float64) / 255.0
+    y = page @ np.array([0.2126, 0.7152, 0.0722])
+    delta = deblur_luma_stage(y, **params) - y
+    delta = np.clip(delta, -page.min(axis=2), 1 - page.max(axis=2))
+    return np.rint(np.clip(page + delta[..., None], 0, 1) * 255).astype(np.uint8)
+
+
+def deblur_parameters(method: int, **overrides: Any) -> dict[str, Any]:
+    """The defaults of whichever method is in effect, plus any override."""
+    return {
+        "method": method,
+        "radius": 0.8,
+        "strength": 0.65 if method == 0 else 0.85,
+        "iterations": 6,
+        "threshold": 2.0,
+        "overshoot": 0.0,
+        **overrides,
+    }
+
+
+def deblur_case_list() -> list[dict[str, Any]]:
+    """Every case, before anything is written."""
+    gray8 = deblur_gray8()
+    rgb8 = deblur_rgb8()
+    gray16 = gray8.astype(np.uint16) * np.uint16(257)
+    gray32 = gray8.astype(np.float32) / np.float32(255.0)
+    cases: list[dict[str, Any]] = []
+
+    def restored(plane: np.ndarray, sample: str, max_value: float, params: dict[str, Any]) -> np.ndarray:
+        """The restored luma, rounded back onto the sample's own grid."""
+        values = deblur_luma_expect(plane, max_value, params)
+        if sample == "u8":
+            return np.rint(values * 255.0).clip(0, 255).astype(np.uint8)
+        if sample == "u16":
+            return np.rint(values * 65535.0).clip(0, 65535).astype(np.uint16)
+        return values.astype(np.float32)
+
+    def gray(name: str, vapour: str, plane: np.ndarray, sample: str, max_value: float, params: dict[str, Any]) -> None:
+        cases.append({
+            "name": name,
+            "vapour": vapour,
+            "format": "Gray",
+            "sample": sample,
+            "planes": [plane],
+            "expect": [restored(plane, sample, max_value, params)],
+            "params": params,
+        })
+
+    def yuv(name: str, vapour: str, sub_w: int, sub_h: int, params: dict[str, Any]) -> None:
+        u, v = deblur_chroma(DEBLUR_SIZE >> sub_w, DEBLUR_SIZE >> sub_h)
+        u = np.rint(u).clip(0, 255).astype(np.uint8)
+        v = np.rint(v).clip(0, 255).astype(np.uint8)
+        cases.append({
+            "name": name,
+            "vapour": vapour,
+            "format": "YUV",
+            "sample": "u8",
+            "planes": [gray8, u, v],
+            "expect": [restored(gray8, "u8", 255.0, params), u, v],
+            "params": params,
+        })
+
+    def rgb(name: str, params: dict[str, Any]) -> None:
+        page = deblur_rgb_expect(rgb8, params)
+        cases.append({
+            "name": name,
+            "vapour": "RGB24",
+            "format": "RGB",
+            "sample": "u8",
+            "planes": [np.ascontiguousarray(rgb8[:, :, channel]) for channel in range(3)],
+            "expect": [np.ascontiguousarray(page[:, :, channel]) for channel in range(3)],
+            "params": params,
+        })
+
+    gray("gray8/method0", "GRAY8", gray8, "u8", 255.0, deblur_parameters(0))
+    gray("gray8/method1", "GRAY8", gray8, "u8", 255.0, deblur_parameters(1))
+    gray(
+        "gray8/wide",
+        "GRAY8",
+        gray8,
+        "u8",
+        255.0,
+        deblur_parameters(0, radius=2.0, strength=0.9, iterations=3, threshold=1.0, overshoot=1.0),
+    )
+    gray("gray8/threshold0", "GRAY8", gray8, "u8", 255.0, deblur_parameters(1, threshold=0.0))
+    gray("gray16/method0", "GRAY16", gray16, "u16", 65535.0, deblur_parameters(0))
+    gray("gray16/method1", "GRAY16", gray16, "u16", 65535.0, deblur_parameters(1))
+    gray("gray32/method0", "GRAYS", gray32, "f32", 1.0, deblur_parameters(0))
+    gray("gray32/method1", "GRAYS", gray32, "f32", 1.0, deblur_parameters(1))
+    rgb("rgb24/method0", deblur_parameters(0))
+    rgb("rgb24/method1", deblur_parameters(1))
+    yuv("yuv444p8/method0", "YUV444P8", 0, 0, deblur_parameters(0))
+    yuv("yuv422p8/method0", "YUV422P8", 1, 0, deblur_parameters(0))
+    yuv("yuv420p8/method0", "YUV420P8", 1, 1, deblur_parameters(0))
+    yuv("yuv420p8/overshoot", "YUV420P8", 1, 1, deblur_parameters(0, overshoot=2.0))
+    return cases
+
+
+def write_deblur_plane(name: str, plane: np.ndarray) -> dict[str, Any]:
+    path = DEBLUR_DIR / f"{name}.bin"
+    payload = np.ascontiguousarray(plane).tobytes()
+    path.write_bytes(payload)
+    return {
+        "file": f"deblur/{path.name}",
+        "width": int(plane.shape[1]),
+        "height": int(plane.shape[0]),
+        "bytes": len(payload),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
+def cross_check_deblur(nmanga: Nmanga) -> None:
+    """Refuse to write the cases when the port and nmanga disagree.
+
+    The colour path is the one nmanga exposes, and it shares its luma stage
+    with every other case, so agreeing on it is what keeps the expectations
+    attached to the reference rather than to this file.
+    """
+    rgb8 = deblur_rgb8()
+    alpha = np.full((DEBLUR_SIZE, DEBLUR_SIZE, 1), 255, dtype=np.uint8)
+    image = Image.fromarray(np.concatenate([rgb8, alpha], axis=-1), "RGBA")
+
+    for method in (0, 1):
+        params = deblur_parameters(method)
+        shared = {
+            "radius": params["radius"],
+            "strength": params["strength"],
+            "threshold": params["threshold"],
+            "overshoot": params["overshoot"],
+        }
+        if method == 0:
+            want = np.asarray(nmanga.deblur.deblur_deconv(image, iterations=params["iterations"], **shared))
+        else:
+            want = np.asarray(nmanga.deblur.deblur_edge_sharp(image, **shared))
+        got = np.concatenate([deblur_rgb_expect(rgb8, params), alpha], axis=-1)
+        if not np.array_equal(want, got):
+            differing = int((want != got).sum())
+            raise AssertionError(f"deblur method {method}: the port and nmanga differ on {differing} samples")
+
+
+def build_deblur_fixtures(nmanga: Nmanga) -> dict[str, Any]:
+    cross_check_deblur(nmanga)
+    DEBLUR_DIR.mkdir(parents=True, exist_ok=True)
+    cases: list[dict[str, Any]] = []
+
+    for case in deblur_case_list():
+        slug = case["name"].replace("/", "-")
+        planes = [write_deblur_plane(f"{slug}.in{index}", plane) for index, plane in enumerate(case["planes"])]
+        expect = [write_deblur_plane(f"{slug}.out{index}", plane) for index, plane in enumerate(case["expect"])]
+        cases.append({
+            "name": case["name"],
+            "vapour": case["vapour"],
+            "format": case["format"],
+            "sample": case["sample"],
+            "width": int(case["planes"][0].shape[1]),
+            "height": int(case["planes"][0].shape[0]),
+            "planes": planes,
+            "expect": expect,
+            "tolerance": DEBLUR_TOLERANCE[case["sample"]],
+            **case["params"],
+        })
+
+    return {"page": DEBLUR_SIZE, "cases": cases}
+
+# ---------------------------------------------------------------------------
 # Frame fixtures
 # ---------------------------------------------------------------------------
 
@@ -820,10 +1108,11 @@ def main() -> int:
     outputs["shades.json"] = build_shade_fixtures(nmanga)
     outputs["levels.json"] = build_level_fixtures(nmanga)
     outputs["posterize.json"] = build_posterize_fixtures(nmanga)
+    outputs["deblur.json"] = build_deblur_fixtures(nmanga)
 
     manifest = {
         "generator": "tools/golden.py",
-        "reference": "nao-manga-rls/nmanga/autolevel.py",
+        "reference": "nao-manga-rls/nmanga/autolevel.py and nmanga/deblur.py",
         "seed": SEED,
         "versions": {
             "python": sys.version.split()[0],
@@ -867,6 +1156,7 @@ def main() -> int:
     print(f"shade cases: {len(outputs['shades.json']['cases'])}")
     print(f"levels cases: {len(outputs['levels.json']['cases'])}")
     print(f"posterize cases: {len(outputs['posterize.json']['cases'])}")
+    print(f"deblur cases: {len(outputs['deblur.json']['cases'])}")
     print(f"frames: {len(outputs['frames.json']['frames'])}")
     return 0
 

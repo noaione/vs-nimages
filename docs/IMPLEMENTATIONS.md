@@ -14,7 +14,7 @@ Implement the image-analysis and pixel-processing operations currently found in
 [`nmanga/autolevel.py`](../nmanga/autolevel.py) as one native VapourSynth plugin
 named `vapoursynth-nimages`, described as "A collection of analyzer and tooling
 to manipulate images". The plugin should expose independent filters for peak
-statistics, gray-shade analysis, levels, and posterization.
+statistics, gray-shade analysis, levels, posterization, and deblurring.
 
 This is feasible in either Rust or C++. Rust is the preferred implementation:
 the algorithms are small, frame-local, and do not require Python, Pillow,
@@ -296,6 +296,47 @@ Peak analysis and levels deliberately remain separate. Users should compose
 needed. This keeps analysis observable and reusable, avoids a second API for
 the same policy, and lets callers inspect or override the detected properties
 between the two filters.
+
+### 5.5 `Deblur`
+
+```python
+sharp = core.nimages.Deblur(clip, method=0)
+```
+
+`Deblur` accepts Gray, RGB, and YUV formats at any integer depth from 8 through
+16 bits, plus the 32 bit float formats of the same families. It sharpens luma
+only: Gray takes the delta on its single plane, YUV on its luma plane with
+chroma copied through, and RGB as one equal offset per pixel limited to the
+gamut the pixel has left, which keeps the channel differences instead of
+clipping each channel on its own.
+
+| argument | default | meaning |
+| --- | --- | --- |
+| `method` | `0` | `0` runs the Richardson-Lucy style deconvolution, `1` the edge-masked unsharp mask |
+| `radius` | `0.8` | Gaussian sigma of the assumed blur, in pixels, above `0` and at most `16` |
+| `strength` | `0.65` for `method=0`, `0.85` for `method=1` | how much of the candidate is blended back |
+| `iterations` | `6` | refinement passes, `0` through `64`, `method=0` only |
+| `threshold` | `2` | edge threshold in 8-bit levels, from `0` |
+| `overshoot` | `0` | extra excursion past the local 3x3 extremes, in 8-bit steps |
+| `debug` | `false` | log the resolved parameters and each frame's stage timings |
+
+The stages are the ones `nmanga/deblur.py` defines: an edge mask from the
+prefiltered gradient of the luma, a candidate from the deconvolution or the
+unsharp mask, a clamp against the 3x3 local extremes of that luma plus
+`overshoot`, and a blend through the mask. `threshold` and `overshoot` stay in
+8-bit units at every sample depth, and a float clip is read as the reference's
+`[0, 1]` range.
+
+The defaults follow the method in effect, and `method=1` has no refinement loop,
+so it ignores `iterations` entirely, including a value outside the range
+`method=0` accepts.
+
+The arithmetic is not the reference's: `scipy.ndimage.gaussian_filter(...,
+mode="reflect", truncate=4)` is replaced by a separable direct convolution in
+`f32` whose interior reads a bounds-free window. `tools/golden.py` cross-checks
+the port against `nmanga.deblur` and refuses to write the fixtures when they
+disagree, and `tests/fixtures/deblur.json` freezes the tolerance the port has
+to stay inside.
 
 ## 6. Input format policy
 

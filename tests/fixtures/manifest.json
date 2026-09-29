@@ -1,6 +1,6 @@
 {
   "generator": "tools/golden.py",
-  "reference": "nao-manga-rls/nmanga/autolevel.py",
+  "reference": "nao-manga-rls/nmanga/autolevel.py and nmanga/deblur.py",
   "seed": 20240607,
   "versions": {
     "python": "3.12.12",
@@ -9,6 +9,7 @@
     "pillow": "12.3.0"
   },
   "files": [
+    "deblur.json",
     "frames.json",
     "levels.json",
     "peaks.json",

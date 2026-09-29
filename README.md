@@ -18,6 +18,9 @@ a rust vapoursynth plugin that analyzes and manipulates images.
   16 bits, with per-sample float support for `GRAYS` and `RGBS`
 - posterization to any depth from 1 through the input sample depth, without
   dithering
+- edge-masked sharpening in one `Deblur` node, with a Richardson-Lucy style
+  deconvolution or an unsharp mask, on Gray, RGB and YUV integer and float
+  clips
 - automatic gamma derived from the detected black point
 
 ## requirements
@@ -27,7 +30,8 @@ a rust vapoursynth plugin that analyzes and manipulates images.
 - Rust 1.88 or newer when building from source
 - `PeakStats` and `PeakGrayShades` need a Gray integer clip from 8 to 16 bits;
   `Levels` and `Posterize` take Gray, RGB or YUV integer samples from 8 to 16
-  bits; `Levels` also accepts `GRAYS` and `RGBS`
+  bits; `Levels` also accepts `GRAYS` and `RGBS`; `Deblur` takes Gray, RGB and
+  YUV at any integer depth from 8 to 16 bits and their 32 bit float formats
 - a clip whose dimensions are not known until a frame is asked for, such as
   `imgseqs.Read(..., mismatch=True)` over pages of different sizes
 - normalize an image sequence as in [use](#use) below
@@ -256,6 +260,51 @@ frame, so a clip whose frames differ gets a level set each, which a page-per-fra
 caller wants and a moving clip would show as flicker.
 
 **note**: when `bits` equals the sample depth, the frame is returned unchanged.
+
+### `Deblur`
+
+sharpens the luma of every frame, with the edge mask, halo clamp and blend that
+`nmanga/deblur.py` uses:
+
+```python
+sharp = core.nimages.Deblur(clip, method=1)
+```
+
+`method=0` runs a Richardson-Lucy style deconvolution for `iterations` passes
+and `method=1` an unsharp mask against a gaussian reference. both build their
+candidate from the luma alone, clamp it to the 3x3 local extremes of that luma
+plus `overshoot`, and blend it back through a soft edge mask, so flat areas and
+fine texture come back untouched.
+
+| argument | default | meaning |
+| --- | --- | --- |
+| `method` | `0` | `0` deconvolves, `1` is the unsharp mask |
+| `radius` | `0.8` | gaussian sigma of the assumed blur, in pixels, above `0` and at most `16` |
+| `strength` | `0.65` for `0`, `0.85` for `1` | how much of the candidate is blended back |
+| `iterations` | `6` | refinement passes, `0` through `64`, `method=0` only |
+| `threshold` | `2` | edge threshold in 8-bit levels, from `0` |
+| `overshoot` | `0` | extra excursion allowed past the local extremes, in 8-bit steps |
+| `debug` | `false` | log the resolved parameters and each frame's stage timings |
+
+the defaults follow the method in effect, so `Deblur(clip, method=1)` is the
+unsharp mask at `0.85`, and an explicit `strength` overrides either default.
+`method=1` has no refinement loop, so it ignores `iterations` entirely,
+including a value outside the range the deconvolution accepts.
+
+only luma moves. on RGB the delta is added to the three planes as one equal
+offset per pixel, limited to the gamut the pixel has left, which keeps the
+channel differences instead of clipping each channel on its own. on YUV it is
+added to the luma plane with chroma carried through byte for byte, so a
+subsampled format never runs a kernel over its chroma. `threshold` and
+`overshoot` are 8-bit units whatever the sample depth, and a float clip is read
+as the reference's `[0, 1]` range.
+
+the arithmetic is not the reference's. the kernels are a separable direct
+convolution in `f32` whose interior reads a bounds-free window, which is several
+times faster than `scipy.ndimage.gaussian_filter` and agrees with it to a
+fraction of a code value. `tests/fixtures/deblur.json` carries the frozen
+tolerance, and `tools/golden.py` refuses to write the fixtures when the port and
+`nmanga.deblur` disagree.
 
 ### debug
 

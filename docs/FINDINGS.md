@@ -611,10 +611,18 @@ Both were wrong for how the filters are used. M3 widened the family surface to
 | `PeakGrayShades` | Gray integer 8–16 bit | plane 0 | yes |
 | `Levels` | Gray/RGB/YUV integer 8–16 bit; GrayS/RGBS | all | yes |
 | `Posterize` | Gray/RGB/YUV integer 8–16 bit | all | yes |
+| `Deblur` | Gray/RGB/YUV integer 8–16 bit and 32 bit float | luma, or all three on RGB | yes |
 
 Formats outside those rows are refused, with the message naming what was
 received. Float `Levels` takes `black` and `white` in 8-bit code values; peak
 properties, `peak_offset`, and `auto_gamma` remain integer-only.
+
+`Deblur` is the one filter that is not a per-sample map: it runs a gaussian
+kernel over the luma and writes the result back through the plane rules, so RGB
+takes one equal offset per pixel and YUV keeps its chroma byte for byte. Its port
+was checked against `nmanga.deblur` on a 64x64 page: a float64 reimplementation
+agrees with both entry points exactly, and the shipped f32 kernels are bit-exact
+at 8 bits and short by one 16-bit step on 10 of 4096 samples at 16 bits.
 
 A clip whose dimensions or format vary reports `Undefined` at the node, so the
 format is checked twice: once at creation when the node declares one, and again

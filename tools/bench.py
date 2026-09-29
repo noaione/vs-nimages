@@ -7,7 +7,8 @@ Two pipelines are timed on one image list:
                   which is what ``IMPLEMENTATIONS.md`` describes as the source of
                   the behaviour
 * ``vapoursynth`` - ``imgseqs.Read(..., mismatch=True)`` through
-                  ``resize.Bicubic``, ``PeakStats``, ``Levels`` and ``Posterize``
+                  ``resize.Bicubic``, ``PeakStats``, ``Levels``, ``Posterize``
+                  and ``Deblur``
 
 Both run in their own process so peak resident memory is comparable. The plugin
 side runs with a 512 MiB frame cache, which is what a caller would set for a
@@ -41,6 +42,30 @@ PEAK_PERCENTAGE = 0.25
 SHADE_THRESHOLD = 0.01
 POSTERIZE_BITS = 4
 
+
+# The deconvolution `Deblur` runs by default, so both pipelines sharpen the same
+# way.
+DEBLUR_METHOD = 0
+DEBLUR_RADIUS = 0.8
+DEBLUR_STRENGTH = 0.65
+DEBLUR_ITERATIONS = 6
+DEBLUR_THRESHOLD = 2.0
+DEBLUR_OVERSHOOT = 0.0
+
+#: The strength `method=1` defaults to, which is not the deconvolution's.
+DEBLUR_UNSHARP_STRENGTH = 0.85
+
+#: The deblur workflows, which `deblur_parameters` resolves.
+DEBLUR_WORKFLOWS = ("deblur", "deblur-unsharp")
+
+
+def deblur_parameters(workflow: str) -> tuple[int, float]:
+    """The method and the strength one deblur workflow runs."""
+    if workflow == "deblur-unsharp":
+        return 1, DEBLUR_UNSHARP_STRENGTH
+    return DEBLUR_METHOD, DEBLUR_STRENGTH
+
+
 IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp", ".avif", ".jxl", ".tif", ".tiff", ".bmp")
 
 # Frame cache the plugin side runs with, in MiB. The core default is far larger
@@ -52,7 +77,10 @@ DEFAULT_CACHE_MB = 512
 SUITES = {
     "levels": (REPO_ROOT / "sandbox" / "level-check", ("levels",)),
     "webp": (REPO_ROOT / "sandbox" / "level-webp-check", ("levels",)),
-    "posterize": (REPO_ROOT / "sandbox" / "posterize-check", ("shades", "posterize")),
+    "posterize": (
+        REPO_ROOT / "sandbox" / "posterize-check",
+        ("shades", "posterize", "deblur", "deblur-unsharp"),
+    ),
 }
 
 
@@ -213,6 +241,7 @@ def run_nmanga(images: list[Path], workflow: str, nmanga_path: Path, warmup: int
         gamma_correction,
         posterize_image_by_bits,
     )
+    from nmanga.deblur import deblur_deconv, deblur_edge_sharp
     from PIL import Image
 
     def process(path: Path) -> tuple[dict[str, float], int, int]:
@@ -259,6 +288,28 @@ def run_nmanga(images: list[Path], workflow: str, nmanga_path: Path, warmup: int
             posterized = posterize_image_by_bits(gray, POSTERIZE_BITS)
             stage["apply"] = time.perf_counter() - start
             posterized.close()
+        elif workflow in DEBLUR_WORKFLOWS:
+            method, strength = deblur_parameters(workflow)
+            start = time.perf_counter()
+            if method == 0:
+                sharpened = deblur_deconv(
+                    gray,
+                    radius=DEBLUR_RADIUS,
+                    strength=strength,
+                    iterations=DEBLUR_ITERATIONS,
+                    threshold=DEBLUR_THRESHOLD,
+                    overshoot=DEBLUR_OVERSHOOT,
+                )
+            else:
+                sharpened = deblur_edge_sharp(
+                    gray,
+                    radius=DEBLUR_RADIUS,
+                    strength=strength,
+                    threshold=DEBLUR_THRESHOLD,
+                    overshoot=DEBLUR_OVERSHOOT,
+                )
+            stage["apply"] = time.perf_counter() - start
+            sharpened.close()
         else:
             raise SystemExit(f"unknown workflow {workflow}")
 
@@ -276,7 +327,8 @@ def run_nmanga(images: list[Path], workflow: str, nmanga_path: Path, warmup: int
         stage, black, white = process(path)
         for name, elapsed in stage.items():
             stages.add(name, elapsed)
-        stages.levels.append((path.name, black, white))
+        if workflow not in DEBLUR_WORKFLOWS:
+            stages.levels.append((path.name, black, white))
 
     return stages.as_json(len(images), {"pipeline": "nmanga", "workflow": workflow})
 
@@ -383,6 +435,18 @@ def run_vapoursynth(images: list[Path], workflow: str, cache_mb: int, warmup: in
         final = core.nimages.PeakGrayShades(gray, threshold=SHADE_THRESHOLD, debug=1)
     elif workflow == "posterize":
         final = core.nimages.Posterize(gray, bits=POSTERIZE_BITS, debug=1)
+    elif workflow in DEBLUR_WORKFLOWS:
+        method, strength = deblur_parameters(workflow)
+        final = core.nimages.Deblur(
+            gray,
+            method=method,
+            radius=DEBLUR_RADIUS,
+            strength=strength,
+            iterations=DEBLUR_ITERATIONS,
+            threshold=DEBLUR_THRESHOLD,
+            overshoot=DEBLUR_OVERSHOOT,
+            debug=1,
+        )
     else:
         raise SystemExit(f"unknown workflow {workflow}")
 
@@ -411,7 +475,8 @@ def run_vapoursynth(images: list[Path], workflow: str, cache_mb: int, warmup: in
             white = int(frame.props["NImagesWhiteLevel"])  # pyright: ignore[reportArgumentType]
         elif workflow == "shades":
             black = len(frame.props["NImagesGrayShades"])  # pyright: ignore[reportArgumentType]
-        stages.levels.append((images[index].name, black, white))
+        if workflow not in DEBLUR_WORKFLOWS:
+            stages.levels.append((images[index].name, black, white))
 
     return stages.as_json(
         len(images),

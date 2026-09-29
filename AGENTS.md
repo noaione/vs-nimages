@@ -8,7 +8,7 @@ shipped as `vapoursynth-nimages`. keep the public identity unchanged:
 - project name: `vapoursynth-nimages`
 - plugin identifier: `xyz.n4o.nimages`
 - callable namespace: `nimages`
-- filters: `PeakStats`, `PeakGrayShades`, `Levels`, `Posterize`
+- filters: `PeakStats`, `PeakGrayShades`, `Levels`, `Posterize`, `Deblur`
 - crate: `vs-nimages`
 - native artifact: `vs_nimages.dll`, `libvs_nimages.so`, `libvs_nimages.dylib`
 - python distribution: `vapoursynth-nimages`
@@ -17,8 +17,9 @@ the first release is 8 bit integer only. `PeakStats` and `PeakGrayShades` take a
 Gray clip and leave pixels alone, attaching their results as frame properties, so
 a caller composes `PeakStats` -> `Levels(use_props=True)` instead of asking for
 automatic levels in one call. `Levels` and `Posterize` take any 8 bit integer
-family and rewrite every plane. Every filter handles a clip whose dimensions are
-not known until a frame is asked for.
+family and rewrite every plane. `Deblur` takes Gray, RGB and YUV formats, at
+any integer depth from 8 to 16 bits and the 32 bit float ones. Every filter
+handles a clip whose dimensions are not known until a frame is asked for.
 
 `docs/IMPLEMENTATIONS.md` is the plan of record for the filter surface, the
 argument names and the property names. read it before changing anything public.
@@ -27,7 +28,7 @@ crate gets wrong, and which decisions are already locked.
 
 ## status
 
-the four filters are implemented and covered by `tests/check-nimages.py`.
+the five filters are implemented and covered by `tests/check-nimages.py`.
 `docs/FINDINGS.md` §8 tracks the milestones: M1, M2 and M3 are done, M4 is
 deferred because it touches the sibling checkout, and M5 is distribution work.
 
@@ -60,14 +61,15 @@ carries a `parity` of `nmanga`, `diverges` or `reference-only` plus the
 
 ## source layout
 
-- `src/lib.rs`: plugin declaration through `declare_plugin!`, and the four filter
+- `src/lib.rs`: plugin declaration through `declare_plugin!`, and the five filter
   registrations.
 - `src/error.rs`: `NImagesError`, the type that crosses the boundary.
 - `src/filters/mod.rs`: the shared filter layer. reading a clip, the `Accept`
   rules for what each filter takes, reading optional arguments, registering the
   node, building a frame's histogram, and rewriting a plane through a table.
-- `src/filters/{peak_stats,peak_gray_shades,levels,posterize}.rs`: the four
-  filters. all `Parallel`, all with a strict spatial dependency on their input.
+- `src/filters/{peak_stats,peak_gray_shades,levels,posterize,deblur}.rs`: the
+  five filters. all `Parallel`, all with a strict spatial dependency on their
+  input.
 - `src/histogram.rs`: the stride-aware `[u64; 256]` histogram every analyzer
   shares. `from_plane` refuses rows that do not fit instead of reading past them.
 - `src/peaks.rs`: `find_local_peak`, a dependency-free replacement for
@@ -78,6 +80,8 @@ carries a `parity` of `nmanga`, `diverges` or `reference-only` plus the
 - `src/posterize.rs`: the posterization lookup table and the Lloyd-Max level
   solver.
 - `src/round.rs`: the ties-to-even helper `levels` and `posterize` share.
+- `src/deblur.rs`: the reflected gaussian blur, the edge mask, the two
+  sharpening candidates and the masked blend, over caller-owned scratch space.
 - `tests/test_golden.rs`: replays every fixture through the algorithms. frame
   fixtures are rebuilt into a stride-padded buffer whose padding byte is not a
   shade value, so a histogram that over-reads a row cannot pass.
@@ -174,7 +178,9 @@ argument and property tables.
   frame can answer for it.
 - `PeakStats` and `PeakGrayShades` take a Gray clip, because a histogram of one
   plane only means something for one. `Levels` and `Posterize` take any 8 bit
-  integer family and rewrite every plane.
+  integer family and rewrite every plane. `Deblur` takes Gray, RGB and YUV
+  integer and float formats and moves luma alone, with chroma carried through
+  and an RGB delta limited to the gamut each pixel has left.
 - every plane walk uses the frame's own `frame_width`, `frame_height` and
   `stride`, so variable dimensions and subsampled chroma both work. samples are
   one byte apart: VapourSynth hands an RGB24 frame out as three separate plane
@@ -183,6 +189,10 @@ argument and property tables.
   both survive, and then attach their own properties.
 - `Levels` and `Posterize` allocate from the input frame's format and pass the
   input as `prop_src`, which is what carries the properties onto the output.
+- `Deblur` copies the input frame before it writes, so the planes it does not
+  touch and the input's properties both survive byte for byte. its kernels take
+  their scratch space from a pool, one workspace per concurrently evaluated
+  frame.
 - `NImagesGrayShades` and `NImagesGrayShadePercentages` are always both present
   and always the same length. a zero-length array is a valid property, so the
   empty case writes both rather than omitting them.
