@@ -295,7 +295,7 @@ mod tests {
             levels_lut_u16(0, 100, f64::NAN, u16::MAX),
             Err(LevelError::NotFinite)
         );
-        assert_eq!(levels_lut_u16(0, 40, 1.0, 50), Err(LevelError::OutOfRange));
+        assert_eq!(levels_lut_u16(0, 51, 1.0, 50), Err(LevelError::OutOfRange));
     }
 
     #[test]

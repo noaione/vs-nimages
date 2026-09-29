@@ -697,6 +697,12 @@ validation is pending for this increment.
 
 #### M6 decisions
 
+the current M6 interface retains separate float endpoint names and normalized
+float units. a proposed consolidation is tracked in
+[02-unified-level-endpoints.md](improvements/02-unified-level-endpoints.md);
+the current argument names and units remain in effect until that proposal is
+accepted.
+
 - Keep `upper_limit` in its current 8-bit-equivalent units and scale it to the
   native integer range as `round_ties_even(upper_limit * max_sample / 255)`.
   This preserves the existing default's relative search range and leaves the
