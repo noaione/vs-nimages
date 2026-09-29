@@ -4,6 +4,106 @@ the current implementation prioritizes reference parity, bounded frame-local
 work, and safe stride handling. do not optimize by changing histogram binning,
 rounding, endpoint behavior, properties, or per-frame independence.
 
+## candidate status
+
+checked against the code as it stands:
+
+| # | candidate | state |
+| ---: | --- | --- |
+| 1 | cache repeated `Levels(use_props=True)` tables | **rejected.** `curve` is 0.14 ms per 16 bit frame and 0.00 at 8 bit, so a total hit rate saves under 6% of the frame, and a volume repeats no tuple |
+| 2 | typed `u16` plane walk | **rejected, measured below.** the unreachable error path was the only difference, and removing it is -4% |
+| 3 | integer-count shade ordering | **done.** `analyze_gray_shades` sorts by `Reverse(count)` with a stable sort, so ties keep ascending shade order and no percentage is compared |
+| 4 | Gray16 histogram accumulation | **rejected, measured below.** half-width counters change nothing, so the scatter's latency is the cost rather than the table size |
+| 5 | float `pow` cost | **done** for the per-sample curve, measured below |
+| 6 | SIMD for the 8-bit LUT | **rejected.** the 8 bit `map` is 0.34 ns per sample, about one cycle, so it already sits at the load and store issue limit |
+| 7 | `Posterize(method=1)` refinement passes | **done.** a bucket is one range of code values, so prefix sums make a pass cost `colors` steps instead of one per code value |
+
+every candidate now has an outcome: done, or measured and rejected. `docs/BENCH.md`
+still measures `GRAY8` only, and its reference side is 8-bit Pillow, so the
+high-depth and float formats this document asks for cannot be measured by
+`tools/bench.py` at all. the numbers below come from a stage harness under
+`.tmpbuild/` that drives one filter directly and reads its own `debug=1` stage
+timings.
+
+### rejected candidates, measured
+
+both rejections come from the same harness on a 2048x2048 clip, 9 frames and four
+repeats, against the 15% bar in the adoption criteria:
+
+| candidate | case | stage | before | after | change |
+| --- | --- | --- | ---: | ---: | ---: |
+| 2 | `levels8` | `map` | 1.42 ms | 1.36 ms | -4% |
+| 2 | `levels16` | `map` | 2.41 ms | 2.31 ms | -4% |
+| 2 | `levels48` | `map` | 8.52 ms | 8.29 ms | -3% |
+| 4 | `peakstats16` | `histogram` | 3.63 ms | 3.65 ms | 0% |
+| 4 | `shades16` | `histogram` | 3.70 ms | 3.70 ms | 0% |
+
+the only difference a typed walk can make on this path is dropping the
+unreachable error path, and the branch predictor had already removed it. the
+half-width counters cost nothing because the histogram is scatter bound: the bin
+table is a chain of dependent loads, so halving its width halves traffic that was
+never the limit. `GRAY8` already runs that pass at 0.34 ns per sample, which is
+about one cycle, so nothing there is left either.
+
+### candidate 5, measured
+
+`apply_float_level` evaluated `powf(1.0 / gamma)` for every sample, and `gamma`
+defaults to `1.0`, so the default float `Levels` spent a libm call per sample on
+the identity. `x ** 1.0` is `x`, so the curve skips the call when `gamma == 1.0`.
+
+the `map` stage from `debug=1`, one 2048x2048 clip per format of 15 identical
+frames, no `gamma` argument. five `GRAYS` runs and four `RGBS` runs before the
+change, three of each after, and the table holds the median of the per-run
+medians:
+
+| format | samples per frame | before | after | change |
+| --- | ---: | ---: | ---: | ---: |
+| `GRAYS` | 4.19 M | 10.94 ms | 5.84 ms | -47% |
+| `RGBS` | 12.58 M | 33.01 ms | 20.39 ms | -38% |
+
+the median is the stable statistic here, because one run in the set moved by
+30%. the fastest run moves the same way: 9.51 ms to 5.19 ms for `GRAYS` and
+28.58 ms to 15.80 ms for `RGBS`.
+
+output is bit-identical rather than merely close. the guard's unit test passes
+against the `powf` form as well, which is the direct evidence that `powf(x, 1.0)`
+returns `x` for every finite `x`, and `tests/check-nimages.py` passes unchanged
+at 1950 checks.
+
+the same shortcut applies to `levels_lut_u16`, which rebuilt up to 65,536 entries
+per frame under `use_props=True`. the `curve` stage from `debug=1` on
+`levels16-props`, 9 frames and five repeats:
+
+| stage | before | after | change |
+| --- | ---: | ---: | ---: |
+| `curve` | 0.30 ms | 0.14 ms | -53% |
+
+`levels16-props-gamma` is the control and stays at 1.11 ms in both, because the
+branch only fires for the identity.
+
+the harness is a throwaway script under `.tmpbuild/`, which is not committed, so
+these numbers are not reproducible from the tree yet. promoting it to `tools/`
+is the way to make them so.
+
+### the Lloyd solver, measured
+
+`lloyd_max_levels` walked every code value on each of its 40 passes, which is
+2.6 M steps per frame at 16 bit. a bucket is one range of code values, so the
+weight and total of every bucket now come from two prefix sums and a pass costs
+`colors` steps. the table builders use the same ranges instead of a binary search
+per code value.
+
+the frame total from `debug=1`, 2048x2048, 7 frames and three repeats:
+
+| case | before | after | change |
+| --- | ---: | ---: | ---: |
+| `posterize-lloyd16` | 12.77 ms | 6.72 ms | -47% |
+| `posterize-lloyd8` | 3.09 ms | 3.19 ms | unchanged |
+
+the 8 bit path is unchanged because its solver was already 40 steps over 256 code
+values. the output is identical: the pinned vectors in the unit tests and the
+1950 checks in `tests/check-nimages.py` pass against the reference unchanged.
+
 ## establish a baseline
 
 measure the current release build before changing hot loops. record compiler

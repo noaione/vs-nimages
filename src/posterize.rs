@@ -127,57 +127,54 @@ pub fn lloyd_max_levels(counts: &[u64], colors: usize) -> Result<Vec<f64>, Poste
 
     let last = colors - 1;
     let mut levels: Vec<f64> = Vec::new();
-    let mut sums: Vec<u64> = Vec::new();
-    let mut weights: Vec<u64> = Vec::new();
+    let mut counts_before: Vec<u64> = Vec::new();
+    let mut totals_before: Vec<u64> = Vec::new();
+    let mut starts: Vec<usize> = Vec::new();
     levels
         .try_reserve_exact(colors)
         .map_err(|_| PosterizeError::Allocation)?;
-    sums.try_reserve_exact(colors)
+    counts_before
+        .try_reserve_exact(code_values + 1)
         .map_err(|_| PosterizeError::Allocation)?;
-    weights
-        .try_reserve_exact(colors)
+    totals_before
+        .try_reserve_exact(code_values + 1)
+        .map_err(|_| PosterizeError::Allocation)?;
+    starts
+        .try_reserve_exact(colors + 1)
         .map_err(|_| PosterizeError::Allocation)?;
 
     for index in 0..colors {
         levels.push(max_value as f64 * index as f64 / last as f64);
     }
-    sums.resize(colors, 0);
-    weights.resize(colors, 0);
+
+    // A bucket is one range of code values, so its weight and its total come out
+    // of two prefix sums instead of a walk over the histogram. One refinement
+    // pass then costs `colors` steps rather than one step per code value.
+    let mut running_counts = 0u64;
+    let mut running_totals = 0u64;
+    counts_before.push(0);
+    totals_before.push(0);
+    for (value, &weight) in counts.iter().enumerate() {
+        running_counts = running_counts.saturating_add(weight);
+        running_totals = running_totals.saturating_add(weight.saturating_mul(value as u64));
+        counts_before.push(running_counts);
+        totals_before.push(running_totals);
+    }
 
     for _ in 0..LLOYD_ITERATIONS {
-        sums.fill(0);
-        weights.fill(0);
-
-        // One pass collects every bucket. The edges ascend with the levels, so
-        // the bucket index only moves forward as the code value does. A value
-        // below its edge goes in the lower bucket, which is the half-open bin
-        // `numpy.digitize` produces from the reference's edge list.
-        let mut bucket = 0usize;
-        for (value, &weight) in counts.iter().enumerate() {
-            while bucket < last {
-                let edge = (levels[bucket] + levels[bucket + 1]) / 2.0;
-                if (value as f64) < edge {
-                    break;
-                }
-                bucket += 1;
-            }
-            if weight == 0 {
-                continue;
-            }
-            // A frame cannot make either accumulator overflow. The saturating
-            // forms keep the pass total whatever a histogram claims.
-            let total = weight.saturating_mul(value as u64);
-            sums[bucket] = sums[bucket].saturating_add(total);
-            weights[bucket] = weights[bucket].saturating_add(weight);
-        }
+        fill_bucket_starts(&levels, max_value, &mut starts);
 
         // Every interior level moves to the mean of its bucket. Both ends are
         // pinned, which is the reference's `range(1, colors - 1)`.
         for index in 1..last {
-            let weight = weights[index];
-            if weight > 0 {
-                levels[index] = sums[index] as f64 / weight as f64;
+            let low = starts[index];
+            let high = starts[index + 1];
+            let weight = counts_before[high].saturating_sub(counts_before[low]);
+            if weight == 0 {
+                continue;
             }
+            let total = totals_before[high].saturating_sub(totals_before[low]);
+            levels[index] = total as f64 / weight as f64;
         }
     }
 
@@ -196,10 +193,28 @@ pub fn posterize_lut_from_levels_u8(levels: &[f64]) -> Result<[u8; 256], Posteri
         return Err(PosterizeError::InvalidBits);
     }
 
+    let mut starts = Vec::new();
+    starts
+        .try_reserve_exact(levels.len() + 1)
+        .map_err(|_| PosterizeError::Allocation)?;
+    fill_bucket_starts(levels, 255, &mut starts);
+
     let mut table = [0u8; 256];
-    for (value, target) in table.iter_mut().enumerate() {
-        let level = nearest_level(levels, value as u16).ok_or(PosterizeError::InvalidBits)?;
-        *target = level.round_ties_even().clamp(0.0, 255.0) as u8;
+    let mut cursor = 0usize;
+    for (bucket, &level) in levels.iter().enumerate() {
+        let value = level.round_ties_even().clamp(0.0, 255.0) as u8;
+        let end = starts
+            .get(bucket + 1)
+            .copied()
+            .unwrap_or(256)
+            .min(256)
+            .max(cursor);
+        while cursor < end {
+            if let Some(slot) = table.get_mut(cursor) {
+                *slot = value;
+            }
+            cursor += 1;
+        }
     }
     Ok(table)
 }
@@ -218,37 +233,65 @@ pub fn posterize_lut_from_levels_u16(
     }
 
     let maximum = f64::from(max_value);
-    let length = usize::from(max_value) + 1;
+    let max = usize::from(max_value);
+    let length = max + 1;
+    let mut starts = Vec::new();
     let mut table = Vec::new();
+    starts
+        .try_reserve_exact(levels.len() + 1)
+        .map_err(|_| PosterizeError::Allocation)?;
     table
         .try_reserve_exact(length)
         .map_err(|_| PosterizeError::Allocation)?;
-    for value in 0..length {
-        let level = nearest_level(levels, value as u16).ok_or(PosterizeError::InvalidBits)?;
-        table.push(level.round_ties_even().clamp(0.0, maximum) as u16);
+    fill_bucket_starts(levels, max, &mut starts);
+
+    // Each bucket owns one range, so the table is written a run at a time. A
+    // bucket that owns no code value writes nothing.
+    let mut filled = 0usize;
+    for (bucket, &level) in levels.iter().enumerate() {
+        let start = starts.get(bucket + 1).copied().unwrap_or(length);
+        let end = start.min(length).max(filled);
+        if end > filled {
+            let value = level.round_ties_even().clamp(0.0, maximum) as u16;
+            table.resize(end, value);
+            filled = end;
+        }
+    }
+    if filled < length {
+        let value = levels.last().map_or(0u16, |level| {
+            level.round_ties_even().clamp(0.0, maximum) as u16
+        });
+        table.resize(length, value);
     }
     Ok(table)
 }
 
-/// The level nearest to `value`, with a midpoint going to the higher level.
+/// Fills `starts` with the first code value of every bucket, from `levels`.
 ///
-/// `levels` must be ascending, which makes the midpoints ascending, so the
-/// binary search below is the assignment performs with
-/// `numpy.digitize` over its list of midpoints.
-fn nearest_level(levels: &[f64], value: u16) -> Option<f64> {
-    let last = levels.len().checked_sub(1)?;
-    let x = f64::from(value);
-    let (mut low, mut high) = (0usize, last);
-    while low < high {
-        let middle = low + (high - low) / 2;
-        let edge = (levels[middle] + levels[middle + 1]) / 2.0;
-        if x < edge {
-            high = middle;
+/// A value belongs to the upper bucket when it is not below the midpoint between
+/// two levels, and for an integer value `x` the test `x >= edge` is the same as
+/// `x >= ceil(edge)`. Every bucket is therefore one range of code values.
+///
+/// The result holds `levels.len() + 1` starts, the last one `max_value + 1`. The
+/// starts never decrease: `levels` must be ascending, and a midpoint that a caller
+/// produces out of order is clamped into place.
+fn fill_bucket_starts(levels: &[f64], max_value: usize, starts: &mut Vec<usize>) {
+    starts.clear();
+    starts.push(0);
+
+    let ceiling = max_value as f64 + 1.0;
+    let mut previous = 0usize;
+    for index in 0..levels.len().saturating_sub(1) {
+        let edge = (levels[index] + levels[index + 1]) / 2.0;
+        let bound = if edge.is_finite() {
+            edge.ceil().clamp(0.0, ceiling) as usize
         } else {
-            low = middle + 1;
-        }
+            max_value + 1
+        };
+        previous = bound.max(previous);
+        starts.push(previous);
     }
-    levels.get(low).copied()
+    starts.push(max_value + 1);
 }
 
 /// Rounds a nonnegative rational number to its nearest integer, with ties to even.

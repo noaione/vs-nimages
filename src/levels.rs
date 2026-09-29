@@ -158,6 +158,10 @@ pub fn levels_lut_u16(
 
     let delta = f64::from(white - black);
     let inverse_gamma = 1.0 / gamma;
+    // `x ** 1.0` is `x`, and gamma defaults to 1.0, so the identity case skips a
+    // libm call per entry. A 16-bit table is rebuilt per frame under
+    // `use_props=True`, which is where that shows up.
+    let unity_gamma = gamma == 1.0;
     for (value, slot) in table.iter_mut().enumerate() {
         let value = value as u16;
         *slot = if value < black {
@@ -166,7 +170,12 @@ pub fn levels_lut_u16(
             max_value
         } else {
             let normalized = f64::from(value - black) / delta;
-            (normalized.powf(inverse_gamma) * f64::from(max_value))
+            let shaped = if unity_gamma {
+                normalized
+            } else {
+                normalized.powf(inverse_gamma)
+            };
+            (shaped * f64::from(max_value))
                 .round_ties_even()
                 .clamp(0.0, f64::from(max_value)) as u16
         };
@@ -192,7 +201,15 @@ pub fn apply_float_level(value: f32, black: f64, white: f64, gamma: f64) -> f32 
     } else if value > white {
         1.0
     } else {
-        (((value - black) / (white - black)).powf(1.0 / gamma)).clamp(0.0, 1.0) as f32
+        let normalized = (value - black) / (white - black);
+        // `x ** 1.0` is `x`, and gamma defaults to 1.0, so the identity case
+        // skips a libm call per sample.
+        let shaped = if gamma == 1.0 {
+            normalized
+        } else {
+            normalized.powf(1.0 / gamma)
+        };
+        shaped.clamp(0.0, 1.0) as f32
     }
 }
 
@@ -345,5 +362,21 @@ mod tests {
         assert_eq!(apply_float_level(f32::NEG_INFINITY, 0.25, 0.75, 1.0), 0.0);
         assert_eq!(apply_float_level(f32::INFINITY, 0.25, 0.75, 1.0), 1.0);
         assert!((apply_float_level(0.5, 0.25, 0.75, 2.0) - 0.5f32.sqrt()).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn the_unity_gamma_is_the_plain_rescale() {
+        // gamma 1.0 must not route through `powf`: the result is the rescale
+        // itself, clamped, for every sample inside and outside the endpoints.
+        let (black, white) = (0.25f64, 0.75f64);
+        for sample in [0.0f32, 0.1, 0.25, 0.4, 0.5, 0.6, 0.75, 0.9, 1.0, 2.0] {
+            let expected = (((f64::from(sample) - black) / (white - black)).clamp(0.0, 1.0)) as f32;
+            assert_eq!(
+                apply_float_level(sample, black, white, 1.0),
+                expected,
+                "sample {sample}"
+            );
+        }
+        assert!(apply_float_level(f32::NAN, black, white, 1.0).is_nan());
     }
 }
