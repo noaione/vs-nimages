@@ -8,12 +8,40 @@ pub const BINS: usize = 256;
 
 /// How many counter tables the 8-bit reader stripes across.
 ///
-/// Four tables are 8 KiB, which stays inside the first level cache. Two leave
-/// flat artwork at 1.5x and random noise at 0.75x of the direct reader's time;
-/// four reach 1.7x and 0.65x. The same striping on a 16-bit plane costs more
-/// than it saves, because four 512 KiB tables per 16-bit depth exceed the
-/// cache that made the 8-bit case win, so the wide reader stays direct.
+/// Four tables are 8 KiB, which stays inside the first level cache, and they
+/// break the one-counter chain that flat artwork walks. Random noise rarely
+/// repeats a shade, so the four tables and stripe selection cost more instead:
+/// four tables reach 1.7x on flat artwork and
+/// 0.65x on noise. [`striping_pays`] decides per plane from the plane's own
+/// samples, so noise keeps the direct reader.
+///
+/// The same striping on a 16-bit plane costs more than it saves, because four
+/// 512 KiB tables per 16-bit depth exceed the cache that made the 8-bit case
+/// win, so the wide reader is always direct.
 const U8_STRIPES: usize = 4;
+
+/// The share of sampled neighbour pairs that have to repeat a shade before
+/// striping pays.
+///
+/// Uniform noise repeats a shade about once in 256 neighbours. The recorded
+/// artwork workloads repeat at least 41% of them: 100% on a flat plane, 87% on
+/// a canvas of two shades, and 49% to 78% on real manga pages. The threshold
+/// separates those measurements; sampled rows need not represent the rest of
+/// a mixed-content plane.
+const STRIPE_MIN_REPEAT_PERCENT: u64 = 5;
+
+/// How many rows the probe compares, spread across the plane.
+const PROBE_ROWS: usize = 4;
+
+/// How many short windows the probe compares across each sampled row.
+const PROBE_WINDOWS: usize = 4;
+
+/// The maximum adjacent pairs compared in one window: 256 across the plane.
+const PROBE_PAIRS_PER_WINDOW: usize = 16;
+
+/// Small planes use the direct reader without paying for a probe or merge.
+/// At this size the probe compares at most one pair per 64 active samples.
+const STRIPE_MIN_PIXELS: u64 = 16_384;
 
 // Keep the 8-bit histogram inline to avoid a per-frame heap allocation.
 #[expect(
@@ -33,6 +61,100 @@ impl Counts {
             Self::Wide(counts) => counts,
         }
     }
+}
+
+/// Whether striping pays for this plane.
+///
+/// Repeated shades serialize the single counter. A plane of random noise
+/// repeats one about once in 256 neighbours and gains nothing, so this samples
+/// short windows across a few evenly spaced rows and counts matching pairs.
+///
+/// The sample is bounded by 256 pairs regardless of width or height. Small
+/// planes skip it entirely, avoiding a second full scan of short noise planes.
+///
+/// This is a cost heuristic: unsampled content can favor a different reader.
+/// Both readers produce the same counts.
+fn striping_pays(data: &[u8], stride: usize, width: usize, height: usize) -> bool {
+    if width < 2 || pixel_count(width, height) < STRIPE_MIN_PIXELS {
+        return false;
+    }
+
+    let rows = PROBE_ROWS.min(height);
+    let pairs = PROBE_PAIRS_PER_WINDOW.min(width - 1);
+    let windows = PROBE_WINDOWS.min((width - 1) / pairs);
+    let step = if windows > 1 {
+        (width - pairs - 1) / (windows - 1)
+    } else {
+        0
+    };
+    let mut equal = 0u64;
+    let mut total = 0u64;
+    for index in 0..rows {
+        let row = index * height / rows;
+        let start = row * stride;
+        let Some(line) = data.get(start..start + width) else {
+            return false;
+        };
+        for window in 0..windows {
+            let column = window * step;
+            let Some(samples) = line.get(column..column + pairs + 1) else {
+                return false;
+            };
+            for pair in samples.windows(2) {
+                if pair[0] == pair[1] {
+                    equal += 1;
+                }
+                total += 1;
+            }
+        }
+    }
+
+    total > 0 && equal * 100 >= total * STRIPE_MIN_REPEAT_PERCENT
+}
+
+/// Counts an 8-bit plane into [`U8_STRIPES`] tables and merges them.
+///
+/// Successive samples go into successive tables, which breaks the one-counter
+/// dependency chain flat artwork creates. The merge is exact: these are
+/// nonnegative counts, so a saturated partial total and a saturated merge of
+/// partial totals agree with the direct increment.
+fn striped_counts(data: &[u8], stride: usize, width: usize, height: usize) -> Option<[u64; BINS]> {
+    let mut stripes = [[0u64; BINS]; U8_STRIPES];
+    for row in 0..height {
+        let start = row * stride;
+        let line = data.get(start..start + width)?;
+        for (column, &value) in line.iter().enumerate() {
+            let striped = stripes.get_mut(column & (U8_STRIPES - 1))?;
+            if let Some(count) = striped.get_mut(usize::from(value)) {
+                *count = count.saturating_add(1);
+            }
+        }
+    }
+
+    let mut counts = [0u64; BINS];
+    for striped in &stripes {
+        for (bin, count) in striped.iter().enumerate() {
+            if let Some(total) = counts.get_mut(bin) {
+                *total = total.saturating_add(*count);
+            }
+        }
+    }
+    Some(counts)
+}
+
+/// Counts an 8-bit plane into one table.
+fn direct_counts(data: &[u8], stride: usize, width: usize, height: usize) -> Option<[u64; BINS]> {
+    let mut counts = [0u64; BINS];
+    for row in 0..height {
+        let start = row * stride;
+        let line = data.get(start..start + width)?;
+        for &value in line {
+            if let Some(count) = counts.get_mut(usize::from(value)) {
+                *count = count.saturating_add(1);
+            }
+        }
+    }
+    Some(counts)
 }
 
 /// Pixel counts for every shade from zero through `max_value`.
@@ -58,39 +180,19 @@ impl Histogram {
     ///
     /// Returns [`None`] when the described rows do not fit in `data`.
     ///
-    /// The samples go into [`U8_STRIPES`] independent tables in turn, which
-    /// breaks the one-counter dependency chain flat artwork creates, and the
-    /// tables are merged by saturating addition afterwards. The merge is
-    /// exact: these are nonnegative counts, so a saturated partial total and a
-    /// saturated merge of partial totals agree with the direct increment.
+    /// Two readers produce the same table and this picks between them from the
+    /// plane's own samples: see [`striping_pays`].
     #[must_use]
     pub fn from_plane(data: &[u8], stride: usize, width: usize, height: usize) -> Option<Self> {
         if width > stride {
             return None;
         }
         validate_plane_length(data.len(), stride, width, height)?;
-
-        let mut stripes = [[0u64; BINS]; U8_STRIPES];
-        for row in 0..height {
-            let start = row * stride;
-            let line = data.get(start..start + width)?;
-            for (column, &value) in line.iter().enumerate() {
-                let striped = stripes.get_mut(column & (U8_STRIPES - 1))?;
-                if let Some(count) = striped.get_mut(usize::from(value)) {
-                    *count = count.saturating_add(1);
-                }
-            }
-        }
-
-        let mut counts = [0u64; BINS];
-        for striped in &stripes {
-            for (bin, count) in striped.iter().enumerate() {
-                if let Some(total) = counts.get_mut(bin) {
-                    *total = total.saturating_add(*count);
-                }
-            }
-        }
-
+        let counts = if striping_pays(data, stride, width, height) {
+            striped_counts(data, stride, width, height)?
+        } else {
+            direct_counts(data, stride, width, height)?
+        };
         Some(Self {
             counts: Counts::U8(counts),
             total_pixels: pixel_count(width, height),
@@ -234,8 +336,8 @@ fn validate_plane_length(
 mod tests {
     use super::*;
 
-    /// The reader the striped one replaced, for differential checks.
-    fn direct_counts(data: &[u8], stride: usize, width: usize, height: usize) -> [u64; BINS] {
+    /// The plain reader written out again, for differential checks.
+    fn reference_counts(data: &[u8], stride: usize, width: usize, height: usize) -> [u64; BINS] {
         let mut counts = [0u64; BINS];
         for row in 0..height {
             let start = row * stride;
@@ -279,7 +381,7 @@ mod tests {
                     }
                 }
 
-                let want = direct_counts(&data, stride, width, height);
+                let want = reference_counts(&data, stride, width, height);
                 let got = Histogram::from_plane(&data, stride, width, height)
                     .expect("the padded rows fit");
                 assert_eq!(got.counts(), want, "{width}x{height} mode {mode}");
@@ -289,6 +391,119 @@ mod tests {
         }
     }
 
+    #[test]
+    fn striping_is_chosen_from_the_plane_itself() {
+        // The two readers agree on every plane, so the choice is only about
+        // cost: a plane whose neighbours repeat takes the striped reader, and
+        // one that never repeats a shade takes the direct reader.
+        let mut state = 0x2026_1003u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        let width = 256;
+        let height = 64;
+        let stride = width;
+
+        let flat = vec![128u8; stride * height];
+        assert!(
+            striping_pays(&flat, stride, width, height),
+            "a flat plane repeats"
+        );
+
+        let mut two_tone = vec![0u8; stride * height];
+        for (index, value) in two_tone.iter_mut().enumerate() {
+            *value = if (index / 8) % 2 == 0 { 0 } else { 255 };
+        }
+        assert!(
+            striping_pays(&two_tone, stride, width, height),
+            "two shades repeat"
+        );
+
+        let noise: Vec<u8> = (0..stride * height).map(|_| next() as u8).collect();
+        assert!(
+            !striping_pays(&noise, stride, width, height),
+            "uniform noise repeats a shade about once in 256 neighbours"
+        );
+
+        // A plane with no neighbour pair, and an empty one, both leave the
+        // direct reader in place.
+        assert!(!striping_pays(&flat, stride, 1, height));
+        assert!(!striping_pays(&[], stride, width, 0));
+    }
+
+    #[test]
+    fn small_planes_skip_the_probe_but_wide_flat_rows_keep_striping() {
+        // Even flat short planes avoid the probe and the four-table merge.
+        let small = vec![128u8; STRIPE_MIN_PIXELS as usize - 1];
+        assert!(!striping_pays(&small, small.len(), small.len(), 1));
+        assert!(!striping_pays(&small, 256, 256, 4));
+
+        // A wide row can amortize the bounded probe without extra rows.
+        let wide = vec![128u8; STRIPE_MIN_PIXELS as usize];
+        assert!(striping_pays(&wide, wide.len(), wide.len(), 1));
+    }
+
+    #[test]
+    fn the_probe_ignores_repeating_stride_padding() {
+        // Active samples never repeat; the flat padding cannot select stripes.
+        let (width, height, stride) = (17usize, 1024usize, 32usize);
+        let mut data = vec![255u8; stride * height];
+        for row in 0..height {
+            for column in 0..width {
+                data[row * stride + column] = column as u8;
+            }
+        }
+        assert!(!striping_pays(&data, stride, width, height));
+    }
+
+    #[test]
+    fn the_adaptive_reader_reports_the_same_counts_as_the_plain_one() {
+        // Every plane the choice can produce has to agree with the plain
+        // reader, whichever branch the probe picked.
+        let mut state = 0x5eed_2026u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        for (width, height) in [
+            (64usize, 32usize),
+            (257, 5),
+            (1, 8),
+            (256, 64),
+            (65_536, 1),
+            (4096, 4),
+            (17, 1024),
+        ] {
+            let stride = width + 5;
+            for run in [0u8, 3, 16] {
+                let mut data = vec![0u8; stride * height];
+                for row in 0..height {
+                    for column in 0..width {
+                        let value = match run {
+                            0 => 200,
+                            3 => (column % 3) as u8 * 100,
+                            _ => next() as u8,
+                        };
+                        data[row * stride + column] = value;
+                    }
+                }
+                let got = Histogram::from_plane(&data, stride, width, height)
+                    .expect("the padded rows fit");
+                assert_eq!(
+                    got.counts(),
+                    reference_counts(&data, stride, width, height),
+                    "{width}x{height} run {run}"
+                );
+            }
+        }
+    }
     #[test]
     fn striping_handles_a_row_shorter_than_the_stripe_count() {
         // Four stripes with a one- or two-sample row never reach the later
