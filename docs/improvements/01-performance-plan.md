@@ -1,5 +1,9 @@
 # performance plan
 
+the next code review and individually testable candidates are in
+[04-optimization-review.md](04-optimization-review.md). the measurements below
+are historical outcomes; they are not timings of those new candidates.
+
 the current implementation prioritizes reference parity, bounded frame-local
 work, and safe stride handling. do not optimize by changing histogram binning,
 rounding, endpoint behavior, properties, or per-frame independence.

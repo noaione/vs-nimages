@@ -98,27 +98,27 @@ decode instead. read the plugin's `decode + resize` against the reference's
 <!-- bench:start -->
 | pages | workflow | pipeline | decode | resize | analyze | apply | total | per page | peak rss |
 | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 129 | levels (levels) | nmanga | 1.90 s | 0.00 s | 4.11 s | 0.22 s | **6.23 s** | 48.3 ms | 119 MiB |
-| 129 | levels (levels) | vapoursynth | 1.92 s | 0.29 s | 0.49 s | 0.12 s | **2.81 s** | 21.8 ms | 128 MiB |
-| 49 | shades (posterize) | nmanga | 1.83 s | 0.00 s | 10.33 s | 0.00 s | **12.16 s** | 248.2 ms | 146 MiB |
-| 49 | shades (posterize) | vapoursynth | 2.06 s | 0.33 s | 0.86 s | 0.00 s | **3.25 s** | 66.3 ms | 489 MiB |
-| 49 | posterize (posterize) | nmanga | 1.90 s | 0.00 s | 0.00 s | 16.50 s | **18.39 s** | 375.4 ms | 274 MiB |
-| 49 | posterize (posterize) | vapoursynth | 2.37 s | 0.39 s | 0.00 s | 0.24 s | **3.00 s** | 61.2 ms | 511 MiB |
-| 49 | deblur (posterize) | nmanga | 1.86 s | 0.00 s | 0.00 s | 309.81 s | **311.67 s** | 6360.6 ms | 1569 MiB |
-| 49 | deblur (posterize) | vapoursynth | 2.01 s | 0.49 s | 0.00 s | 46.86 s | **49.36 s** | 1007.4 ms | 968 MiB |
-| 49 | deblur-unsharp (posterize) | nmanga | 1.85 s | 0.00 s | 0.00 s | 160.10 s | **161.95 s** | 3305.1 ms | 1569 MiB |
-| 49 | deblur-unsharp (posterize) | vapoursynth | 1.98 s | 0.48 s | 0.00 s | 10.97 s | **13.43 s** | 274.1 ms | 969 MiB |
-| 44 | levels (webp) | nmanga | 11.03 s | 0.00 s | 5.68 s | 0.30 s | **17.01 s** | 386.6 ms | 283 MiB |
-| 44 | levels (webp) | vapoursynth | 6.73 s | 1.21 s | 0.73 s | 0.17 s | **8.85 s** | 201.0 ms | 400 MiB |
+| 129 | levels (levels) | nmanga | 2.03 s | 0.00 s | 4.27 s | 0.23 s | **6.53 s** | 50.6 ms | 119 MiB |
+| 129 | levels (levels) | vapoursynth | 2.01 s | 0.30 s | 0.24 s | 0.12 s | **2.67 s** | 20.7 ms | 128 MiB |
+| 49 | shades (posterize) | nmanga | 1.92 s | 0.00 s | 12.21 s | 0.00 s | **14.14 s** | 288.5 ms | 146 MiB |
+| 49 | shades (posterize) | vapoursynth | 2.70 s | 0.47 s | 0.46 s | 0.00 s | **3.63 s** | 74.1 ms | 488 MiB |
+| 49 | posterize (posterize) | nmanga | 2.00 s | 0.00 s | 0.00 s | 16.98 s | **18.98 s** | 387.3 ms | 274 MiB |
+| 49 | posterize (posterize) | vapoursynth | 2.22 s | 0.34 s | 0.00 s | 0.22 s | **2.78 s** | 56.8 ms | 511 MiB |
+| 49 | deblur (posterize) | nmanga | 2.03 s | 0.00 s | 0.00 s | 326.95 s | **328.97 s** | 6713.8 ms | 1569 MiB |
+| 49 | deblur (posterize) | vapoursynth | 1.96 s | 0.46 s | 0.00 s | 22.65 s | **25.06 s** | 511.5 ms | 969 MiB |
+| 49 | deblur-unsharp (posterize) | nmanga | 1.96 s | 0.00 s | 0.00 s | 175.12 s | **177.07 s** | 3613.8 ms | 1569 MiB |
+| 49 | deblur-unsharp (posterize) | vapoursynth | 2.17 s | 0.54 s | 0.00 s | 7.46 s | **10.17 s** | 207.5 ms | 969 MiB |
+| 44 | levels (webp) | nmanga | 11.44 s | 0.00 s | 6.17 s | 0.33 s | **17.94 s** | 407.7 ms | 283 MiB |
+| 44 | levels (webp) | vapoursynth | 7.26 s | 1.36 s | 0.35 s | 0.18 s | **9.15 s** | 207.9 ms | 400 MiB |
 
 | pages | workflow | pipeline | speedup | memory ratio | levels agreed |
 | ---: | --- | --- | ---: | ---: | --- |
-| 129 | levels (levels) | vapoursynth vs nmanga | 2.21x | 1.08x | 129/129 |
-| 49 | shades (posterize) | vapoursynth vs nmanga | 3.74x | 3.35x | 49/49 |
-| 49 | posterize (posterize) | vapoursynth vs nmanga | 6.14x | 1.87x | 49/49 |
-| 49 | deblur (posterize) | vapoursynth vs nmanga | 6.31x | 0.62x | 0/0 |
-| 49 | deblur-unsharp (posterize) | vapoursynth vs nmanga | 12.06x | 0.62x | 0/0 |
-| 44 | levels (webp) | vapoursynth vs nmanga | 1.92x | 1.41x | 44/44 |
+| 129 | levels (levels) | vapoursynth vs nmanga | 2.44x | 1.07x | 129/129 |
+| 49 | shades (posterize) | vapoursynth vs nmanga | 3.89x | 3.35x | 49/49 |
+| 49 | posterize (posterize) | vapoursynth vs nmanga | 6.82x | 1.87x | 49/49 |
+| 49 | deblur (posterize) | vapoursynth vs nmanga | 13.13x | 0.62x | 0/0 |
+| 49 | deblur-unsharp (posterize) | vapoursynth vs nmanga | 17.42x | 0.62x | 0/0 |
+| 44 | levels (webp) | vapoursynth vs nmanga | 1.96x | 1.41x | 44/44 |
 <!-- bench:end -->
 
 ## what a webp actually hands out
@@ -176,15 +176,17 @@ which `tests/check-nimages.py` checks on every run.
 
 ### analysis
 
-this is where most of the win is. `find_local_peak` costs about 49 ms per page
-against 3.9 ms for `PeakStats`, and `analyze_gray_shades` costs about 249 ms
-against 18 ms for `PeakGrayShades`. an order of magnitude either way.
+this is where most of the win is. `find_local_peak` costs about 50 ms per page
+against 1.9 ms for `PeakStats`, and `analyze_gray_shades` costs about 288 ms
+against 9.4 ms for `PeakGrayShades`. more than an order of magnitude either way.
 
 the reference materialises a full `ndarray` of the page and converts it to
 grayscale again inside the call, so the page is copied before the histogram
-starts, and then `np.histogram` does generic binning over a `range` rather than a
-256 bin count over `uint8`. the plugin walks the plane once into a `[u64; 256]`
-array and never builds a second copy.
+starts, and then `np.histogram` does generic binning over a `range` rather than
+a 256 bin count over `uint8`. the plugin walks the plane once into four
+striped `[u64; 256]` tables and never builds a second copy, which is what took
+`PeakGrayShades` from 0.86 s to 0.46 s over the 49 pages when the 8-bit reader
+was striped.
 
 the peak search is not the difference. it runs over at most 61 bins either way,
 and `scipy.signal.find_peaks` and `src/peaks.rs` both finish in microseconds.
@@ -202,35 +204,31 @@ cache. at 2.8 megapixels a page that per-frame overhead is a visible share.
 
 ### posterize
 
-the biggest gap, 6.30x, and almost all of it is the apply stage: 0.26 s against
-17.50 s over 49 pages, about 5 ms against 357 ms a page.
-
-`posterize_image_by_bits` builds its table by calling a python lambda 256 times,
-maps the page, then runs `quantize(colors, dither=NONE)` and `convert("L")`, which
-is two more passes over a 12 megapixel page plus a palette conversion.
-`docs/FINDINGS.md` §6.1 shows the quantization is a no-op, so the plugin omits it
-and writes straight into the output frame.
+the biggest gap, 6.82x, and almost all of it is the apply stage: 0.22 s against
+16.98 s over 49 pages, about 4.5 ms against 347 ms a page.
 
 ### deblur
 
 this is the one workflow where the plugin's own work still dominates the wall
-time, because the reference spends seconds per page here: 49.36 s against
-311.67 s over 49 pages, **6.31x** for the deconvolution and **12.06x** for the
-unsharp mask (13.43 s against 161.95 s). every other row is won by the analysis
+time, because the reference spends seconds per page here: 25.06 s against
+328.97 s over 49 pages, **13.13x** for the deconvolution and **17.42x** for the
+unsharp mask (10.17 s against 177.07 s). every other row is won by the analysis
 being an order of magnitude faster.
 
-the plugin side of those two rows started this work at 77.76 s and 36.04 s, so the
-kernels are 36% and 63% faster while the reference stayed inside its own run to run
-spread. six passes did it, all recorded in
-[03-deblur-filter.md](improvements/03-deblur-filter.md): reading each window from
-row slices instead of a per-tap helper, `sqrt` instead of the `f32::hypot` libcall,
-a ties-to-even round that does not need `roundsd`, and an AVX2 path for the blend
-stencil that is entered only when `is_x86_feature_detected!` says the feature is
-there, with the scalar loop kept for everything else and the output byte-identical
-either way.
+the plugin side of those two rows started this work at 77.76 s and 36.04 s. the
+kernels are 68% and 72% faster across the passes recorded in
+[03-deblur-filter.md](improvements/03-deblur-filter.md) and
+[04-optimization-review.md](improvements/04-optimization-review.md): reading each
+window from row slices instead of a per-tap helper, `sqrt` instead of the
+`f32::hypot` libcall, a ties-to-even round that does not need `roundsd`, an AVX2
+path for the blend stencil, then the horizontal pass vectorized eight columns at a
+time with its feature check hoisted out of the row loop and the vertical sum kept
+in a register across every tap of a column block. the last two are bit-identical to
+the scalar code.
 
-the unsharp mask is the cheaper operation by a wide margin, 274 ms a page against
-1007 ms, which is what twelve gaussian blurs per page cost against one. it is
+
+the unsharp mask is the cheaper operation by a wide margin, 207 ms a page against
+511 ms, which is what twelve gaussian blurs per page cost against one. it is
 also the better relative win, so `method=1` is what a caller who just wants a
 page sharpened should reach for.
 
