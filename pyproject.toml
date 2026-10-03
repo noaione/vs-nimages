@@ -78,4 +78,7 @@ include = [
     "pyproject.toml",
     "README.md",
     "LICENSE",
+    # The release job checks the wheel it rebuilds from this sdist with the
+    # same script the wheel jobs run.
+    "tools/verify-wheel.py",
 ]

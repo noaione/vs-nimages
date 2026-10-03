@@ -48,6 +48,8 @@ jobs:
           auditwheel show dist/*.whl
           auditwheel repair --plat manylinux_2_28_x86_64 --wheel-dir repaired dist/*.whl
 
+      - name: verify the wheel carries the plugin tree
+        run: python tools/verify-wheel.py repaired/*.whl
       - name: install repaired wheel and run integration checks
         run: |
           set -euo pipefail
@@ -100,6 +102,9 @@ jobs:
       - name: build wheel
         run: python -m build --wheel --outdir dist
 
+      - name: verify the wheel carries the plugin tree
+        run: python tools/verify-wheel.py dist/*.whl
+
       - name: install wheel and run integration checks
         run: |
           python -c "import pathlib, subprocess, sys; wheel, = pathlib.Path('dist').glob('*.whl'); subprocess.run([sys.executable, '-m', 'pip', 'install', '--no-deps', str(wheel)], check=True)"
@@ -137,6 +142,8 @@ jobs:
           python -m build --sdist --outdir dist
           python -m build --wheel --outdir rebuilt-wheel dist/*.tar.gz
 
+      - name: verify the rebuilt wheel carries the plugin tree
+        run: python tools/verify-wheel.py rebuilt-wheel/*.whl
       - name: upload source distribution
         uses: actions/upload-artifact@v7
         with:

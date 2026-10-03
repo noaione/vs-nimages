@@ -11,6 +11,9 @@ shipped as `vapoursynth-nimages`. keep the public identity unchanged:
 - filters: `PeakStats`, `PeakGrayShades`, `Levels`, `Posterize`, `Deblur`
 - crate: `vs-nimages`
 - native artifact: `vs_nimages.dll`, `libvs_nimages.so`, `libvs_nimages.dylib`
+- cpu variants: a baseline build at `-C target-cpu=x86-64-v2` and an
+  `-C target-cpu=x86-64-v3` build suffixed `.avx2` before the extension. the
+  wheel stages both, plus a `manifest.vs`, under `vapoursynth/plugins/nimages/`
 - python distribution: `vapoursynth-nimages`
 
 the first release is 8 bit integer only. `PeakStats` and `PeakGrayShades` take a
@@ -48,8 +51,8 @@ carries a `parity` of `nmanga`, `diverges` or `reference-only` plus the
 ## repository rules
 
 - use `pyproject.toml` and hatchling. do not add `setup.py`.
-- keep the wheel plugin-only. it installs the native library as
-  `vapoursynth/plugins/vs_nimages.dll`, `.so` or `.dylib` and adds no python
+- keep the wheel plugin-only. it installs a `vapoursynth/plugins/nimages/`
+  directory holding `manifest.vs` and the CPU variants and adds no python
   module.
 - never commit anything yourself. ask the maintainer first.
 - there is no `CHANGELOG.md` yet, although `pyproject.toml` already points at
@@ -161,11 +164,15 @@ run the validator after any change to `src/filters/`, `src/lib.rs` or a fixture.
 `uv sync` builds the wheel, which runs cargo and installs the plugin into the
 venv, so the validator always sees the current source.
 
-to install a hand-built plugin instead:
+to install a hand-built plugin instead, in the directory layout vapoursynth
+reads, with `manifest.vs` holding the header and `vs_nimages`:
 
 ```powershell
 cargo build --release
-copy target\release\vs_nimages.dll .venv\Lib\site-packages\vapoursynth\plugins\
+$plugin = ".venv\Lib\site-packages\vapoursynth\plugins\nimages"
+New-Item -ItemType Directory -Force -Path $plugin | Out-Null
+copy target\release\vs_nimages.dll $plugin
+Set-Content -Path "$plugin\manifest.vs" -Value "[VapourSynth Manifest V1]`nvs_nimages"
 .venv\Scripts\python.exe -c "import vapoursynth as vs; print([p.identifier for p in vs.core.plugins()])"
 ```
 

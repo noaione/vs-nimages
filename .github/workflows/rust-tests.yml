@@ -61,3 +61,8 @@ jobs:
 
       - name: run VapourSynth integration checks
         run: .venv/bin/python tests/check-nimages.py
+
+      - name: build every CPU optimization level
+        run: |
+          RUSTFLAGS="-C target-cpu=x86-64-v2" cargo build --release --locked
+          RUSTFLAGS="-C target-cpu=x86-64-v3" cargo build --release --locked

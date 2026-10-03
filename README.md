@@ -38,23 +38,26 @@ a rust vapoursynth plugin that analyzes and manipulates images.
 
 ## install
 
-the python wheel is plugin-only. it installs the native library as
-`vapoursynth/plugins/vs_nimages.dll`, `.so` or `.dylib` and adds no python
+the python wheel is plugin-only. it installs a `vapoursynth/plugins/nimages/`
+directory holding a `manifest.vs` and the native library, and adds no python
 module.
 
 ```console
 python -m pip install vapoursynth-nimages
 ```
 
+the x86-64 wheels carry two builds of the same plugin. `manifest.vs` names
+`vs_nimages`, and vapoursynth picks the `.<variant>` file that matches the host
+CPU, falling back to the plain one:
+
+| variant | windows | linux | needs |
+| --- | --- | --- | --- |
+| baseline | `vs_nimages.dll` | `libvs_nimages.so` | SSE4.2 (Nehalem, 2008) |
+| avx2 | `vs_nimages.avx2.dll` | `libvs_nimages.avx2.so` | AVX2 (Haswell, 2013) |
+a macOS wheel is arm64 only, so it ships one file, `libvs_nimages.dylib`.
+
 you can also take the matching file from a release and copy it into your
 vapoursynth plugin directory:
-
-| platform | file |
-| --- | --- |
-| windows | `vs_nimages.dll` |
-| linux | `libvs_nimages.so` |
-| macos | `libvs_nimages.dylib` |
-
 if vapoursynth does not find it, load it explicitly:
 
 ```python
@@ -354,8 +357,13 @@ recorded in `docs/FINDINGS.md` with fixtures that pin the divergence:
 cargo build --release --locked
 ```
 
-the artifact lands in `target/release/`. copy it into vapoursynth's plugin
-directory, which the wheel installs as `vapoursynth/plugins/`.
+the artifact lands in `target/release/`. copy it into a
+`vapoursynth/plugins/nimages/` directory next to a `manifest.vs` that holds:
+
+```text
+[VapourSynth Manifest V1]
+vs_nimages
+```
 
 to build the wheel, which runs cargo and stages the plugin for you:
 
