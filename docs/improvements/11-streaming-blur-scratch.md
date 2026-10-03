@@ -84,9 +84,13 @@ the reason this is deferred rather than attempted and reverted: it cannot be
 landed as a local change to `blur` alone. `blur_row_avx2` writes one horizontal
 row, and the vertical pass needs a window of `2 * radius + 1` of those rows per
 output row, so either the producer runs ahead of the consumer or the vertical
-loop has to drive the horizontal one. both change the shape of a function that
-just became the filter's hottest, and this is the one candidate in the review
-whose failure mode is a wrong pixel rather than a slower frame.
+loop has to drive the horizontal one. a ring that recomputed its window per
+output row would pay the horizontal pass `2 * radius + 1` times, and at radius
+3 that is seven times the filter's hottest loop; the alternative is a
+slot-to-source-row map, which is the part that can silently read the wrong row.
+this is the one candidate in the review whose failure mode is a wrong pixel
+rather than a slower frame, so it needs its own round rather than the end of
+this one.
 
 the plan, in the order the review sets: replace only `temp`, keep the other four
 planes and every candidate, mask and blend stage as they are; allocate the ring
