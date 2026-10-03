@@ -48,6 +48,7 @@ const MAX_KERNEL_TAPS: usize = 2 * ((TRUNCATE * MAX_RADIUS + 0.5) as usize) + 1;
 /// with one accumulator per eight column block at five to seventeen taps, 1.04x
 /// at sixty-five, and 0.66x at the 129 taps a radius of sixteen gives. The
 /// deblur's own sigmas are 0.45, 0.5 and 0.8, so five and seven taps.
+#[cfg(target_arch = "x86_64")]
 const REGISTER_TAPS: usize = 32;
 
 /// How a deblur sharpens.
@@ -628,9 +629,9 @@ fn build_kernel(sigma: f32, weights: &mut Vec<f32>) -> usize {
 /// is repeated, so index `-1` reads sample `0`.
 ///
 /// Both passes dispatch once per blur rather than once per row or tap. The
-/// horizontal pass sends the whole plane to [`blur_row_avx2`]; the vertical
-/// pass sends a kernel at or below [`REGISTER_TAPS`] taps to
-/// [`accumulate_register_rows`], which keeps one accumulator across every tap
+/// horizontal pass uses `blur_horizontal`; on x86-64 its vector path uses
+/// `blur_row_avx2`. The vertical pass sends a kernel at or below `REGISTER_TAPS`
+/// taps to `accumulate_register_rows`, which keeps one accumulator across every tap
 /// of an eight column block and stores once.
 fn blur(
     source: &[f32],
@@ -646,31 +647,7 @@ fn blur(
     }
     let width = plane.width;
 
-    if is_x86_feature_detected!("avx2") {
-        // SAFETY: `avx2` was just detected, and both rows are `width` long,
-        // so no load or store reaches outside them.
-        for row in 0..plane.height {
-            let start = row * width;
-            let (Some(source_row), Some(temp_row)) = (
-                source.get(start..start + width),
-                temp.get_mut(start..start + width),
-            ) else {
-                return;
-            };
-            unsafe { blur_row_avx2(source_row, temp_row, weights, radius) };
-        }
-    } else {
-        for row in 0..plane.height {
-            let start = row * width;
-            let (Some(source_row), Some(temp_row)) = (
-                source.get(start..start + width),
-                temp.get_mut(start..start + width),
-            ) else {
-                return;
-            };
-            blur_row(source_row, temp_row, weights, radius);
-        }
-    }
+    blur_horizontal(source, temp, plane, weights, radius);
 
     #[cfg(target_arch = "x86_64")]
     if is_x86_feature_detected!("avx2") && weights.len() <= REGISTER_TAPS {
@@ -713,6 +690,45 @@ fn blur(
                 *value += tap * weight;
             }
         }
+    }
+}
+
+/// Runs the horizontal pass, with one x86-64 feature check for the whole plane.
+/// Other architectures use the same scalar rows without compiling the intrinsics.
+fn blur_horizontal(
+    source: &[f32],
+    target: &mut [f32],
+    plane: Plane,
+    weights: &[f32],
+    radius: usize,
+) {
+    let width = plane.width;
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("avx2") {
+        for row in 0..plane.height {
+            let start = row * width;
+            let (Some(source_row), Some(target_row)) = (
+                source.get(start..start + width),
+                target.get_mut(start..start + width),
+            ) else {
+                return;
+            };
+            // SAFETY: `avx2` was just detected, and both rows are `width` long,
+            // so no load or store reaches outside them.
+            unsafe { blur_row_avx2(source_row, target_row, weights, radius) };
+        }
+        return;
+    }
+
+    for row in 0..plane.height {
+        let start = row * width;
+        let (Some(source_row), Some(target_row)) = (
+            source.get(start..start + width),
+            target.get_mut(start..start + width),
+        ) else {
+            return;
+        };
+        blur_row(source_row, target_row, weights, radius);
     }
 }
 
@@ -1012,6 +1028,7 @@ fn sobel_mask(base: &[f32], mask: &mut [f32], plane: Plane, threshold: f32) {
 ///
 /// The two end columns and the tail of a row go through this on the vector path,
 /// so it cannot drift from the scalar one at the edges.
+#[cfg(target_arch = "x86_64")]
 #[inline]
 fn sobel_sample(
     above: &[f32],

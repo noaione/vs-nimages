@@ -91,13 +91,13 @@ measured worse once.
 
 that is what the second attempt avoided. `write_plane` no longer takes a
 `Fn(usize) -> f32`; it takes `width`, `height` and the restored slice, and
-dispatches once per plane to `write_u8`, `write_u16` or `write_f32`. Each one
+dispatches once per row to `write_u8`, `write_u16` or `write_f32`. each one
 runs the same arithmetic as `Convert::write` did, sample for sample, with the
 sample width fixed and no bounds check:
 
 | step | before | after |
 | --- | --- | --- |
-| code value | virtual closure call and a bounds-checked slice read | `restored[index]` through a raw pointer |
+| code value | statically dispatched generic closure and a bounds-checked slice read | `restored[index]` through a raw pointer |
 | scale | `f64 * inverse` | the same |
 | round | `round_ties_even`, `clamp`, cast | the same |
 | store | `row.get_mut(offset..)` per sample | a fixed-size chunk from `as_chunks_mut` |
@@ -105,6 +105,10 @@ sample width fixed and no bounds check:
 the closure is gone rather than kept: `write_plane` receives `width`, `height`
 and `workspace.restored()` from the caller, so a plane it is handed is the
 plane it writes. `write_rgb` already walked three row slices instead.
+
+the generic `Fn` closure was monomorphized, so the old path had no virtual
+dispatch. the measured change removes the checked sample access and specializes
+the row writer; it does not establish a saving from eliminating a virtual call.
 
 a two-round A/B of the same build with only this change reverted, at
 2048x2048 `GRAY16` `method=1` with three frames and three graph builds each:
