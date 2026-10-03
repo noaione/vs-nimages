@@ -627,8 +627,9 @@ fn build_kernel(sigma: f32, weights: &mut Vec<f32>) -> usize {
 /// reflect at the border the way scipy's `mode="reflect"` does: the edge sample
 /// is repeated, so index `-1` reads sample `0`.
 ///
-/// The vertical pass dispatches once per blur rather than once per tap: a
-/// kernel at or below [`REGISTER_TAPS`] taps goes to
+/// Both passes dispatch once per blur rather than once per row or tap. The
+/// horizontal pass sends the whole plane to [`blur_row_avx2`]; the vertical
+/// pass sends a kernel at or below [`REGISTER_TAPS`] taps to
 /// [`accumulate_register_rows`], which keeps one accumulator across every tap
 /// of an eight column block and stores once.
 fn blur(
@@ -645,15 +646,30 @@ fn blur(
     }
     let width = plane.width;
 
-    for row in 0..plane.height {
-        let start = row * width;
-        let (Some(source_row), Some(temp_row)) = (
-            source.get(start..start + width),
-            temp.get_mut(start..start + width),
-        ) else {
-            return;
-        };
-        blur_row(source_row, temp_row, weights, radius);
+    if is_x86_feature_detected!("avx2") {
+        // SAFETY: `avx2` was just detected, and both rows are `width` long,
+        // so no load or store reaches outside them.
+        for row in 0..plane.height {
+            let start = row * width;
+            let (Some(source_row), Some(temp_row)) = (
+                source.get(start..start + width),
+                temp.get_mut(start..start + width),
+            ) else {
+                return;
+            };
+            unsafe { blur_row_avx2(source_row, temp_row, weights, radius) };
+        }
+    } else {
+        for row in 0..plane.height {
+            let start = row * width;
+            let (Some(source_row), Some(temp_row)) = (
+                source.get(start..start + width),
+                temp.get_mut(start..start + width),
+            ) else {
+                return;
+            };
+            blur_row(source_row, temp_row, weights, radius);
+        }
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -813,7 +829,10 @@ unsafe fn accumulate_avx2(target: &mut [f32], tap: &[f32], weight: f32) {
 ///
 /// Four samples at a time were tried here, to put four independent sum chains in
 /// flight instead of one left fold's single chain. It measured inside the run to
-/// run noise, so the simpler loop is what stayed.
+/// run noise, so the simpler loop is what stayed. A vector attempt over the same
+/// window regressed 2.9x inside the plugin while measuring 3x faster on its own;
+/// that attempt put its feature check inside this per-row function, and
+/// [`blur_row_avx2`] is dispatched from [`blur`] instead.
 fn blur_row(source: &[f32], target: &mut [f32], weights: &[f32], radius: usize) {
     let width = source.len();
     let interior_start = radius.min(width);
@@ -835,6 +854,70 @@ fn blur_row(source: &[f32], target: &mut [f32], weights: &[f32], radius: usize) 
             *target = sum;
         }
     }
+    for (index, value) in target
+        .iter_mut()
+        .enumerate()
+        .skip(interior_end.max(interior_start))
+    {
+        *value = reflected_tap(source, index as isize, weights, radius);
+    }
+}
+
+/// One horizontal pass, eight columns at a time.
+///
+/// Each lane starts at positive zero and folds its own taps in the same order
+/// as [`blur_row`], with the multiply and the add as separate instructions, so
+/// the two paths produce the same bytes. The window is `radius` wide on each
+/// side and every load stays inside the row. The first and last `radius`
+/// samples still reflect one at a time, and a tail shorter than eight goes
+/// through the same scalar code.
+///
+/// [`blur`] detects the feature once per gaussian and calls this, rather than
+/// checking inside the per-row loop the way the reverted attempt did.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn blur_row_avx2(source: &[f32], target: &mut [f32], weights: &[f32], radius: usize) {
+    use std::arch::x86_64::*;
+
+    let width = source.len();
+    let interior_start = radius.min(width);
+    let interior_end = width.saturating_sub(radius);
+
+    for (index, value) in target.iter_mut().enumerate().take(interior_start) {
+        *value = reflected_tap(source, index as isize, weights, radius);
+    }
+
+    // SAFETY: `avx2` was detected by the caller. For an `index` below
+    // `width - radius`, the widest read is `source[index + radius]` and the
+    // store is eight lanes wide, so both stay inside the row.
+    unsafe {
+        let mut index = interior_start;
+        while index < interior_end {
+            if index + 8 <= interior_end {
+                let mut sum = _mm256_setzero_ps();
+                for (offset, weight) in weights.iter().enumerate() {
+                    let window = source.as_ptr().add(index + offset - radius);
+                    let row = _mm256_loadu_ps(window);
+                    let weight8 = _mm256_set1_ps(*weight);
+                    sum = _mm256_add_ps(sum, _mm256_mul_ps(row, weight8));
+                }
+                _mm256_storeu_ps(target.as_mut_ptr().add(index), sum);
+                index += 8;
+                continue;
+            }
+            let end = interior_end.min(index + 8);
+            for one in index..end {
+                let window = source.as_ptr().add(one - radius);
+                let mut sum = 0.0f32;
+                for (offset, weight) in weights.iter().enumerate() {
+                    sum += *window.add(offset) * weight;
+                }
+                *target.as_mut_ptr().add(one) = sum;
+            }
+            index = end;
+        }
+    }
+
     for (index, value) in target
         .iter_mut()
         .enumerate()
@@ -1091,6 +1174,45 @@ mod tests {
             radius,
         );
         target
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn the_vector_horizontal_pass_matches_the_scalar_one() {
+        // Widths below, around and past the eight lane step, so the tail and
+        // the reflected ends are both exercised, and tap counts from the
+        // mask's five to the largest kernel.
+        if !is_x86_feature_detected!("avx2") {
+            return;
+        }
+        let mut state = 0x2026_1003u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        for width in [1usize, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 33, 64, 129] {
+            let source: Vec<f32> = (0..width).map(|_| (next() % 512) as f32 - 256.0).collect();
+            for sigma in [0.45f32, 0.5, 0.8, 2.0, 16.0] {
+                let mut weights = Vec::new();
+                let radius = build_kernel(sigma, &mut weights);
+                let mut want = vec![0.0f32; width];
+                let mut got = vec![0.0f32; width];
+                blur_row(&source, &mut want, &weights, radius);
+                // SAFETY: `avx2` was just detected, and the row is exactly
+                // `width` samples long in both directions.
+                unsafe { blur_row_avx2(&source, &mut got, &weights, radius) };
+                let bits = |values: &[f32]| {
+                    values
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>()
+                };
+                assert_eq!(bits(&got), bits(&want), "width {width} sigma {sigma} moved");
+            }
+        }
     }
 
     #[test]

@@ -2,6 +2,14 @@
 
 status: implemented
 
+the optimization candidates are collected in
+[04-optimization-review.md](04-optimization-review.md). the horizontal SIMD
+regression recorded under [where the time goes](#where-the-time-goes) is now
+resolved in [05-horizontal-blur-dispatch.md](05-horizontal-blur-dispatch.md),
+and the vertical loop is in
+[06-vertical-register-accumulation.md](06-vertical-register-accumulation.md);
+the stage tables below remain historical measurements.
+
 ## problem
 
 `nmanga/deblur.py` exposes two sharpening entry points:
@@ -414,13 +422,20 @@ form fights the compiler, not where it is already a clean contiguous loop.
 
 Twelve hash cases still identical, validator still 2150 checks.
 
-**A pass that failed hard: the horizontal blur sum.** Vectorising across pixels
+**The horizontal blur sum, first attempt: a regression that was the dispatch
+site.** Vectorising across pixels
 rather than taps should have been the safe way to do this one, because each lane
 keeps its own taps in weight order and the accumulator starts at zero exactly as
 the scalar `sum()` fold does. It was byte-identical as expected, and it measured
 **2.9x slower**: twelve blurs went from 759.7 to 2217.6 ms, and `method=0`'s
 restore from 892.2 to 2519.5 ms. It was reverted, and the reverted build reports
 768.9 ms and the same twelve hashes.
+
+That regression was the dispatch site, not the loop. It is now implemented: the
+feature check moved from `blur_row`, which runs once per row, to `blur`, which
+runs once per gaussian, and the horizontal pass measures 2.2x to 3.0x faster with
+byte-identical output. See
+[05-horizontal-blur-dispatch.md](05-horizontal-blur-dispatch.md).
 
 Two explanations were tried and neither accounts for a factor of three: the
 `set1` broadcast inside the tap loop, and the single accumulator chain. A
