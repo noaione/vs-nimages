@@ -60,8 +60,10 @@ one in the review; the current state is measured and the plan is fixed below.
 
 `Workspace` holds five `f32` planes sized `width * height`: `luma`, `first`,
 `second`, `third` and `temp`. that is 20 bytes a sample, so a 12 megapixel
-frame's scratch is 240 MB and the 5806x4128 spread's is 479 MB, which is what
-`docs/BENCH.md` reports as the plugin's deblur peak. replacing the full
+frame's scratch is 240 MB and the 5806x4128 spread's is 479 MB in decimal units.
+these are workspace payloads; `docs/BENCH.md` reports whole-process peak RSS of
+969 MiB for each deblur method, including frames, caches and pooled workspaces.
+replacing the full
 horizontal `temp` with a ring of at most `2 * radius + 1` filtered rows, or
 `height` when that is smaller, takes the workspace to `16 * width * height +
 4 * width * ring_rows`, and at the deblur's radius of 3 and 2 that ring is 7

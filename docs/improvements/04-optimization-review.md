@@ -1,13 +1,13 @@
 # optimization review
 
-status: proposals only, reviewed on 2026-10-03 at
-`eabc817b5fc3693d1ebf5a4ca69167ce8432c806`.
+status: initial review on 2026-10-03 at
+`eabc817b5fc3693d1ebf5a4ca69167ce8432c806`, with later outcomes recorded below.
 
-this review follows the current source, including native integer depths, float
-Levels, property-driven Posterize, and the existing AVX2 Deblur paths. the old
+the initial review follows that source revision, including native integer depths,
+float Levels, property-driven Posterize, and the existing AVX2 Deblur paths. the old
 [performance plan](01-performance-plan.md) and [deblur record](03-deblur-filter.md)
-retain their measured outcomes. the candidates below are separate experiments,
-not measured speedups. implement and measure one before starting the next.
+retain their measured outcomes. the candidate order below records the original
+proposals; the outcome section records implementation and measurement.
 
 ## candidates and order
 
@@ -30,12 +30,13 @@ working direct blur and is primarily a memory experiment.
 
 ## outcome
 
-every candidate was implemented and measured against the unchanged baseline, on
-one machine, one rustc 1.99.0 build, with `cargo test --locked`, `cargo clippy
---all-targets --locked -- -D warnings`, `cargo fmt --check` and
-`tests/check-nimages.py` run on each build. the twelve case Deblur hash harness
-in `.tmpbuild/deblur_output_hash.py` backs the exactness claim for 05, 06, 10
-and 12.
+the implemented candidates were measured against the unchanged baseline, on
+one machine with rustc 1.99.0. their records report `cargo test --locked`,
+`cargo clippy --all-targets --locked -- -D warnings`, `cargo fmt --check` and
+`tests/check-nimages.py` validation for each build. rejected and deferred
+candidates retain their measurement or implementation rationale. the twelve case
+Deblur hash harness in `.tmpbuild/deblur_output_hash.py` backs the exactness claims
+for 05, 06 and 12.
 
 | order | candidate | outcome | evidence |
 | ---: | --- | --- | --- |
@@ -43,22 +44,29 @@ and 12.
 | 2 | 06 vertical register accumulation | kept, 32 tap threshold | bit-identical, 1.29x to 1.41x on the vertical pass at five to seventeen taps, separable blur 5.6% to 10.2% |
 | 3 | 07 Lloyd fixed-point exit | kept | same level bits in 56 cases, 87.7% off the refinement section, no frame-level effect |
 | 4 | 08 property-driven posterize tables | rejected | the 16-bit build is 0.197 ms against a 15.44 ms walk, 1.3% |
-| 5 | 09 striped histogram counters | kept for 8 bits | 1.67x median on 16 real planes with none regressing; 16-bit excluded, 0.67x flat and 0.36x noise |
+| 5 | 09 striped histogram counters | kept for 8 bits with bounded probe | 2.11x median, 1.30x worst on 16 real planes for the bounded v2 reader; 256-pair cap and direct fallback below 16384 pixels; 16-bit excluded |
 | 6 | 10 fresh Deblur output planes | deferred | `write` is 10.8 to 12.2 ms of a 46 to 156 ms frame, and the copy is part of that |
 | 7 | 11 streaming blur scratch | not implemented | 48 MB per concurrent frame at 12 Mpx, pinned and planned in its record |
-| 8 | 12 Deblur conversion dispatch | kept | the write stage halves, 18.59 to 11.39 ms and 21.86 to 9.15 ms over two rounds, at the same bytes |
+| 8 | 12 Deblur conversion dispatch | kept | the write stage falls 39% and 58%, 18.59 to 11.39 ms and 21.86 to 9.15 ms over two rounds, at the same bytes |
 | 9 | 13 peak prominence pruning | kept | same winner in six workloads, 228,000 to 76,000 prominence scans |
 
 the two combinations the review asked for separately are both in place and were
 measured apart first: 05 and 06 each have their own single-change reading, and
 the integrated rounds in 05 use the 06 build as the baseline.
 
-each candidate's record carries its own source revision, DLL hash, method and
-decision. the numbers are one machine with a warm page cache and a run to run
+the implemented candidates' records carry source revisions, DLL hashes, methods
+and decisions. the numbers are one machine with a warm page cache and a run to run
 spread wider than several of the effects; the records say so where that is the
 case rather than rounding a difference up to a win.
 
-## what the code establishes
+the refreshed full-page run in [BENCH.md](../BENCH.md) records 4.12x for shades,
+7.09x for posterize, 12.81x for deconvolution and 19.59x for the unsharp mask
+against the reference. these are whole-workflow ratios for the combined build;
+the individual records below establish each candidate's isolated effect.
+
+## source at the initial review
+
+these notes describe the initial source revision, before the kept changes above.
 
 - `Workspace::deconvolution` calls `blur` twice per iteration. the default six
   iterations mean twelve candidate blurs, plus two blurs in `edge_mask`.

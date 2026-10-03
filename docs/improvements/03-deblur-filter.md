@@ -575,8 +575,11 @@ That is **9.48x**: 12 worker threads already run nine and a half of these frames
 at once, and each frame costs 3.7x more under that contention (104 to 385 ms) as
 the 12 threads share cache and execution ports. There is no idle core for rayon
 to use, and 12 rayon threads inside each of 9 frames would oversubscribe the
-machine. The bench's per page column is one frame's latency on a quiet machine,
-not the throughput a graph sees, which is about 9x better than it looks.
+machine. The bench's per page column is one frame's latency on a quiet machine.
+The fan-in's aggregate throughput is about 2.7x the sequential rate:
+`13 * 108.5 / 527.6`. The 9.48x reported-work ratio measures concurrency, not
+throughput speedup, and this 1 Mpx probe does not establish the current full-page
+graph's throughput.
 
 ### concurrency and memory
 
@@ -588,8 +591,9 @@ flight. Each workspace is five f32 planes, so **240 MB for a 12 Mpx frame and
 
 That is visible in the bench: the plugin's peak resident set is 969 MiB on the
 deblur workflow against 511 MiB for `Posterize` on the same pages, and against the
-reference's 1569 MiB, which is the one comparison it wins. Splitting a single
-frame across rayon threads would not add to the scratch, but it is worth measuring
+reference's 1569 MiB. Both deblur workflows in `docs/BENCH.md` have this memory
+advantage. Splitting a single frame across rayon threads would not add to the
+scratch, but it is worth measuring
 the frame-level parallelism on a real graph before adding it.
 
 ## remaining questions

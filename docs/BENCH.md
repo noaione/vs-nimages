@@ -85,10 +85,11 @@ the plugin side's frame cache off its 512 MiB default.
 
 ## results
 
-wall seconds per stage, peak resident set for the whole run, and how many pages
-both pipelines gave the same black and white level. the level comparison is the
-correctness claim: the plugin has to agree with the reference on every page, not
-just run faster.
+wall seconds per stage and peak resident set for the whole run. `levels agreed`
+compares black and white levels for `levels`, and the number of reported shades
+for `shades`. `posterize` records zero placeholders on both sides, so its 49/49
+does not compare pixels. the deblur rows record no comparison and show 0/0.
+golden fixtures and `tests/check-nimages.py` cover the filter outputs.
 
 `resize` is the plugin's `resize.Bicubic` to `GRAY8` plus the frame plumbing
 around it, so it stays `0.00 s` for the reference, which converts inside its
@@ -98,27 +99,27 @@ decode instead. read the plugin's `decode + resize` against the reference's
 <!-- bench:start -->
 | pages | workflow | pipeline | decode | resize | analyze | apply | total | per page | peak rss |
 | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 129 | levels (levels) | nmanga | 2.03 s | 0.00 s | 4.27 s | 0.23 s | **6.53 s** | 50.6 ms | 119 MiB |
-| 129 | levels (levels) | vapoursynth | 2.01 s | 0.30 s | 0.24 s | 0.12 s | **2.67 s** | 20.7 ms | 128 MiB |
-| 49 | shades (posterize) | nmanga | 1.92 s | 0.00 s | 12.21 s | 0.00 s | **14.14 s** | 288.5 ms | 146 MiB |
-| 49 | shades (posterize) | vapoursynth | 2.70 s | 0.47 s | 0.46 s | 0.00 s | **3.63 s** | 74.1 ms | 488 MiB |
-| 49 | posterize (posterize) | nmanga | 2.00 s | 0.00 s | 0.00 s | 16.98 s | **18.98 s** | 387.3 ms | 274 MiB |
-| 49 | posterize (posterize) | vapoursynth | 2.22 s | 0.34 s | 0.00 s | 0.22 s | **2.78 s** | 56.8 ms | 511 MiB |
-| 49 | deblur (posterize) | nmanga | 2.03 s | 0.00 s | 0.00 s | 326.95 s | **328.97 s** | 6713.8 ms | 1569 MiB |
-| 49 | deblur (posterize) | vapoursynth | 1.96 s | 0.46 s | 0.00 s | 22.65 s | **25.06 s** | 511.5 ms | 969 MiB |
-| 49 | deblur-unsharp (posterize) | nmanga | 1.96 s | 0.00 s | 0.00 s | 175.12 s | **177.07 s** | 3613.8 ms | 1569 MiB |
-| 49 | deblur-unsharp (posterize) | vapoursynth | 2.17 s | 0.54 s | 0.00 s | 7.46 s | **10.17 s** | 207.5 ms | 969 MiB |
-| 44 | levels (webp) | nmanga | 11.44 s | 0.00 s | 6.17 s | 0.33 s | **17.94 s** | 407.7 ms | 283 MiB |
-| 44 | levels (webp) | vapoursynth | 7.26 s | 1.36 s | 0.35 s | 0.18 s | **9.15 s** | 207.9 ms | 400 MiB |
+| 129 | levels (levels) | nmanga | 1.82 s | 0.00 s | 4.95 s | 0.22 s | **6.99 s** | 54.2 ms | 119 MiB |
+| 129 | levels (levels) | vapoursynth | 1.79 s | 0.25 s | 0.22 s | 0.11 s | **2.37 s** | 18.4 ms | 128 MiB |
+| 49 | shades (posterize) | nmanga | 1.74 s | 0.00 s | 8.96 s | 0.00 s | **10.70 s** | 218.4 ms | 146 MiB |
+| 49 | shades (posterize) | vapoursynth | 1.92 s | 0.30 s | 0.38 s | 0.00 s | **2.60 s** | 53.0 ms | 489 MiB |
+| 49 | posterize (posterize) | nmanga | 1.73 s | 0.00 s | 0.00 s | 15.36 s | **17.09 s** | 348.8 ms | 274 MiB |
+| 49 | posterize (posterize) | vapoursynth | 1.92 s | 0.29 s | 0.00 s | 0.20 s | **2.41 s** | 49.2 ms | 511 MiB |
+| 49 | deblur (posterize) | nmanga | 1.77 s | 0.00 s | 0.00 s | 297.79 s | **299.56 s** | 6113.5 ms | 1569 MiB |
+| 49 | deblur (posterize) | vapoursynth | 1.93 s | 0.46 s | 0.00 s | 20.99 s | **23.38 s** | 477.1 ms | 969 MiB |
+| 49 | deblur-unsharp (posterize) | nmanga | 1.79 s | 0.00 s | 0.00 s | 155.12 s | **156.91 s** | 3202.3 ms | 1569 MiB |
+| 49 | deblur-unsharp (posterize) | vapoursynth | 1.96 s | 0.46 s | 0.00 s | 5.59 s | **8.01 s** | 163.5 ms | 969 MiB |
+| 44 | levels (webp) | nmanga | 10.72 s | 0.00 s | 5.41 s | 0.29 s | **16.42 s** | 373.1 ms | 282 MiB |
+| 44 | levels (webp) | vapoursynth | 6.75 s | 1.13 s | 0.33 s | 0.16 s | **8.37 s** | 190.2 ms | 400 MiB |
 
 | pages | workflow | pipeline | speedup | memory ratio | levels agreed |
 | ---: | --- | --- | ---: | ---: | --- |
-| 129 | levels (levels) | vapoursynth vs nmanga | 2.44x | 1.07x | 129/129 |
-| 49 | shades (posterize) | vapoursynth vs nmanga | 3.89x | 3.35x | 49/49 |
-| 49 | posterize (posterize) | vapoursynth vs nmanga | 6.82x | 1.87x | 49/49 |
-| 49 | deblur (posterize) | vapoursynth vs nmanga | 13.13x | 0.62x | 0/0 |
-| 49 | deblur-unsharp (posterize) | vapoursynth vs nmanga | 17.42x | 0.62x | 0/0 |
-| 44 | levels (webp) | vapoursynth vs nmanga | 1.96x | 1.41x | 44/44 |
+| 129 | levels (levels) | vapoursynth vs nmanga | 2.95x | 1.08x | 129/129 |
+| 49 | shades (posterize) | vapoursynth vs nmanga | 4.12x | 3.34x | 49/49 |
+| 49 | posterize (posterize) | vapoursynth vs nmanga | 7.09x | 1.87x | 49/49 |
+| 49 | deblur (posterize) | vapoursynth vs nmanga | 12.81x | 0.62x | 0/0 |
+| 49 | deblur-unsharp (posterize) | vapoursynth vs nmanga | 19.59x | 0.62x | 0/0 |
+| 44 | levels (webp) | vapoursynth vs nmanga | 1.96x | 1.42x | 44/44 |
 <!-- bench:end -->
 
 ## what a webp actually hands out
@@ -165,28 +166,32 @@ be used by anything.
 
 ### correctness
 
-every page agrees. 129 of 129 on `level-check` and 49 of 49 on `posterize-check`
-produced the same black and white level from the plugin as from the reference,
-including the spread and the two pages whose widths differ by one pixel. that is
-the claim that matters; the timings are the reason to bother.
+the `levels` workflow agrees on black and white levels for all 129 pages in
+`level-check` and all 44 pages in `level-webp-check`. the `shades` workflow
+agrees on the number of shades for all 49 pages in `posterize-check`, including
+the spread and the two pages whose widths differ by one pixel. the benchmark
+does not compare shade values or percentages.
 
-the deblur rows have no level to compare, so their `levels agreed` column reads
-`0/0`; that workflow's correctness claim is the frozen fixture tolerance instead,
-which `tests/check-nimages.py` checks on every run.
+the posterize placeholders and deblur's 0/0 carry no pixel-parity evidence.
+`tests/check-nimages.py` compares posterize pixels and shade properties against
+the golden vectors, and checks deblur against its frozen fixture tolerance.
 
 ### analysis
 
-this is where most of the win is. `find_local_peak` costs about 50 ms per page
-against 1.9 ms for `PeakStats`, and `analyze_gray_shades` costs about 288 ms
-against 9.4 ms for `PeakGrayShades`. more than an order of magnitude either way.
+the analysis stage is more than an order of magnitude faster in both workflows.
+`find_local_peak` costs about 38.4 ms per page against 1.7 ms for `PeakStats`,
+and `analyze_gray_shades` costs about 182.9 ms against 7.8 ms for
+`PeakGrayShades`. these are stage times, excluding decode and resize.
 
 the reference materialises a full `ndarray` of the page and converts it to
 grayscale again inside the call, so the page is copied before the histogram
 starts, and then `np.histogram` does generic binning over a `range` rather than
-a 256 bin count over `uint8`. the plugin walks the plane once into four
-striped `[u64; 256]` tables and never builds a second copy, which is what took
-`PeakGrayShades` from 0.86 s to 0.46 s over the 49 pages when the 8-bit reader
-was striped.
+a 256 bin count over `uint8`. the plugin samples at most 256 adjacent pairs on
+planes of at least 16384 pixels, then counts into either one `[u64; 256]` table
+or four striped tables, without building a second image copy. smaller planes
+use the direct reader without probing. the current `shades` analysis takes
+0.38 s over 49 pages. [09-striped-histogram-counters.md](improvements/09-striped-histogram-counters.md)
+records the isolated reader comparisons and the noise/size tradeoffs.
 
 the peak search is not the difference. it runs over at most 61 bins either way,
 and `scipy.signal.find_peaks` and `src/peaks.rs` both finish in microseconds.
@@ -195,7 +200,7 @@ and `scipy.signal.find_peaks` and `src/peaks.rs` both finish in microseconds.
 
 `Levels` and `Posterize` both apply one 256 entry table to the plane, so `apply`
 is a memory pass, and the plugin's is the cheaper one. over 129 pages the plugin
-spends 0.14 s and the reference 0.29 s, about 1.1 ms against 2.2 ms a page.
+spends 0.11 s and the reference 0.22 s, about 0.9 ms against 1.7 ms a page.
 
 `apply_levels` is not slow. Pillow's `image.point` is a tight native loop over an
 image it has already decoded, and the plugin also allocates the output frame,
@@ -204,88 +209,93 @@ cache. at 2.8 megapixels a page that per-frame overhead is a visible share.
 
 ### posterize
 
-the biggest gap, 6.82x, and almost all of it is the apply stage: 0.22 s against
-16.98 s over 49 pages, about 4.5 ms against 347 ms a page.
+posterize finishes 7.09x faster overall. almost all of the difference is in the
+apply stage: 0.20 s against 15.36 s over 49 pages, about 4.1 ms against 313.5 ms
+a page. deblur has the larger total speedups.
 
 ### deblur
 
-this is the one workflow where the plugin's own work still dominates the wall
-time, because the reference spends seconds per page here: 25.06 s against
-328.97 s over 49 pages, **13.13x** for the deconvolution and **17.42x** for the
-unsharp mask (10.17 s against 177.07 s). every other row is won by the analysis
-being an order of magnitude faster.
+in both deblur workflows the plugin's own work still dominates the wall time,
+while the reference spends seconds per page here: 23.38 s against
+299.56 s over 49 pages, **12.81x** for the deconvolution and **19.59x** for the
+unsharp mask (8.01 s against 156.91 s). levels and shades gain mainly in
+analysis; posterize gains in apply.
 
 the plugin side of those two rows started this work at 77.76 s and 36.04 s. the
-kernels are 68% and 72% faster across the passes recorded in
+current pipeline totals are about 70% and 78% lower than those historical runs.
+the separate optimization measurements are recorded in
 [03-deblur-filter.md](improvements/03-deblur-filter.md) and
 [04-optimization-review.md](improvements/04-optimization-review.md): reading each
 window from row slices instead of a per-tap helper, `sqrt` instead of the
 `f32::hypot` libcall, a ties-to-even round that does not need `roundsd`, an AVX2
 path for the blend stencil, then the horizontal pass vectorized eight columns at a
 time with its feature check hoisted out of the row loop and the vertical sum kept
-in a register across every tap of a column block. the last two are bit-identical to
-the scalar code.
+in a register across every tap of a column block. the last two are bit-identical
+to the scalar code. [12-deblur-conversion-dispatch.md](improvements/12-deblur-conversion-dispatch.md)
+records the later sample-width writer specialization. the current totals combine
+these changes with decode and frame plumbing; they do not isolate kernel gains.
 
-
-the unsharp mask is the cheaper operation by a wide margin, 207 ms a page against
-511 ms, which is what twelve gaussian blurs per page cost against one. it is
-also the better relative win, so `method=1` is what a caller who just wants a
-page sharpened should reach for.
+the unsharp mask is the cheaper operation by a wide margin, 163.5 ms a page
+against 477.1 ms. method 0 has twelve candidate blurs at six iterations and
+method 1 has one; both also run the mask's two blurs. `method=1` is the cheaper
+choice for a caller who wants the unsharp operation.
 
 where that time goes is not visible in this table: `Deblur` reports `luma`,
 `restore` and `write`, all three of which land in `apply`, and the reference's
 deblur branch times one call, so `apply` is the whole operation on both sides.
 `docs/improvements/03-deblur-filter.md` measured the inside of `restore`
-separately and found the edge mask and the halo clamp are still 78% of the
+separately and found the edge mask and the halo clamp were 78% of the
 unsharp mask and 28% of the deconvolution, with the twelve blur passes 65% of the
-deconvolution. the mask is the bigger lever, which is not where a first look
-would go.
+deconvolution in that build. those historical shares are not a stage split of
+the current results.
 
 the per page column is one frame's latency on a quiet machine. a graph that asks
-for several frames gets about nine and a half of them running at once on 12 worker
-threads, measured in [03-deblur-filter.md](improvements/03-deblur-filter.md), so a
-real pipeline sees roughly 9x this throughput while the reference stays single
-threaded.
+for several frames can run them concurrently on 12 worker threads.
+[03-deblur-filter.md](improvements/03-deblur-filter.md) measured about 9.5x
+concurrent work on 1 megapixel frames, with higher per-frame cost under
+contention and about 2.7x aggregate throughput over sequential pulls. it does
+not establish a throughput gain for the current full-page workload.
 
 peak memory runs the other way for once. 969 MiB against the reference's
-1569 MiB is the only row where the plugin is the smaller process: scipy holds
+1569 MiB makes both deblur rows smaller processes than the reference: scipy holds
 several megapixel-sized float64 temporaries per stage of a 24 megapixel page,
 while the plugin's scratch is 240 MB for a 12 megapixel frame and 479 MB for the
 5806x4128 spread.
 
 ### the webp set
 
-this is the harshest set and the narrowest win, 1.94x, because the decode is no
-longer a rounding error. a 12 megapixel lossy webp costs Pillow 269 ms a page and
-`imgseqs` 162 ms, so the plugin's decode is the faster one here, the opposite of
-the jpeg and png sets.
+this is the harshest set and the narrowest win, 1.96x, because the decode is no
+longer a rounding error. a 12 megapixel lossy webp costs Pillow 244 ms a page and
+`imgseqs` 153 ms. including resize, the plugin's decode path takes 179 ms per
+page. decoding varies by library and set.
 
-its `resize` is 32 ms a page rather than the 2.6 ms the jpeg set pays, because
+its `resize` is 25.7 ms a page rather than the 1.9 ms the jpeg set pays, because
 the conversion is a crop, a YUV to RGB resize and an RGB to Gray resize over 12
 megapixels instead of one resize over 2.8.
 
-even so the analysis is still about eight times faster, 17 ms a page against
-141 ms, and the level decisions are identical on all 44 pages. the lesson is that
+even so the analysis is about sixteen times faster, 7.5 ms a page against
+123 ms, and the level decisions are identical on all 44 pages. the lesson is that
 on a set this large the plugin's advantage is bounded by the decoder it has to
 sit behind, not by its own work.
 
 ### memory
 
-the plugin's peak is higher on five of the six workflows, and the reason is
+the plugin's peak is higher on four of the six workflow rows, and the reason is
 concurrency rather than leakage.
 VapourSynth keeps frames in flight across its worker threads and holds decoded
 frames in its cache, so a 12 megapixel page is about 12 MiB as `GRAY8` and 36 MiB
 as `RGB24`, and a dozen of those are live at once. the reference holds one page
-plus numpy's temporaries at a time, in one thread. the 512 MiB cache is what caps
-the plugin's side of it.
+plus numpy's temporaries at a time, in one thread. the 512 MiB cache budget
+limits cached frames; in-flight frames and pooled scratch also contribute to
+process RSS.
 
-`deblur` is the exception, at 0.62x. its pages are the largest here, so the
-reference's float64 temporaries dominate its side of the comparison, and the
-plugin's scratch, while large, is allocated once per frame in flight rather than
-per stage.
+both deblur methods are the exceptions, at 0.62x. their pages are the largest
+here, so the reference's float64 temporaries dominate its side of the comparison.
+the plugin's scratch, while large, is allocated once per frame in flight rather
+than per stage.
 
-the cache is the dial for peak memory, and 512 MiB sits at the top of the curve
-for this set. the `shades` run repeated at three sizes:
+the cache is a dial for peak memory. an earlier `shades` run compared three
+budgets; this separate probe was not rerun with the results block above:
 
 | cache | plugin total | peak rss | memory ratio |
 | --- | ---: | ---: | ---: |
@@ -293,10 +303,10 @@ for this set. the `shades` run repeated at three sizes:
 | 512 MiB | 3.43 s | 488 MiB | 3.35x |
 | 2048 MiB | 3.85 s | 488 MiB | 3.34x |
 
-the 49 pages are 12 megapixels each, so 588 MiB as `GRAY8`, and 512 MiB already
-holds nearly all of them: going to 2 GiB changes nothing, and dropping to 128 MiB
-halves the memory without costing wall time. the differences in the total column
-are run-to-run noise, so read this as a memory dial rather than a speed one.
+most of the 49 pages are about 12 megapixels, with a 24 megapixel spread. in that
+probe, going from 512 MiB to 2 GiB left peak RSS unchanged, and dropping to
+128 MiB reduced it from 488 MiB to 256 MiB. totals ranged from 3.43 s to 3.85 s;
+repeated runs are needed to separate timing effects from noise.
 
 `levels` barely notices any of it (1.08x) because its pages are 2.8 megapixels
 and the core evicts most of them either way.
@@ -332,7 +342,7 @@ stage as three times slower than it is.
   `vapoursynth-imageseqs`, which decodes with the `image` crate and then
   `resize.Bicubic` converts to `GRAY8`, while the reference decodes with Pillow
   and converts with `Image.convert("L")`. against `decode + resize` the plugin
-  path is between 28% faster and 49% slower than the reference's `decode`, in no
+  path is between 26% faster and 35% slower than the reference's `decode`, in no
   consistent direction, and none of it is `nimages` code,
   so read the `analyze` and `apply` columns as the comparison.
 - **neither side writes files.** no VapourSynth writer is installed here, so both
