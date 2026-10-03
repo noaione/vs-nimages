@@ -168,9 +168,15 @@ by under 0.3 MiB across runs, so that column is solid.
 
 the wall column is not. the control's own wall moved 17.6 to 14.4 ms at one frame
 and 240.5 to 217.9 ms at thirteen with no code change between the two sessions,
-which is a larger drift than `Deblur`'s 0.5% at thirteen frames. this measurement
-cannot resolve a throughput change at this size, so none is claimed, and the
-review's latency question stays open rather than answered in either direction.
+which is a larger drift than `Deblur`'s 0.5% at thirteen frames, so this probe
+cannot resolve a throughput change at this size.
+
+the full suite can, because the ratio against the reference absorbs the drift.
+`docs/BENCH.md` moved the deconvolution from 12.81x to **14.95x** and the unsharp
+mask from 19.59x to **21.12x** across the run that added the ring, so the plugin
+side takes about 14% and 7% less time against the same reference workload, since
+a ratio that rises from 12.81x to 14.95x is a time ratio that falls by 14%. that
+is the throughput benefit the review asked for, and it arrives with the memory one.
 
 ## correctness
 
