@@ -26,6 +26,8 @@ MANIFEST_HEADER = "[VapourSynth Manifest V1]"
 class Shape(NamedTuple):
     """The names one platform's plugin tree uses."""
 
+    #: The stem cargo's `cdylib` target writes. This is also the name the
+    #: manifest lists, so it carries the platform's prefix on macOS and Linux.
     stem: str
     extension: str
     #: Suffixes for the CPU variants that platform ships, shortest first.
@@ -42,7 +44,7 @@ def shape(wheel_name: str) -> Shape:
     if "macos" in wheel_name or "darwin" in wheel_name:
         # A macOS wheel is arm64 only, so it has one optimization level.
         return Shape("libvs_nimages", ".dylib", ("",))
-    return Shape("vs_nimages", ".so", ("", ".avx2"))
+    return Shape("libvs_nimages", ".so", ("", ".avx2"))
 
 
 def main() -> int:
@@ -54,7 +56,7 @@ def main() -> int:
     # the pattern is resolved here instead.
     wheels: list[pathlib.Path] = []
     for argument in arguments.wheel:
-        matches = [pathlib.Path(match) for match in glob.glob(str(argument))]
+        matches = [pathlib.Path(match) for match in glob.glob(str(argument))]  # ruff: ignore[glob]
         wheels.extend(matches or [argument])
 
     failed = False
@@ -75,8 +77,9 @@ def main() -> int:
                 print(f"{wheel.name}: missing {wanted}", file=sys.stderr)
                 failed = True
 
-        # The manifest names the plugin once; VapourSynth appends the variant
-        # suffix itself when the host CPU supports one.
+        # The manifest names the plugin once, with the platform's library
+        # prefix and without a variant suffix; VapourSynth adds the suffix
+        # itself when the host CPU supports one.
         lines = manifest.splitlines()
         if lines != [MANIFEST_HEADER, layout.stem]:
             print(

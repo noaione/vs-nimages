@@ -46,9 +46,10 @@ module.
 python -m pip install vapoursynth-nimages
 ```
 
-the x86-64 wheels carry two builds of the same plugin. `manifest.vs` names
-`vs_nimages`, and vapoursynth picks the `.<variant>` file that matches the host
-CPU, falling back to the plain one:
+the x86-64 wheels carry two builds of the same plugin. `manifest.vs` names the
+plugin's stem, `vs_nimages` on windows and `libvs_nimages` on linux and macos,
+and vapoursynth picks the `.<variant>` file that matches the host CPU, falling
+back to the plain one:
 
 | variant | windows | linux | needs |
 | --- | --- | --- | --- |

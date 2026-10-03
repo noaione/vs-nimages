@@ -61,7 +61,16 @@ def plugin_extension(environment: dict[str, str]) -> str:
 
 
 def plugin_stem(environment: dict[str, str]) -> str:
-    return "libvs_nimages" if plugin_extension(environment) == ".dylib" else "vs_nimages"
+    """The stem cargo writes for the library.
+
+    Every unix target prefixes a `cdylib` with `lib`, so the file is
+    `libvs_nimages.so` or `libvs_nimages.dylib` there, while Windows writes
+    `vs_nimages.dll`. That stem is also what the manifest lists, so there is no
+    separate name to keep in step with the file.
+    """
+    if plugin_extension(environment) == ".dll":
+        return "vs_nimages"
+    return "libvs_nimages"
 
 
 def base_filename(environment: dict[str, str]) -> str:
@@ -88,9 +97,11 @@ def variants(environment: dict[str, str]) -> list[Variant]:
 def manifest(environment: dict[str, str]) -> str:
     """The `manifest.vs` for this plugin.
 
-    VapourSynth reads the bare name and adds the `.<variant>` suffix itself
-    when the host CPU supports one, so the manifest lists the plugin once and
-    never the variant files."""
+    The manifest lists the plugin's stem, which carries the platform's library
+    prefix: `vs_nimages` on Windows and `libvs_nimages` on macOS and Linux.
+    VapourSynth appends the `.<variant>` suffix itself when the host CPU
+    supports one, so a variant is never named here.
+    """
     return MANIFEST_HEADER + f"{plugin_stem(environment)}\n"
 
 
