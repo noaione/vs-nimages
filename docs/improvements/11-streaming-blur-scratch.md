@@ -182,10 +182,15 @@ is the throughput benefit the review asked for, and it arrives with the memory o
 
 the twelve case Deblur hash harness reports the same hashes as before the change,
 on 8, 16 and 32 bit planes and both `NaN` pages. `cargo test --locked` passes 96
-unit and 11 golden tests, including one that compares a ring-sized `temp` against
-a whole-plane one bit for bit at six shapes and five sigmas, which covers the reuse
-case, the whole-plane case and the reflected borders. `cargo clippy --all-targets
---locked -- -D warnings` and `cargo fmt --check` are clean and
+unit and 11 golden tests, including one that compares the ring blur against an
+independent scalar whole-plane reference bit for bit at nine shapes and six
+sigmas. the reference fills every horizontal row before its vertical pass and
+uses no ring slots or optimized row kernels. the cases cover zero radius,
+single-row and single-column planes, reflected borders, and slot reuse even at
+the maximum 129-tap kernel. Miri caps multirow widths at nine columns, retaining
+an avx2 block and its scalar tail, with the same heights and kernels.
+`cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --check`
+are clean and
 `tests/check-nimages.py` passes its 2150 checks.
 
 what the earlier plan asked for and this does not do: two, four and eight

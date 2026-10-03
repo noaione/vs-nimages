@@ -1284,7 +1284,6 @@ mod tests {
     }
 
     /// The scalar vertical pass, which the register accumulator replaced.
-    #[cfg(target_arch = "x86_64")]
     fn vertical_scalar(
         source: &[f32],
         target: &mut [f32],
@@ -1314,6 +1313,36 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A whole-plane reference without ring slots or optimized row kernels.
+    fn blur_whole_plane_scalar(
+        source: &[f32],
+        plane: Plane,
+        weights: &[f32],
+        radius: usize,
+    ) -> Vec<f32> {
+        if radius == 0 {
+            return source.to_vec();
+        }
+        let mut horizontal = vec![0.0f32; source.len()];
+        for row in 0..plane.height {
+            let start = row * plane.width;
+            for column in 0..plane.width {
+                let mut sum = 0.0f32;
+                for (index, weight) in weights.iter().enumerate() {
+                    let tap = reflect(
+                        column as isize + index as isize - radius as isize,
+                        plane.width,
+                    );
+                    sum += source[start + tap] * weight;
+                }
+                horizontal[start + column] = sum;
+            }
+        }
+        let mut target = vec![0.0f32; source.len()];
+        vertical_scalar(&horizontal, &mut target, plane, weights, radius);
+        target
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -1378,12 +1407,13 @@ mod tests {
     }
 
     #[test]
-    fn the_ring_temp_matches_a_whole_plane_temp() {
+    fn the_ring_temp_matches_the_whole_plane_reference() {
         // The ring holds `min(height, 2 * radius + 1)` filtered rows and reuses
         // them, so this is the check that moving the window never serves a stale
         // row. A 64x129 plane at sigma 2 keeps seventeen rows for 129 output
         // rows, which is the reuse case; sigma 16 needs all 129, which is the
-        // whole-plane case; the short planes store every row they have.
+        // whole-plane case; 9x131 reuses slots even at the maximum radius.
+        // The expected pixels come from a separate scalar whole-plane blur.
         let mut state = 0x2026_1003u64;
         let mut next = move || {
             state ^= state << 13;
@@ -1394,30 +1424,31 @@ mod tests {
 
         for (width, height) in [
             (1usize, 1usize),
+            (1, 131),
+            (131, 1),
             (9, 3),
             (17, 9),
             (37, 5),
             (64, 129),
             (129, 64),
+            (9, 131),
         ] {
+            // Nine columns keep an AVX2 block and a scalar tail under Miri.
+            // Heights and kernels stay unchanged to exercise every ring case.
+            let width = if cfg!(miri) && height > 1 {
+                width.min(9)
+            } else {
+                width
+            };
             let source: Vec<f32> = (0..width * height)
                 .map(|_| (next() % 4096) as f32 - 2048.0)
                 .collect();
-            for sigma in [0.45f32, 0.5, 0.8, 2.0, 16.0] {
+            for sigma in [0.1f32, 0.45, 0.5, 0.8, 2.0, 16.0] {
                 let mut weights = Vec::new();
                 let radius = build_kernel(sigma, &mut weights);
                 let plane = Plane { width, height };
 
-                let mut whole_temp = vec![0.0f32; width * height];
-                let mut whole = vec![0.0f32; width * height];
-                blur(
-                    &source,
-                    &mut whole,
-                    &mut whole_temp,
-                    plane,
-                    &weights,
-                    radius,
-                );
+                let whole = blur_whole_plane_scalar(&source, plane, &weights, radius);
 
                 let ring = ring_rows(radius, height) * width;
                 let mut ring_temp = vec![0.0f32; ring];
