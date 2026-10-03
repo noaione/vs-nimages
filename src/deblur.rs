@@ -677,17 +677,19 @@ fn blur(
     // The source row each slot holds now, or `usize::MAX` while it holds
     // nothing. Local to one gaussian, so no frame state outlives a call.
     let mut held = [usize::MAX; MAX_KERNEL_TAPS];
+    let mut ring_slots = [0usize; MAX_KERNEL_TAPS];
     let mut rows: [*const f32; MAX_KERNEL_TAPS] = [std::ptr::null(); MAX_KERNEL_TAPS];
 
     for row in 0..height {
         let interior = row >= radius && row + radius < height;
-        for (index, slot) in rows.iter_mut().enumerate().take(taps) {
+        for (index, slot) in ring_slots.iter_mut().enumerate().take(taps) {
             let tap = if interior {
                 row + index - radius
             } else {
                 reflect(row as isize + index as isize - radius as isize, height)
             };
             let ring_slot = tap % ring_rows;
+            *slot = ring_slot;
             if held[ring_slot] != tap {
                 let Some(source_row) = source.get(tap * width..tap * width + width) else {
                     return;
@@ -699,9 +701,12 @@ fn blur(
                 filter_row(source_row, ring_row, weights, radius, vector);
                 held[ring_slot] = tap;
             }
-            // The slot was just filled, so its address is a `width` sample row
-            // inside `temp`. `temp` is never reallocated here, so the pointer
-            // stays valid until the vertical pass reads it.
+        }
+
+        // Resolve pointers after every ring write. A mutable borrow of `temp`
+        // invalidates pointers from earlier shared borrows even when the row
+        // ranges are disjoint. No ring write occurs before these are consumed.
+        for (slot, &ring_slot) in rows.iter_mut().zip(&ring_slots).take(taps) {
             match temp.get(ring_slot * width..ring_slot * width + width) {
                 Some(ring_row) => *slot = ring_row.as_ptr(),
                 None => return,
