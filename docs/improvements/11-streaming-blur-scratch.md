@@ -1,0 +1,100 @@
+# streaming blur scratch
+
+status: not implemented. larger implementation, explicit memory target.
+
+## current cost
+
+[`Workspace`](../../src/deblur.rs) keeps five full f32 planes: `luma`, `first`,
+`second`, `third`, and `temp`. `blur` fills the full horizontal `temp` before
+starting its vertical pass. workspaces grow to their largest frame and the pool
+retains one per concurrent evaluation.
+
+## one experiment
+
+replace only the full horizontal `temp` with a ring of filtered rows. keep the
+other four planes and all candidate/mask/blend stages as they are. each vertical
+output row needs at most `2 * radius + 1` horizontal rows. produce source rows
+on demand, retain rows until their last consumer, and reuse ring slots afterward.
+
+allocate at most `min(height, 2 * radius + 1) * width` f32 samples for an active
+blur, with checked arithmetic and fallible reservation. the maximum kernel has
+129 taps. one reusable ring sized for the largest active kernel replaces
+`ensure(temp, width * height)`; leaving that full allocation alive defeats the
+memory objective.
+
+for tall pages, scratch changes from approximately `20 * width * height` bytes
+to `16 * width * height + 4 * width * ring_rows`. it saves almost one of five
+planes, or 20% of workspace storage. the process RSS reduction is smaller because
+frames, caches and other allocations remain. a 12 million sample plane costs
+48 MB in decimal units; removing one saves that payload per workspace.
+
+## parity traps
+
+map logical taps through the existing `reflect`, including repeated edge
+samples, height below kernel length, and 1xN/Nx1 frames. track the source-row
+identity of each ring slot; modulo addressing alone cannot establish that its
+contents still belong to a needed reflected row. when the plane is shorter
+than the kernel, storing all its rows is a valid bounded fallback.
+
+every output retains the same horizontal fold, vertical tap order and f32
+stores. source and target remain distinct during the blur. a later deconvolution
+iteration cannot read overwritten intermediate source data. a reused workspace
+also needs the current ring width/row capacity, not a previous frame's layout.
+
+## measure and decision
+
+first compare blur output bits for tiny, odd, tall and large planes through
+all kernel lengths. then run restored-output and plugin checks. measure pure
+blur time, both methods, and 1/2/4/8 concurrent full frames at the same cache
+budget. include largest-to-smallest frame sequences and retained pool bytes.
+
+this can improve cache locality or add scheduling overhead; no latency gain is
+established. keep it for a measured memory/throughput benefit within the shared
+regression limits. do not add rayon, tile the entire multi-iteration operation,
+or shrink all pooled buffers at the same time as this experiment.
+
+## result
+
+status: not implemented. the objective is real and the change is the largest
+one in the review; the current state is measured and the plan is fixed below.
+
+`Workspace` holds five `f32` planes sized `width * height`: `luma`, `first`,
+`second`, `third` and `temp`. that is 20 bytes a sample, so a 12 megapixel
+frame's scratch is 240 MB and the 5806x4128 spread's is 479 MB, which is what
+`docs/BENCH.md` reports as the plugin's deblur peak. replacing the full
+horizontal `temp` with a ring of at most `2 * radius + 1` filtered rows, or
+`height` when that is smaller, takes the workspace to `16 * width * height +
+4 * width * ring_rows`, and at the deblur's radius of 3 and 2 that ring is 7
+and 5 rows.
+
+| pin | f32 planes | per 12 Mpx frame |
+| --- | ---: | ---: |
+| current workspace | 5 | 240 MB |
+| one plane removed | 4 | 192 MB |
+| saving per workspace | 1 | 48 MB |
+
+concurrent throughput on the current build, from
+`.tmpbuild/deblur_parallelism.py` at 1 megapixel, 12 core threads: 53.0 ms of
+wall for one frame on its own, 578.6 ms for 13 frames through a
+`std.AverageFrames` fan-in, and 9.56x concurrency measured as reported work over
+wall. the pool grows to the frames in flight, so the 48 MB is per concurrent
+frame, not per process.
+
+the reason this is deferred rather than attempted and reverted: it cannot be
+landed as a local change to `blur` alone. `blur_row_avx2` writes one horizontal
+row, and the vertical pass needs a window of `2 * radius + 1` of those rows per
+output row, so either the producer runs ahead of the consumer or the vertical
+loop has to drive the horizontal one. both change the shape of a function that
+just became the filter's hottest, and this is the one candidate in the review
+whose failure mode is a wrong pixel rather than a slower frame.
+
+the plan, in the order the review sets: replace only `temp`, keep the other four
+planes and every candidate, mask and blend stage as they are; allocate the ring
+with checked arithmetic and a fallible reservation, reusing it across frames
+sized for the largest active kernel; track each ring slot's source row identity
+rather than trusting modulo addressing; fall back to storing every row when the
+plane is shorter than the kernel. then compare blur output bits for tiny, odd,
+tall and large planes through all kernel lengths, and measure 1/2/4/8 concurrent
+full frames at the same cache budget plus the largest-to-smallest sequence. the
+unit and hash harnesses from 05 and 06 apply unchanged, because both preserve
+the arithmetic order.
