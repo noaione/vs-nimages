@@ -208,6 +208,9 @@ fn prominence<C: CountSequence>(counts: &C, peak: usize) -> u64 {
 }
 
 /// Picks the tallest candidate in a padded region, returning its bin index.
+///
+/// A candidate no taller than the winner found so far skips its prominence
+/// scan, because only a strictly taller peak can replace that winner.
 fn select<C: CountSequence>(
     padded: &C,
     minimum_height: u64,
@@ -221,15 +224,25 @@ fn select<C: CountSequence>(
         if height < minimum_height {
             continue;
         }
+        // A candidate that cannot replace the winner does not need its
+        // prominence, and `prominence` walks both sides until a strictly
+        // taller sample, so a wide run of equal-height peaks under one
+        // qualifying winner is the scan this skips. `best` only holds a
+        // candidate that already passed the same minimum prominence below, so
+        // a skipped equal or shorter height had no chance of winning anyway:
+        // `LocalMaxima` visits bins in ascending order and the update keeps the
+        // first on a tie. An empty `best` cannot prune anything.
+        let outranked = best.is_some_and(|(_, best_height)| height <= best_height);
+        if outranked {
+            continue;
+        }
         if use_prominence && prominence(padded, peak) < minimum_prominence {
             continue;
         }
         // Strictly greater keeps the first (lowest bin) on a tie, which is
-        // what numpy.argmax does.
-        match best {
-            Some((_, best_height)) if height <= best_height => {}
-            _ => best = Some((peak, height)),
-        }
+        // what numpy.argmax does, and only a strictly taller candidate reaches
+        // here with a `best` already set.
+        best = Some((peak, height));
     }
 
     // Drop the leading padding bin to get back to the bin index.
