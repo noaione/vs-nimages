@@ -99,27 +99,27 @@ decode instead. read the plugin's `decode + resize` against the reference's
 <!-- bench:start -->
 | pages | workflow | pipeline | decode | resize | analyze | apply | total | per page | peak rss |
 | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 129 | levels (levels) | nmanga | 1.82 s | 0.00 s | 4.95 s | 0.22 s | **6.99 s** | 54.2 ms | 119 MiB |
-| 129 | levels (levels) | vapoursynth | 1.79 s | 0.25 s | 0.22 s | 0.11 s | **2.37 s** | 18.4 ms | 128 MiB |
-| 49 | shades (posterize) | nmanga | 1.74 s | 0.00 s | 8.96 s | 0.00 s | **10.70 s** | 218.4 ms | 146 MiB |
-| 49 | shades (posterize) | vapoursynth | 1.92 s | 0.30 s | 0.38 s | 0.00 s | **2.60 s** | 53.0 ms | 489 MiB |
-| 49 | posterize (posterize) | nmanga | 1.73 s | 0.00 s | 0.00 s | 15.36 s | **17.09 s** | 348.8 ms | 274 MiB |
-| 49 | posterize (posterize) | vapoursynth | 1.92 s | 0.29 s | 0.00 s | 0.20 s | **2.41 s** | 49.2 ms | 511 MiB |
-| 49 | deblur (posterize) | nmanga | 1.77 s | 0.00 s | 0.00 s | 297.79 s | **299.56 s** | 6113.5 ms | 1569 MiB |
-| 49 | deblur (posterize) | vapoursynth | 1.93 s | 0.46 s | 0.00 s | 20.99 s | **23.38 s** | 477.1 ms | 969 MiB |
-| 49 | deblur-unsharp (posterize) | nmanga | 1.79 s | 0.00 s | 0.00 s | 155.12 s | **156.91 s** | 3202.3 ms | 1569 MiB |
-| 49 | deblur-unsharp (posterize) | vapoursynth | 1.96 s | 0.46 s | 0.00 s | 5.59 s | **8.01 s** | 163.5 ms | 969 MiB |
-| 44 | levels (webp) | nmanga | 10.72 s | 0.00 s | 5.41 s | 0.29 s | **16.42 s** | 373.1 ms | 282 MiB |
-| 44 | levels (webp) | vapoursynth | 6.75 s | 1.13 s | 0.33 s | 0.16 s | **8.37 s** | 190.2 ms | 400 MiB |
+| 129 | levels (levels) | nmanga | 2.20 s | 0.00 s | 5.84 s | 0.26 s | **8.30 s** | 64.3 ms | 119 MiB |
+| 129 | levels (levels) | vapoursynth | 1.93 s | 0.30 s | 0.23 s | 0.12 s | **2.59 s** | 20.0 ms | 128 MiB |
+| 49 | shades (posterize) | nmanga | 1.94 s | 0.00 s | 10.54 s | 0.00 s | **12.49 s** | 254.8 ms | 146 MiB |
+| 49 | shades (posterize) | vapoursynth | 2.02 s | 0.30 s | 0.38 s | 0.00 s | **2.70 s** | 55.2 ms | 489 MiB |
+| 49 | posterize (posterize) | nmanga | 1.78 s | 0.00 s | 0.00 s | 15.61 s | **17.39 s** | 354.8 ms | 273 MiB |
+| 49 | posterize (posterize) | vapoursynth | 2.08 s | 0.33 s | 0.00 s | 0.21 s | **2.63 s** | 53.6 ms | 511 MiB |
+| 49 | deblur (posterize) | nmanga | 1.80 s | 0.00 s | 0.00 s | 297.02 s | **298.83 s** | 6098.5 ms | 1569 MiB |
+| 49 | deblur (posterize) | vapoursynth | 1.91 s | 0.42 s | 0.00 s | 17.66 s | **19.99 s** | 408.0 ms | 880 MiB |
+| 49 | deblur-unsharp (posterize) | nmanga | 1.75 s | 0.00 s | 0.00 s | 151.17 s | **152.92 s** | 3120.8 ms | 1569 MiB |
+| 49 | deblur-unsharp (posterize) | vapoursynth | 1.91 s | 0.41 s | 0.00 s | 4.92 s | **7.24 s** | 147.8 ms | 880 MiB |
+| 44 | levels (webp) | nmanga | 11.20 s | 0.00 s | 5.68 s | 0.30 s | **17.18 s** | 390.5 ms | 283 MiB |
+| 44 | levels (webp) | vapoursynth | 7.08 s | 1.32 s | 0.34 s | 0.20 s | **8.95 s** | 203.4 ms | 400 MiB |
 
 | pages | workflow | pipeline | speedup | memory ratio | levels agreed |
 | ---: | --- | --- | ---: | ---: | --- |
-| 129 | levels (levels) | vapoursynth vs nmanga | 2.95x | 1.08x | 129/129 |
-| 49 | shades (posterize) | vapoursynth vs nmanga | 4.12x | 3.34x | 49/49 |
-| 49 | posterize (posterize) | vapoursynth vs nmanga | 7.09x | 1.87x | 49/49 |
-| 49 | deblur (posterize) | vapoursynth vs nmanga | 12.81x | 0.62x | 0/0 |
-| 49 | deblur-unsharp (posterize) | vapoursynth vs nmanga | 19.59x | 0.62x | 0/0 |
-| 44 | levels (webp) | vapoursynth vs nmanga | 1.96x | 1.42x | 44/44 |
+| 129 | levels (levels) | vapoursynth vs nmanga | 3.21x | 1.08x | 129/129 |
+| 49 | shades (posterize) | vapoursynth vs nmanga | 4.62x | 3.34x | 49/49 |
+| 49 | posterize (posterize) | vapoursynth vs nmanga | 6.62x | 1.87x | 49/49 |
+| 49 | deblur (posterize) | vapoursynth vs nmanga | 14.95x | 0.56x | 0/0 |
+| 49 | deblur-unsharp (posterize) | vapoursynth vs nmanga | 21.12x | 0.56x | 0/0 |
+| 44 | levels (webp) | vapoursynth vs nmanga | 1.92x | 1.41x | 44/44 |
 <!-- bench:end -->
 
 ## what a webp actually hands out
@@ -179,8 +179,8 @@ the golden vectors, and checks deblur against its frozen fixture tolerance.
 ### analysis
 
 the analysis stage is more than an order of magnitude faster in both workflows.
-`find_local_peak` costs about 38.4 ms per page against 1.7 ms for `PeakStats`,
-and `analyze_gray_shades` costs about 182.9 ms against 7.8 ms for
+`find_local_peak` costs about 45.3 ms per page against 1.8 ms for `PeakStats`,
+and `analyze_gray_shades` costs about 215.1 ms against 7.8 ms for
 `PeakGrayShades`. these are stage times, excluding decode and resize.
 
 the reference materialises a full `ndarray` of the page and converts it to
@@ -200,7 +200,7 @@ and `scipy.signal.find_peaks` and `src/peaks.rs` both finish in microseconds.
 
 `Levels` and `Posterize` both apply one 256 entry table to the plane, so `apply`
 is a memory pass, and the plugin's is the cheaper one. over 129 pages the plugin
-spends 0.11 s and the reference 0.22 s, about 0.9 ms against 1.7 ms a page.
+spends 0.12 s and the reference 0.26 s, about 0.9 ms against 2.0 ms a page.
 
 `apply_levels` is not slow. Pillow's `image.point` is a tight native loop over an
 image it has already decoded, and the plugin also allocates the output frame,
@@ -209,20 +209,20 @@ cache. at 2.8 megapixels a page that per-frame overhead is a visible share.
 
 ### posterize
 
-posterize finishes 7.09x faster overall. almost all of the difference is in the
-apply stage: 0.20 s against 15.36 s over 49 pages, about 4.1 ms against 313.5 ms
+posterize finishes 6.62x faster overall. almost all of the difference is in the
+apply stage: 0.21 s against 15.61 s over 49 pages, about 4.3 ms against 318.6 ms
 a page. deblur has the larger total speedups.
 
 ### deblur
 
 in both deblur workflows the plugin's own work still dominates the wall time,
-while the reference spends seconds per page here: 23.38 s against
-299.56 s over 49 pages, **12.81x** for the deconvolution and **19.59x** for the
-unsharp mask (8.01 s against 156.91 s). levels and shades gain mainly in
+while the reference spends seconds per page here: 19.99 s against
+298.83 s over 49 pages, **14.95x** for the deconvolution and **21.12x** for the
+unsharp mask (7.24 s against 152.92 s). levels and shades gain mainly in
 analysis; posterize gains in apply.
 
 the plugin side of those two rows started this work at 77.76 s and 36.04 s. the
-current pipeline totals are about 70% and 78% lower than those historical runs.
+current pipeline totals are about 74% and 80% lower than those historical runs.
 the separate optimization measurements are recorded in
 [03-deblur-filter.md](improvements/03-deblur-filter.md) and
 [04-optimization-review.md](improvements/04-optimization-review.md): reading each
@@ -235,8 +235,8 @@ to the scalar code. [12-deblur-conversion-dispatch.md](improvements/12-deblur-co
 records the later sample-width writer specialization. the current totals combine
 these changes with decode and frame plumbing; they do not isolate kernel gains.
 
-the unsharp mask is the cheaper operation by a wide margin, 163.5 ms a page
-against 477.1 ms. method 0 has twelve candidate blurs at six iterations and
+the unsharp mask is the cheaper operation by a wide margin, 147.8 ms a page
+against 408.0 ms. method 0 has twelve candidate blurs at six iterations and
 method 1 has one; both also run the mask's two blurs. `method=1` is the cheaper
 choice for a caller who wants the unsharp operation.
 
@@ -256,25 +256,25 @@ concurrent work on 1 megapixel frames, with higher per-frame cost under
 contention and about 2.7x aggregate throughput over sequential pulls. it does
 not establish a throughput gain for the current full-page workload.
 
-peak memory runs the other way for once. 969 MiB against the reference's
+peak memory runs the other way for once. 880 MiB against the reference's
 1569 MiB makes both deblur rows smaller processes than the reference: scipy holds
 several megapixel-sized float64 temporaries per stage of a 24 megapixel page,
-while the plugin's scratch is 240 MB for a 12 megapixel frame and 479 MB for the
-5806x4128 spread.
+while the plugin's scratch is four f32 planes plus a ring of at most 129 filtered
+rows: 194 MB for a 12 megapixel frame and 387 MB for the 5806x4128 spread.
 
 ### the webp set
 
-this is the harshest set and the narrowest win, 1.96x, because the decode is no
-longer a rounding error. a 12 megapixel lossy webp costs Pillow 244 ms a page and
-`imgseqs` 153 ms. including resize, the plugin's decode path takes 179 ms per
-page. decoding varies by library and set.
+this is the harshest set and the narrowest win, 1.92x, because the decode is no
+longer a rounding error. a 12 megapixel lossy webp costs the reference 254.5 ms a
+page of decode and the plugin 160.9 ms of decode plus 30.0 ms of resize.
+decoding varies by library and set.
 
-its `resize` is 25.7 ms a page rather than the 1.9 ms the jpeg set pays, because
+its `resize` is 30.0 ms a page rather than the 2.3 ms the jpeg set pays, because
 the conversion is a crop, a YUV to RGB resize and an RGB to Gray resize over 12
 megapixels instead of one resize over 2.8.
 
-even so the analysis is about sixteen times faster, 7.5 ms a page against
-123 ms, and the level decisions are identical on all 44 pages. the lesson is that
+even so the analysis is about seventeen times faster, 7.7 ms a page against
+129 ms, and the level decisions are identical on all 44 pages. the lesson is that
 on a set this large the plugin's advantage is bounded by the decoder it has to
 sit behind, not by its own work.
 
@@ -289,7 +289,7 @@ plus numpy's temporaries at a time, in one thread. the 512 MiB cache budget
 limits cached frames; in-flight frames and pooled scratch also contribute to
 process RSS.
 
-both deblur methods are the exceptions, at 0.62x. their pages are the largest
+both deblur methods are the exceptions, at 0.56x. their pages are the largest
 here, so the reference's float64 temporaries dominate its side of the comparison.
 the plugin's scratch, while large, is allocated once per frame in flight rather
 than per stage.
