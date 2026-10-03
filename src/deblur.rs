@@ -211,7 +211,13 @@ impl Workspace {
         ensure(&mut self.first, length)?;
         ensure(&mut self.second, length)?;
         ensure(&mut self.third, length)?;
-        ensure(&mut self.temp, length)?;
+        // The horizontal scratch is a ring of filtered rows, not a whole plane:
+        // the largest kernel is `MAX_KERNEL_TAPS` rows and a shorter plane holds
+        // all of its own rows. A larger window is never active for one gaussian.
+        let ring = width
+            .checked_mul(height.min(MAX_KERNEL_TAPS))
+            .ok_or(DeblurError::Shape)?;
+        ensure(&mut self.temp, ring)?;
         ensure(&mut self.weights, MAX_KERNEL_TAPS)?;
         self.length = length;
         Ok(())
@@ -276,7 +282,7 @@ impl Workspace {
             blur(
                 &self.first[..length],
                 &mut self.third[..length],
-                &mut self.temp[..length],
+                &mut self.temp,
                 plane,
                 &self.weights,
                 radius,
@@ -290,7 +296,7 @@ impl Workspace {
             blur(
                 &self.second[..length],
                 &mut self.third[..length],
-                &mut self.temp[..length],
+                &mut self.temp,
                 plane,
                 &self.weights,
                 radius,
@@ -313,7 +319,7 @@ impl Workspace {
         blur(
             &self.luma[..length],
             &mut self.third[..length],
-            &mut self.temp[..length],
+            &mut self.temp,
             plane,
             &self.weights,
             radius,
@@ -333,7 +339,7 @@ impl Workspace {
         blur(
             &self.luma[..length],
             &mut self.third[..length],
-            &mut self.temp[..length],
+            &mut self.temp,
             plane,
             &self.weights,
             radius,
@@ -349,7 +355,7 @@ impl Workspace {
         blur(
             &self.second[..length],
             &mut self.third[..length],
-            &mut self.temp[..length],
+            &mut self.temp,
             plane,
             &self.weights,
             radius,
@@ -624,15 +630,22 @@ fn build_kernel(sigma: f32, weights: &mut Vec<f32>) -> usize {
 /// Blurs `source` into `target` with a separable Gaussian, using `temp` for the
 /// horizontal pass.
 ///
-/// A radius of zero copies, which is what a radius-zero kernel does. Both passes
-/// reflect at the border the way scipy's `mode="reflect"` does: the edge sample
-/// is repeated, so index `-1` reads sample `0`.
+/// A radius of zero copies, which is what a radius-zero kernel does. The
+/// horizontal pass reflects at the border the way scipy's `mode="reflect"` does:
+/// the edge sample is repeated, so index `-1` reads sample `0`.
 ///
-/// Both passes dispatch once per blur rather than once per row or tap. The
-/// horizontal pass uses `blur_horizontal`; on x86-64 its vector path uses
-/// `blur_row_avx2`. The vertical pass sends a kernel at or below `REGISTER_TAPS`
-/// taps to `accumulate_register_rows`, which keeps one accumulator across every tap
-/// of an eight column block and stores once.
+/// `temp` is a ring of `min(height, 2 * radius + 1)` filtered rows rather than a
+/// whole plane. One output row consumes exactly that window, and
+/// `source_row % ring_rows` sends the window's distinct rows to distinct slots:
+/// the window is a run of at most `ring_rows` consecutive source rows, so no two
+/// of them can share a slot. Each slot remembers the source row it holds, which
+/// is what makes moving the window safe. A row is filtered once as the window
+/// advances and refiltered only where the reflection asks for it again.
+///
+/// The horizontal fold, the vertical tap order and the f32 stores are the ones a
+/// whole-plane `temp` produced, so the output is unchanged.
+///
+/// The x86-64 feature check runs once here, not once per row or tap.
 fn blur(
     source: &[f32],
     target: &mut [f32],
@@ -646,168 +659,193 @@ fn blur(
         return;
     }
     let width = plane.width;
-
-    blur_horizontal(source, temp, plane, weights, radius);
-
-    #[cfg(target_arch = "x86_64")]
-    if is_x86_feature_detected!("avx2") && weights.len() <= REGISTER_TAPS {
-        // SAFETY: `avx2` was just detected and `temp` holds `width * height`
-        // samples, which is what the vector loop walks.
-        unsafe { accumulate_register_rows(temp, target, plane, weights, radius) };
-        return;
-    }
-
-    for row in 0..plane.height {
-        let start = row * width;
-        let Some(target_row) = target.get_mut(start..start + width) else {
-            return;
-        };
-        target_row.fill(0.0);
-        let interior = row >= radius && row + radius < plane.height;
-        for (index, weight) in weights.iter().enumerate() {
-            let tap = if interior {
-                row + index - radius
-            } else {
-                reflect(
-                    row as isize + index as isize - radius as isize,
-                    plane.height,
-                )
-            };
-            let bump = tap * width;
-            let Some(tap_row) = temp.get(bump..bump + width) else {
-                return;
-            };
-            // The register path already returned, so this covers a kernel
-            // longer than `REGISTER_TAPS` and a target without the feature.
-            #[cfg(target_arch = "x86_64")]
-            if is_x86_feature_detected!("avx2") {
-                // SAFETY: `avx2` was just detected, and both rows are `width`
-                // long, so every eight lane load and store stays inside them.
-                unsafe { accumulate_avx2(target_row, tap_row, *weight) };
-                continue;
-            }
-            for (value, tap) in target_row.iter_mut().zip(tap_row) {
-                *value += tap * weight;
-            }
-        }
-    }
-}
-
-/// Runs the horizontal pass, with one x86-64 feature check for the whole plane.
-/// Other architectures use the same scalar rows without compiling the intrinsics.
-fn blur_horizontal(
-    source: &[f32],
-    target: &mut [f32],
-    plane: Plane,
-    weights: &[f32],
-    radius: usize,
-) {
-    let width = plane.width;
-    #[cfg(target_arch = "x86_64")]
-    if is_x86_feature_detected!("avx2") {
-        for row in 0..plane.height {
-            let start = row * width;
-            let (Some(source_row), Some(target_row)) = (
-                source.get(start..start + width),
-                target.get_mut(start..start + width),
-            ) else {
-                return;
-            };
-            // SAFETY: `avx2` was just detected, and both rows are `width` long,
-            // so no load or store reaches outside them.
-            unsafe { blur_row_avx2(source_row, target_row, weights, radius) };
-        }
-        return;
-    }
-
-    for row in 0..plane.height {
-        let start = row * width;
-        let (Some(source_row), Some(target_row)) = (
-            source.get(start..start + width),
-            target.get_mut(start..start + width),
-        ) else {
-            return;
-        };
-        blur_row(source_row, target_row, weights, radius);
-    }
-}
-
-/// The vertical pass with one accumulator per eight column block.
-///
-/// Every product and every sum is the instruction the scalar loop uses, in the
-/// same tap order and from the same zero start, so the result is the same
-/// bytes; what changes is that the partial sum stays in a register across the
-/// taps and the block is written once. `accumulate_avx2` reloads and stores
-/// that partial sum per tap, and detects the feature per tap as well.
-///
-/// The reflected source offsets are resolved once per output row into a fixed
-/// array, so there is no per-tap `reflect` and no per-row heap vector. The row
-/// tail goes through the same offsets one lane at a time.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-#[expect(
-    unsafe_op_in_unsafe_fn,
-    reason = "the body is one unsafe operation, and it is entered only after the feature is detected"
-)]
-unsafe fn accumulate_register_rows(
-    source: &[f32],
-    target: &mut [f32],
-    plane: Plane,
-    weights: &[f32],
-    radius: usize,
-) {
-    use std::arch::x86_64::*;
-
-    let width = plane.width;
+    let height = plane.height;
     let taps = weights.len().min(MAX_KERNEL_TAPS);
-    let mut rows: [*const f32; MAX_KERNEL_TAPS] = [std::ptr::null(); MAX_KERNEL_TAPS];
-    let base = source.as_ptr();
+    if width == 0 || height == 0 || taps == 0 {
+        return;
+    }
+    let ring_rows = ring_rows(radius, height);
+    if temp.len() < ring_rows * width {
+        return;
+    }
 
-    for row in 0..plane.height {
-        let interior = row >= radius && row + radius < plane.height;
+    #[cfg(target_arch = "x86_64")]
+    let vector = is_x86_feature_detected!("avx2");
+    #[cfg(not(target_arch = "x86_64"))]
+    let vector = false;
+
+    // The source row each slot holds now, or `usize::MAX` while it holds
+    // nothing. Local to one gaussian, so no frame state outlives a call.
+    let mut held = [usize::MAX; MAX_KERNEL_TAPS];
+    let mut rows: [*const f32; MAX_KERNEL_TAPS] = [std::ptr::null(); MAX_KERNEL_TAPS];
+
+    for row in 0..height {
+        let interior = row >= radius && row + radius < height;
         for (index, slot) in rows.iter_mut().enumerate().take(taps) {
             let tap = if interior {
                 row + index - radius
             } else {
-                reflect(
-                    row as isize + index as isize - radius as isize,
-                    plane.height,
-                )
+                reflect(row as isize + index as isize - radius as isize, height)
             };
-            *slot = base.add(tap * width);
+            let ring_slot = tap % ring_rows;
+            if held[ring_slot] != tap {
+                let Some(source_row) = source.get(tap * width..tap * width + width) else {
+                    return;
+                };
+                let Some(ring_row) = temp.get_mut(ring_slot * width..ring_slot * width + width)
+                else {
+                    return;
+                };
+                filter_row(source_row, ring_row, weights, radius, vector);
+                held[ring_slot] = tap;
+            }
+            // The slot was just filled, so its address is a `width` sample row
+            // inside `temp`. `temp` is never reallocated here, so the pointer
+            // stays valid until the vertical pass reads it.
+            match temp.get(ring_slot * width..ring_slot * width + width) {
+                Some(ring_row) => *slot = ring_row.as_ptr(),
+                None => return,
+            }
         }
 
-        let start = row * width;
-        let Some(target_row) = target.get_mut(start..start + width) else {
+        let Some(target_row) = target.get_mut(row * width..row * width + width) else {
             return;
         };
-        let target_base = target_row.as_mut_ptr();
+        // SAFETY: every entry of `rows[..taps]` addresses a `width` sample row
+        // inside `temp`, which is a distinct allocation from `target`.
+        unsafe { accumulate_row(&rows, taps, target_row, weights, vector) };
+    }
+}
 
-        // SAFETY: every source row is `width` samples and the arrays hold
-        // `width * height`, so the loads and the store stay inside them, and
-        // `rows` holds an offset for every index below `taps`.
-        unsafe {
-            let mut column = 0;
-            while column + 8 <= width {
-                let mut sum = _mm256_setzero_ps();
-                for index in 0..taps {
-                    let tap = _mm256_loadu_ps(rows.get_unchecked(index).add(column));
-                    let weight = _mm256_set1_ps(*weights.get_unchecked(index));
-                    sum = _mm256_add_ps(sum, _mm256_mul_ps(tap, weight));
-                }
-                _mm256_storeu_ps(target_base.add(column), sum);
-                column += 8;
+/// How many filtered rows the ring holds for one gaussian.
+fn ring_rows(radius: usize, height: usize) -> usize {
+    (2 * radius + 1).min(height)
+}
+
+/// Filters one source row into one ring row.
+///
+/// The caller hoists the x86-64 feature check, so this branches on a bool
+/// rather than detecting the feature once per row.
+#[inline]
+fn filter_row(source: &[f32], target: &mut [f32], weights: &[f32], radius: usize, vector: bool) {
+    #[cfg(target_arch = "x86_64")]
+    if vector {
+        // SAFETY: the caller detected `avx2` for this plane, and both rows are
+        // `target.len()` samples.
+        unsafe { blur_row_avx2(source, target, weights, radius) };
+        return;
+    }
+    let _ = vector;
+    blur_row(source, target, weights, radius);
+}
+
+/// The vertical pass for one output row, one accumulator per eight columns.
+///
+/// Every product and every sum is the instruction the per-tap loop uses, in the
+/// same tap order and from the same zero start, so the result is the same bytes;
+/// what changes is that the partial sum stays in a register across the taps and
+/// the block is written once.
+///
+/// # Safety
+///
+/// Every entry of `rows[..taps]` must address at least `target_row.len()`
+/// readable `f32` samples, and none of them may overlap `target_row`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn vertical_row_registers(
+    rows: &[*const f32; MAX_KERNEL_TAPS],
+    taps: usize,
+    target_row: &mut [f32],
+    weights: &[f32],
+) {
+    use std::arch::x86_64::*;
+
+    let width = target_row.len();
+    let target_base = target_row.as_mut_ptr();
+
+    // SAFETY: the caller resolved every row to `width` readable samples.
+    unsafe {
+        let mut column = 0;
+        while column + 8 <= width {
+            let mut sum = _mm256_setzero_ps();
+            for index in 0..taps {
+                let tap = _mm256_loadu_ps(rows.get_unchecked(index).add(column));
+                let weight = _mm256_set1_ps(*weights.get_unchecked(index));
+                sum = _mm256_add_ps(sum, _mm256_mul_ps(tap, weight));
             }
-            while column < width {
-                let mut sum = 0.0f32;
-                for index in 0..taps {
-                    sum += *rows.get_unchecked(index).add(column) * weights.get_unchecked(index);
-                }
-                *target_base.add(column) = sum;
-                column += 1;
+            _mm256_storeu_ps(target_base.add(column), sum);
+            column += 8;
+        }
+        while column < width {
+            let mut sum = 0.0f32;
+            for index in 0..taps {
+                sum += *rows.get_unchecked(index).add(column) * weights.get_unchecked(index);
             }
+            *target_base.add(column) = sum;
+            column += 1;
         }
     }
+}
+
+/// The vertical pass for one output row, one tap at a time.
+///
+/// This covers a kernel longer than `REGISTER_TAPS` and a target without AVX2.
+/// AVX2 still handles each tap eight lanes wide where it is available.
+///
+/// # Safety
+///
+/// Every entry of `rows[..taps]` must address at least `target_row.len()`
+/// readable `f32` samples, and none of them may overlap `target_row`.
+unsafe fn vertical_row_per_tap(
+    rows: &[*const f32; MAX_KERNEL_TAPS],
+    taps: usize,
+    target_row: &mut [f32],
+    weights: &[f32],
+    vector: bool,
+) {
+    let _ = vector;
+    target_row.fill(0.0);
+    for index in 0..taps {
+        let Some(weight) = weights.get(index).copied() else {
+            return;
+        };
+        // SAFETY: the caller resolved every row to `target_row.len()` samples.
+        let tap_row =
+            unsafe { std::slice::from_raw_parts(*rows.get_unchecked(index), target_row.len()) };
+        #[cfg(target_arch = "x86_64")]
+        if vector {
+            // SAFETY: both rows are `target_row.len()` long.
+            unsafe { accumulate_avx2(target_row, tap_row, weight) };
+            continue;
+        }
+        for (value, tap) in target_row.iter_mut().zip(tap_row) {
+            *value += tap * weight;
+        }
+    }
+}
+
+/// Runs the vertical pass for one output row from resolved source rows.
+///
+/// # Safety
+///
+/// Every entry of `rows[..taps]` must address at least `target_row.len()`
+/// readable `f32` samples, and none of them may overlap `target_row`.
+#[inline]
+unsafe fn accumulate_row(
+    rows: &[*const f32; MAX_KERNEL_TAPS],
+    taps: usize,
+    target_row: &mut [f32],
+    weights: &[f32],
+    vector: bool,
+) {
+    #[cfg(target_arch = "x86_64")]
+    if vector && taps <= REGISTER_TAPS {
+        // SAFETY: the caller resolved every row.
+        unsafe { vertical_row_registers(rows, taps, target_row, weights) };
+        return;
+    }
+    // SAFETY: the caller resolved every row.
+    unsafe { vertical_row_per_tap(rows, taps, target_row, weights, vector) };
 }
 
 /// `target[i] += tap[i] * weight`, eight lanes at a time.
@@ -1295,16 +1333,30 @@ mod tests {
             let source: Vec<f32> = (0..width * height)
                 .map(|_| (next() % 4096) as f32 - 2048.0)
                 .collect();
-            for sigma in [0.45f32, 0.5, 0.8, 2.0] {
+            for sigma in [0.45f32, 0.5, 0.8, 2.0, 16.0] {
                 let mut weights = Vec::new();
                 let radius = build_kernel(sigma, &mut weights);
                 let plane = Plane { width, height };
+                let taps = weights.len();
                 let mut want = vec![0.0f32; source.len()];
-                let mut got = vec![0.0f32; source.len()];
                 vertical_scalar(&source, &mut want, plane, &weights, radius);
-                // SAFETY: `avx2` was just detected, and the plane is
-                // `width * height` samples in both directions.
-                unsafe { accumulate_register_rows(&source, &mut got, plane, &weights, radius) };
+                let mut got = vec![0.0f32; source.len()];
+
+                for row in 0..height {
+                    let mut rows: [*const f32; MAX_KERNEL_TAPS] =
+                        [std::ptr::null(); MAX_KERNEL_TAPS];
+                    for (index, slot) in rows.iter_mut().enumerate().take(taps) {
+                        // `reflect` leaves an in-range index alone, so this is
+                        // the same row set the vertical pass resolves.
+                        let tap = reflect(row as isize + index as isize - radius as isize, height);
+                        *slot = source[tap * width..].as_ptr();
+                    }
+                    let target_row = &mut got[row * width..row * width + width];
+                    // SAFETY: every row points at `width` samples inside
+                    // `source`, which does not overlap `got`.
+                    unsafe { accumulate_row(&rows, taps, target_row, &weights, true) };
+                }
+
                 let bits = |values: &[f32]| {
                     values
                         .iter()
@@ -1315,6 +1367,76 @@ mod tests {
                     bits(&got),
                     bits(&want),
                     "{width}x{height} sigma {sigma} moved"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_ring_temp_matches_a_whole_plane_temp() {
+        // The ring holds `min(height, 2 * radius + 1)` filtered rows and reuses
+        // them, so this is the check that moving the window never serves a stale
+        // row. A 64x129 plane at sigma 2 keeps seventeen rows for 129 output
+        // rows, which is the reuse case; sigma 16 needs all 129, which is the
+        // whole-plane case; the short planes store every row they have.
+        let mut state = 0x2026_1003u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        for (width, height) in [
+            (1usize, 1usize),
+            (9, 3),
+            (17, 9),
+            (37, 5),
+            (64, 129),
+            (129, 64),
+        ] {
+            let source: Vec<f32> = (0..width * height)
+                .map(|_| (next() % 4096) as f32 - 2048.0)
+                .collect();
+            for sigma in [0.45f32, 0.5, 0.8, 2.0, 16.0] {
+                let mut weights = Vec::new();
+                let radius = build_kernel(sigma, &mut weights);
+                let plane = Plane { width, height };
+
+                let mut whole_temp = vec![0.0f32; width * height];
+                let mut whole = vec![0.0f32; width * height];
+                blur(
+                    &source,
+                    &mut whole,
+                    &mut whole_temp,
+                    plane,
+                    &weights,
+                    radius,
+                );
+
+                let ring = ring_rows(radius, height) * width;
+                let mut ring_temp = vec![0.0f32; ring];
+                let mut ringed = vec![0.0f32; width * height];
+                blur(
+                    &source,
+                    &mut ringed,
+                    &mut ring_temp,
+                    plane,
+                    &weights,
+                    radius,
+                );
+
+                let bits = |values: &[f32]| {
+                    values
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>()
+                };
+                assert_eq!(
+                    bits(&ringed),
+                    bits(&whole),
+                    "{width}x{height} sigma {sigma} with {} ring rows moved",
+                    ring_rows(radius, height)
                 );
             }
         }

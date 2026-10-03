@@ -1,6 +1,7 @@
 # streaming blur scratch
 
-status: not implemented. larger implementation, explicit memory target.
+status: implemented. the ring replaces the full horizontal plane and removes
+13.6% of peak rss at a thirteen frame fan-in.
 
 ## current cost
 
@@ -55,8 +56,8 @@ or shrink all pooled buffers at the same time as this experiment.
 
 ## result
 
-status: not implemented. the objective is real and now measured, 91% of peak rss
-at a small cache; the change is the largest in the review and the plan is below.
+status: implemented. the ring removes 44.4 MiB per workspace and 13.6% of peak
+rss at a thirteen frame fan-in; no throughput change is claimed.
 
 `Workspace` holds five `f32` planes sized `width * height`: `luma`, `first`,
 `second`, `third` and `temp`. that is 20 bytes a sample, so a 12 megapixel
@@ -119,29 +120,70 @@ planes, 20% of a workspace, which is about 119 MiB off this 652 MiB peak and
 proportionally less of the bench's 969 MiB.
 
 so the memory objective is measured rather than assumed, and it is real: the
-workspace dominates `Deblur`'s peak at a small cache. this table says nothing
-about throughput, since it is one pull per case. the decision now rests on the
-implementation cost and its wrong-pixel risk, not on whether the saving exists.
+workspace dominates `Deblur`'s peak at a small cache.
 
-the reason this is deferred rather than attempted and reverted: it cannot be
-landed as a local change to `blur` alone. `blur_row_avx2` writes one horizontal
-row, and the vertical pass needs a window of `2 * radius + 1` of those rows per
-output row, so either the producer runs ahead of the consumer or the vertical
-loop has to drive the horizontal one. a ring that recomputed its window per
-output row would pay the horizontal pass `2 * radius + 1` times, and at radius
-3 that is seven times the filter's hottest loop; the alternative is a
-slot-to-source-row map, which is the part that can silently read the wrong row.
-this is the one candidate in the review whose failure mode is a wrong pixel
-rather than a slower frame, so it needs its own round rather than the end of
-this one.
+## implementation
 
-the plan, in the order the review sets: replace only `temp`, keep the other four
-planes and every candidate, mask and blend stage as they are; allocate the ring
-with checked arithmetic and a fallible reservation, reusing it across frames
-sized for the largest active kernel; track each ring slot's source row identity
-rather than trusting modulo addressing; fall back to storing every row when the
-plane is shorter than the kernel. then compare blur output bits for tiny, odd,
-tall and large planes through all kernel lengths, and measure 1/2/4/8 concurrent
-full frames at the same cache budget plus the largest-to-smallest sequence. the
-unit and hash harnesses from 05 and 06 apply unchanged, because both preserve
-the arithmetic order.
+`Workspace::temp` is now a ring of `min(height, MAX_KERNEL_TAPS)` rows instead of
+a whole plane, and `blur` drives the vertical pass one output row at a time from
+rows it filters on demand. the four other planes, the candidates, the mask and
+the blend are untouched.
+
+the part the review flagged as the wrong-pixel risk is the slot addressing, so it
+is resolved rather than assumed: `slot = source_row % ring_rows`, and the window
+one output row consumes is a run of at most `ring_rows` consecutive source rows.
+a run of at most `n` consecutive integers has distinct residues modulo `n`, so no
+two rows of a window can share a slot. that holds for the reflected borders too:
+a border window's distinct rows are a subset of the run, so they stay distinct.
+each slot also records which source row it holds, and a row is filtered only when
+that record disagrees, which is what makes a reused slot safe rather than merely
+likely. `ring_rows == height` for a plane shorter than the kernel, which makes
+the ring the whole plane and the path identical.
+
+the x86-64 feature check moved to the top of `blur`, once per gaussian. the
+previous shape already did that; the per-row loop would have been the 49.5k-times
+mistake the horizontal attempt made.
+
+## measured, after
+
+same protocol as the table above: one process per case, `median` of three runs,
+2903x4128, cache 32 MiB. the `before` column is the whole-plane `temp` build
+measured the same way, in the same session pair.
+
+| case | frames | before peak rss | after peak rss | before wall | after wall |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| control | 1 | 54.6 MiB | 54.5 MiB | 17.6 ms | 14.4 ms |
+| control | 13 | 194.4 MiB | 194.4 MiB | 240.5 ms | 217.9 ms |
+| `Deblur` | 1 | 283.2 MiB | **238.8 MiB** | 199.3 ms | 157.4 ms |
+| `Deblur` | 13 | 651.5 MiB | **563.0 MiB** | 1924.3 ms | 1934.5 ms |
+
+one workspace costs 44.4 MiB less: 283.2 to 238.8 MiB for a single frame against
+a control that is unchanged at 54.5 MiB. that is the ring replacing a whole plane
+with 129 rows, four planes of 228.6 MiB plus a 1.5 MB ring, and it is the saving
+the plan predicted rather than a new one.
+
+at 13 frames in flight the peak falls 651.5 to 563.0 MiB, 13.6%, while the
+scratch-free control is flat at 194.4 MiB. peak rss is a high-water mark and moved
+by under 0.3 MiB across runs, so that column is solid.
+
+the wall column is not. the control's own wall moved 17.6 to 14.4 ms at one frame
+and 240.5 to 217.9 ms at thirteen with no code change between the two sessions,
+which is a larger drift than `Deblur`'s 0.5% at thirteen frames. this measurement
+cannot resolve a throughput change at this size, so none is claimed, and the
+review's latency question stays open rather than answered in either direction.
+
+## correctness
+
+the twelve case Deblur hash harness reports the same hashes as before the change,
+on 8, 16 and 32 bit planes and both `NaN` pages. `cargo test --locked` passes 96
+unit and 11 golden tests, including one that compares a ring-sized `temp` against
+a whole-plane one bit for bit at six shapes and five sigmas, which covers the reuse
+case, the whole-plane case and the reflected borders. `cargo clippy --all-targets
+--locked -- -D warnings` and `cargo fmt --check` are clean and
+`tests/check-nimages.py` passes its 2150 checks.
+
+what the earlier plan asked for and this does not do: two, four and eight
+concurrent full frames at the same cache budget, and a largest-to-smallest frame
+sequence through one workspace. the pool grows and a smaller frame reuses the
+larger frame's buffers, and the ring is sized per blur rather than per workspace,
+so the sequence case is exercised by the size boundary test rather than measured.
