@@ -166,6 +166,14 @@ pub fn lloyd_max_levels(counts: &[u64], colors: usize) -> Result<Vec<f64>, Poste
 
         // Every interior level moves to the mean of its bucket. Both ends are
         // pinned, which is the reference's `range(1, colors - 1)`.
+        //
+        // A pass that leaves every level at the same bits cannot move the next
+        // one: identical levels give identical bucket starts, those starts
+        // query the same untouched prefix sums, and the same means come back.
+        // The loop exits there, so the remaining passes would rewrite the same
+        // numbers. `to_bits` is the exact test; an epsilon or a comparison of
+        // the rounded table would stop on a pass that still moves a level.
+        let mut changed = false;
         for index in 1..last {
             let low = starts[index];
             let high = starts[index + 1];
@@ -174,7 +182,15 @@ pub fn lloyd_max_levels(counts: &[u64], colors: usize) -> Result<Vec<f64>, Poste
                 continue;
             }
             let total = totals_before[high].saturating_sub(totals_before[low]);
-            levels[index] = total as f64 / weight as f64;
+            let mean = total as f64 / weight as f64;
+            let level = levels[index];
+            if mean.to_bits() != level.to_bits() {
+                changed = true;
+                levels[index] = mean;
+            }
+        }
+        if !changed {
+            break;
         }
     }
 
@@ -476,6 +492,120 @@ mod tests {
                 levels.windows(2).all(|pair| pair[0] < pair[1]),
                 "colors {colors} is not ascending: {levels:?}"
             );
+        }
+    }
+
+    /// Drops the pass counter, so the fixed-point exit can be compared against
+    /// a build that never exits early. Everything else is the shipped solver.
+    fn lloyd_with_a_pass_budget(
+        counts: &[u64],
+        colors: usize,
+        budget: u32,
+    ) -> Result<Vec<f64>, PosterizeError> {
+        let code_values = counts.len();
+        let max_value = code_values
+            .checked_sub(1)
+            .ok_or(PosterizeError::InvalidBits)?;
+        if colors < 2 || colors > code_values {
+            return Err(PosterizeError::InvalidBits);
+        }
+
+        let last = colors - 1;
+        let mut levels: Vec<f64> = Vec::new();
+        let mut counts_before: Vec<u64> = Vec::new();
+        let mut totals_before: Vec<u64> = Vec::new();
+        let mut starts: Vec<usize> = Vec::new();
+        levels.try_reserve_exact(colors).expect("levels");
+        counts_before
+            .try_reserve_exact(code_values + 1)
+            .expect("counts");
+        totals_before
+            .try_reserve_exact(code_values + 1)
+            .expect("totals");
+        starts.try_reserve_exact(colors + 1).expect("starts");
+
+        for index in 0..colors {
+            levels.push(max_value as f64 * index as f64 / last as f64);
+        }
+
+        let mut running_counts = 0u64;
+        let mut running_totals = 0u64;
+        counts_before.push(0);
+        totals_before.push(0);
+        for (value, &weight) in counts.iter().enumerate() {
+            running_counts = running_counts.saturating_add(weight);
+            running_totals = running_totals.saturating_add(weight.saturating_mul(value as u64));
+            counts_before.push(running_counts);
+            totals_before.push(running_totals);
+        }
+
+        for _ in 0..budget {
+            fill_bucket_starts(&levels, max_value, &mut starts);
+            for index in 1..last {
+                let low = starts[index];
+                let high = starts[index + 1];
+                let weight = counts_before[high].saturating_sub(counts_before[low]);
+                if weight == 0 {
+                    continue;
+                }
+                let total = totals_before[high].saturating_sub(totals_before[low]);
+                levels[index] = total as f64 / weight as f64;
+            }
+        }
+
+        Ok(levels)
+    }
+
+    #[test]
+    fn lloyd_the_fixed_point_exit_matches_the_full_pass_budget() {
+        // The stopping rule is exact rather than approximate, so a solver that
+        // breaks on an unchanged pass has to return the same bits as one that
+        // keeps going to the pass limit.
+        let mut state = 0x2026_1003u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        let mut histograms: Vec<[u64; 256]> = Vec::new();
+        histograms.push(core::array::from_fn(|_| 1));
+        histograms.push(core::array::from_fn(|index| {
+            u64::from(index == 40 || index == 200)
+        }));
+        histograms.push(core::array::from_fn(|index| {
+            u64::from(!(40..=210).contains(&index))
+        }));
+        for _ in 0..8 {
+            histograms.push(core::array::from_fn(|_| next() % 4096));
+        }
+        for _ in 0..8 {
+            histograms.push(core::array::from_fn(|index| {
+                let cluster = index / 32;
+                next() % (1 << (cluster + 1))
+            }));
+        }
+
+        for counts in &histograms {
+            for colors in [2usize, 3, 4, 16, 64, 256] {
+                let Ok(exhaustive) = lloyd_with_a_pass_budget(counts, colors, LLOYD_ITERATIONS)
+                else {
+                    continue;
+                };
+                let early = lloyd_max_levels(counts, colors).expect("valid colors");
+                let bits = |values: &[f64]| {
+                    values
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>()
+                };
+                assert_eq!(
+                    bits(&early),
+                    bits(&exhaustive),
+                    "colors {colors} moved with the early exit"
+                );
+            }
         }
     }
 
