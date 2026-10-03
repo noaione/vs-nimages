@@ -81,10 +81,16 @@ which is 4 MB here as `GRAY8` and 8 MB as `GRAY16`.
 
 the change is not free either: it replaces one `copy_frame` call with a fresh
 allocation for Gray and RGB and a `new_video_frame2` with a plane-source array
-for YUV, plus a rewrite of `write_plane` and `write_rgb` to read each output
-plane's own stride. that touches every format family to chase a fraction of one
-to four milliseconds, under the 5% throughput bar the review sets. reverted to
-the copy path, which is what the current build uses.
+for YUV, so it touches every format family to chase a fraction of a
+millisecond.
+
+the 12 dispatch work then made the case weaker, not stronger. `write_plane`
+now dispatches once per plane by sample width and writes through
+`as_chunks_mut`, which took the stage from 18.59 to 11.39 ms in the first A/B
+round recorded in [12-deblur-conversion-dispatch.md](12-deblur-conversion-dispatch.md).
+a raw 4 MB copy is 0.21 ms and an 8 MB copy 0.718 ms on this machine, so the
+copy is now about 6% of the stage and a tenth of a percent of the frame.
+the write path stays on `copy_frame`, which is what the current build uses.
 
 `cargo test --locked`, `cargo clippy --all-targets --locked -- -D warnings`,
 `cargo fmt --check` and `tests/check-nimages.py` all pass unchanged on the
