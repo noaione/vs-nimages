@@ -46,7 +46,7 @@ and 12.
 | 5 | 09 striped histogram counters | kept for 8 bits | 1.67x median on 16 real planes with none regressing; 16-bit excluded, 0.67x flat and 0.36x noise |
 | 6 | 10 fresh Deblur output planes | deferred | `write` is 10.8 to 12.2 ms of a 46 to 156 ms frame, and the copy is part of that |
 | 7 | 11 streaming blur scratch | not implemented | 48 MB per concurrent frame at 12 Mpx, pinned and planned in its record |
-| 8 | 12 Deblur conversion dispatch | deferred | `luma` plus `write` is 9% to 11% of a `method=0` frame, and the same-shaped rewrite already regressed threefold |
+| 8 | 12 Deblur conversion dispatch | kept | the write stage halves, 18.59 to 11.39 ms and 21.86 to 9.15 ms over two rounds, at the same bytes |
 | 9 | 13 peak prominence pruning | kept | same winner in six workloads, 228,000 to 76,000 prominence scans |
 
 the two combinations the review asked for separately are both in place and were

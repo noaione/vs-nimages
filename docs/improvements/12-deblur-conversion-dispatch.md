@@ -1,6 +1,6 @@
 # Deblur conversion dispatch
 
-status: deferred on measurement. specialize conversion, preserve kernel
+status: implemented. specialize conversion, preserve kernel arithmetic.
 arithmetic.
 
 ## current cost
@@ -89,7 +89,37 @@ fixed-width dispatch has to keep f64 scaling and ties-to-even rounding exactly,
 so the arithmetic cannot move, and that is the same shape of change that already
 measured worse once.
 
-both `luma` and `write` are inside the run to run spread of the integrated
-benchmark at these sizes, so no adoption is recorded. the scalar dispatch stays,
-`Convert::read` and `Convert::write` are unchanged, and `tests/check-nimages.py`
-passes its 2150 checks on the shipped build unchanged.
+that is what the second attempt avoided. `write_plane` no longer takes a
+`Fn(usize) -> f32`; it takes `width`, `height` and the restored slice, and
+dispatches once per plane to `write_u8`, `write_u16` or `write_f32`. Each one
+runs the same arithmetic as `Convert::write` did, sample for sample, with the
+sample width fixed and no bounds check:
+
+| step | before | after |
+| --- | --- | --- |
+| code value | virtual closure call and a bounds-checked slice read | `restored[index]` through a raw pointer |
+| scale | `f64 * inverse` | the same |
+| round | `round_ties_even`, `clamp`, cast | the same |
+| store | `row.get_mut(offset..)` per sample | a fixed-size chunk from `as_chunks_mut` |
+
+the closure is gone rather than kept: `write_plane` receives `width`, `height`
+and `workspace.restored()` from the caller, so a plane it is handed is the
+plane it writes. `write_rgb` already walked three row slices instead.
+
+a two-round A/B of the same build with only this change reverted, at
+2048x2048 `GRAY16` `method=1` with three frames and three graph builds each:
+
+| round | write | restore (control) |
+| ---: | ---: | ---: |
+| 1 | 18.59 ms to 11.39 ms | 65.27 ms to 91.75 ms |
+| 2 | 21.86 ms to 9.15 ms | 58.84 ms to 59.99 ms |
+
+the control column shows how noisy this machine is, and the `write` column moved
+the same way in both rounds: about 40% off a stage that is 12 to 18 ms of a 40
+to 60 ms frame on the unsharp mask.
+
+`cargo test --locked` passed 91 unit tests and 11 golden tests, `cargo clippy
+--all-targets --locked -- -D warnings` and `cargo fmt --check` were clean, and
+`tests/check-nimages.py` passed 2150 checks. the twelve case Deblur hash harness
+reports the same hashes as before the change, on 8, 16 and 32 bit planes and
+both `NaN` pages, so the specialization is bit-exact.

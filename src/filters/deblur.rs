@@ -185,12 +185,19 @@ impl Filter for Deblur {
                         &input,
                         &mut output,
                         &convert,
+                        width,
+                        height,
                         workspace.luma(),
                         workspace.restored(),
                     )?,
-                    _ => write_plane(&mut output, 0, &convert, |index| {
-                        workspace.restored().get(index).copied().unwrap_or(0.0)
-                    })?,
+                    _ => write_plane(
+                        &mut output,
+                        0,
+                        &convert,
+                        width,
+                        height,
+                        workspace.restored(),
+                    )?,
                 }
                 trace.mark("write", mark);
 
@@ -384,29 +391,36 @@ fn round_ties_even(value: f64) -> f64 {
 }
 
 /// Writes the luma the kernels produced back into one plane.
-fn write_plane<F: Fn(usize) -> f32>(
+///
+/// The plane's own sample width picks the loop body once, and `restored`
+/// supplies the code values by index. `width` and `height` are the frame's
+/// own, so a fresh allocation and a copied frame are both read for themselves.
+fn write_plane(
     output: &mut VideoFrame,
     plane: i32,
     convert: &Convert,
-    code: F,
+    width: usize,
+    height: usize,
+    restored: &[f32],
 ) -> Result<()> {
-    let width = usize::try_from(output.frame_width(plane))
-        .map_err(|_| NImagesError::new(format!("Deblur: plane {plane} has a negative width")))?;
-    let (stride, height) = plane_shape(output, plane)?;
+    let (stride, _) = plane_shape(output, plane)?;
     if width == 0 || height == 0 {
         return Ok(());
     }
-    let row_bytes = width
-        .checked_mul(convert.bytes)
-        .ok_or_else(|| NImagesError::new(format!("Deblur: plane {plane} row is too large")))?;
+    let row_bytes = row_bytes_of(width, convert.bytes)?;
     if row_bytes > stride {
         return Err(NImagesError::new(format!(
             "Deblur: plane {plane} needs {row_bytes} row bytes but its stride is {stride}"
         )));
     }
-    let length = stride.checked_mul(height).ok_or_else(|| {
-        NImagesError::new("Deblur: the output plane is larger than the address space")
-    })?;
+    let expected = width
+        .checked_mul(height)
+        .ok_or_else(|| NImagesError::new("Deblur: the frame is larger than the address space"))?;
+    if restored.len() < expected {
+        return Err(NImagesError::new(
+            "Deblur: the restored plane is smaller than the frame",
+        ));
+    }
     let pointer = output.plane_mut(plane);
     if pointer.is_null() {
         return Err(NImagesError::new(format!(
@@ -414,22 +428,127 @@ fn write_plane<F: Fn(usize) -> f32>(
         )));
     }
 
-    // SAFETY: the output frame owns a writable plane buffer of `stride * height`
-    // bytes, the caller holds the frame, and every offset below stays inside
-    // `row_bytes` of its own row.
-    let bytes = unsafe { std::slice::from_raw_parts_mut(pointer, length) };
+    let values = restored;
+
     for row in 0..height {
         let start = row * stride;
-        let Some(target) = bytes.get_mut(start..start + row_bytes) else {
-            return Err(NImagesError::new(format!(
-                "Deblur: plane {plane} is smaller than its reported stride"
-            )));
-        };
-        for column in 0..width {
-            convert.write(target, column, code(row * width + column));
+        let source = values.as_ptr().wrapping_add(row * width);
+        // SAFETY: the output frame owns a writable plane of `stride * height`
+        // bytes, `row_bytes` was checked against that stride, and every write
+        // below stays inside one row. `source` is valid for `width` reads at
+        // every row.
+        unsafe {
+            let row = output_plane_row(pointer, start, row_bytes);
+            match convert.bytes {
+                1 => write_u8(row, source, width, convert),
+                2 => write_u16(row, source, width, convert),
+                _ => write_f32(row, source, width, convert),
+            }
         }
     }
     Ok(())
+}
+
+/// One row of a plane the caller holds a writable pointer to.
+///
+/// # Safety
+///
+/// `pointer` must come from a plane of a live output frame, and the row at
+/// `start` must be at least `row_bytes` long inside it.
+#[expect(
+    unsafe_op_in_unsafe_fn,
+    reason = "the body is one unsafe operation, and the caller has checked the row"
+)]
+unsafe fn output_plane_row(pointer: *mut u8, start: usize, row_bytes: usize) -> &'static mut [u8] {
+    std::slice::from_raw_parts_mut(pointer.add(start), row_bytes)
+}
+
+/// Writes one row of 8 bit samples.
+///
+/// The arithmetic is `Convert::write`'s, sample for sample: the code value is
+/// scaled in `f64`, rounded ties to even, clamped to the format's maximum and
+/// cast. Here the sample width is one byte, so the multiply, the rounding and
+/// the store are the only work per sample, with no bounds check.
+///
+/// # Safety
+///
+/// `row` must hold at least `width` bytes and `source` must hold at least
+/// `width` code values.
+#[expect(
+    unsafe_op_in_unsafe_fn,
+    reason = "the body is one unsafe operation, and the caller has checked the row"
+)]
+unsafe fn write_u8(row: &mut [u8], source: *const f32, width: usize, convert: &Convert) {
+    let inverse = convert.inverse;
+    let max_value = convert.max_value;
+    if convert.float {
+        for (index, target) in row.iter_mut().enumerate().take(width) {
+            let value = (f64::from(*source.add(index)) * inverse) as f32;
+            *target = value as u8;
+        }
+        return;
+    }
+    for (index, target) in row.iter_mut().enumerate().take(width) {
+        let scaled = f64::from(*source.add(index)) * inverse;
+        *target = round_ties_even(scaled).clamp(0.0, max_value) as u8;
+    }
+}
+
+/// Writes one row of 16 bit samples.
+///
+/// # Safety
+///
+/// `row` must hold at least `width * 2` bytes and `source` must hold at least
+/// `width` code values.
+#[expect(
+    unsafe_op_in_unsafe_fn,
+    reason = "the body is one unsafe operation, and the caller has checked the row"
+)]
+unsafe fn write_u16(row: &mut [u8], source: *const f32, width: usize, convert: &Convert) {
+    let inverse = convert.inverse;
+    let max_value = convert.max_value;
+    for (index, target) in row
+        .as_chunks_mut::<2>()
+        .0
+        .iter_mut()
+        .enumerate()
+        .take(width)
+    {
+        let scaled = f64::from(*source.add(index)) * inverse;
+        let value = round_ties_even(scaled).clamp(0.0, max_value) as u16;
+        target.copy_from_slice(&value.to_ne_bytes());
+    }
+}
+
+/// Writes one row of 32 bit float samples.
+///
+/// # Safety
+///
+/// `row` must hold at least `width * 4` bytes and `source` must hold at least
+/// `width` code values.
+#[expect(
+    unsafe_op_in_unsafe_fn,
+    reason = "the body is one unsafe operation, and the caller has checked the row"
+)]
+unsafe fn write_f32(row: &mut [u8], source: *const f32, width: usize, convert: &Convert) {
+    let inverse = convert.inverse;
+    for (index, target) in row
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .enumerate()
+        .take(width)
+    {
+        let value = (f64::from(*source.add(index)) * inverse) as f32;
+        target.copy_from_slice(&value.to_ne_bytes());
+    }
+}
+
+/// The row size of a plane, or an error when it cannot be represented.
+fn row_bytes_of(width: usize, bytes: usize) -> Result<usize> {
+    width
+        .checked_mul(bytes)
+        .ok_or_else(|| NImagesError::new("Deblur: a plane row is too large"))
 }
 
 /// Reads the kernels' luma plane from a frame, in 8 bit code values.
@@ -520,41 +639,37 @@ fn write_rgb(
     input: &VideoFrame,
     output: &mut VideoFrame,
     convert: &Convert,
+    width: usize,
+    height: usize,
     luma: &[f32],
     restored: &[f32],
 ) -> Result<()> {
-    let mut sources: [&[u8]; 3] = [&[]; 3];
-    let mut stride = 0usize;
-    let mut width = 0usize;
-    let mut height = 0usize;
-    for plane in 0..3i32 {
-        let (bytes, plane_stride) = plane_bytes(input, plane)?;
-        let row_width = usize::try_from(input.frame_width(plane))
+    let mut planes: [(&[u8], usize); 3] = [(&[], 0); 3];
+    for (plane, slot) in planes.iter_mut().enumerate() {
+        let (bytes, plane_stride) = plane_bytes(input, plane as i32)?;
+        let row_width = usize::try_from(input.frame_width(plane as i32))
             .map_err(|_| NImagesError::new("Deblur: an RGB plane has a negative width"))?;
-        let row_height = usize::try_from(input.frame_height(plane))
+        let row_height = usize::try_from(input.frame_height(plane as i32))
             .map_err(|_| NImagesError::new("Deblur: an RGB plane has a negative height"))?;
-        if plane > 0 && (row_width != width || row_height != height || plane_stride != stride) {
+        if row_width != width || row_height != height {
             return Err(NImagesError::new(
                 "Deblur: the RGB planes do not share one geometry",
             ));
         }
-        width = row_width;
-        height = row_height;
-        stride = plane_stride;
-        if let Some(slot) = sources.get_mut(plane as usize) {
-            *slot = bytes;
-        }
+        *slot = (bytes, plane_stride);
     }
     if width == 0 || height == 0 {
         return Ok(());
     }
-    let row_bytes = width
-        .checked_mul(convert.bytes)
-        .ok_or_else(|| NImagesError::new("Deblur: an RGB plane row is too large"))?;
-    if row_bytes > stride {
-        return Err(NImagesError::new(format!(
-            "Deblur: an RGB plane needs {row_bytes} row bytes but its stride is {stride}"
-        )));
+    let stride = planes[0].1;
+    let sources = [planes[0].0, planes[1].0, planes[2].0];
+    let row_bytes = row_bytes_of(width, convert.bytes)?;
+    for (_, plane_stride) in planes {
+        if row_bytes > plane_stride {
+            return Err(NImagesError::new(format!(
+                "Deblur: an RGB plane needs {row_bytes} row bytes but its stride is {plane_stride}"
+            )));
+        }
     }
     let mut targets = [std::ptr::null_mut(); 3];
     for (plane, target) in targets.iter_mut().enumerate() {
