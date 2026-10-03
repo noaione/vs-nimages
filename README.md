@@ -380,6 +380,24 @@ cargo clippy --all-targets
 cargo fmt --check
 ```
 
+the separate [miri workflow](.github/workflows/miri.yml) runs on pushes, pull
+requests and manual dispatches. it interprets the library unit tests with both
+scalar and avx2 paths, using nightly Rust and deterministic float operations.
+it checks memory safety independently of the wheel and VapourSynth integration
+jobs. to run its scalar check locally:
+
+```powershell
+rustup toolchain install nightly --profile minimal --component miri --component rust-src
+$env:RUSTFLAGS = "-C target-feature=-avx2"
+$env:MIRIFLAGS = "-Zmiri-deterministic-floats"
+cargo +nightly miri setup
+cargo +nightly miri test --locked --lib -- --test-threads=1
+```
+
+use `-C target-feature=+avx2` for the vector check. on windows, pass
+`--target x86_64-unknown-linux-gnu` to both Miri commands to use its linux
+interpreter.
+
 `cargo test` runs the algorithm unit tests and the integration tests in
 `tests/`, which replay the committed golden vectors in `tests/fixtures/`. those
 vectors come from the reference python implementation and are regenerated with

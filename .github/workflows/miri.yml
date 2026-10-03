@@ -1,0 +1,54 @@
+name: miri
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: miri-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  miri:
+    name: miri (${{ matrix.name }})
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: scalar
+            rustflags: "-C target-feature=-avx2"
+          - name: avx2
+            rustflags: "-C target-feature=+avx2"
+    env:
+      RUSTFLAGS: ${{ matrix.rustflags }}
+      # Keep bitwise float comparisons reproducible while checking memory safety.
+      MIRIFLAGS: "-Zmiri-deterministic-floats"
+
+    steps:
+      - name: check out source
+        uses: actions/checkout@v7
+
+      - name: set up nightly Rust with Miri
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri, rust-src
+
+      - name: cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: miri-${{ matrix.name }}
+
+      - name: prepare Miri sysroot
+        run: cargo +nightly miri setup
+
+      - name: check algorithm unit tests with Miri
+        run: cargo +nightly miri test --locked --lib -- --test-threads=1
