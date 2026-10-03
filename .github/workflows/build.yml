@@ -49,7 +49,11 @@ jobs:
           auditwheel repair --plat manylinux_2_28_x86_64 --wheel-dir repaired dist/*.whl
 
       - name: verify the wheel carries the plugin tree
-        run: python tools/verify-wheel.py repaired/*.whl
+        run: |
+          set -euo pipefail
+          export PATH="/opt/python/cp312-cp312/bin:$PATH"
+          python tools/verify-wheel.py repaired/*.whl
+
       - name: install repaired wheel and run integration checks
         run: |
           set -euo pipefail
