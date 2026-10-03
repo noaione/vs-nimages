@@ -38,8 +38,9 @@ a rust vapoursynth plugin that analyzes and manipulates images.
 
 ## install
 
-the python wheel is plugin-only. it installs the native library at
-`vapoursynth/plugins/nimages/` with `manifest.vs` and adds no python module.
+the python wheel is plugin-only. it installs the native library as
+`vapoursynth/plugins/vs_nimages.dll`, `.so` or `.dylib` and adds no python
+module.
 
 ```console
 python -m pip install vapoursynth-nimages
@@ -353,8 +354,8 @@ recorded in `docs/FINDINGS.md` with fixtures that pin the divergence:
 cargo build --release --locked
 ```
 
-the artifact lands in `target/release/`. copy it, or the whole staged
-`vapoursynth/plugins/nimages/` directory, into vapoursynth's plugin directory.
+the artifact lands in `target/release/`. copy it into vapoursynth's plugin
+directory, which the wheel installs as `vapoursynth/plugins/`.
 
 to build the wheel, which runs cargo and stages the plugin for you:
 

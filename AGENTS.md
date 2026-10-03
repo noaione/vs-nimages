@@ -48,8 +48,9 @@ carries a `parity` of `nmanga`, `diverges` or `reference-only` plus the
 ## repository rules
 
 - use `pyproject.toml` and hatchling. do not add `setup.py`.
-- keep the wheel plugin-only. it installs `vapoursynth/plugins/nimages/` with
-  `manifest.vs` and adds no python module.
+- keep the wheel plugin-only. it installs the native library as
+  `vapoursynth/plugins/vs_nimages.dll`, `.so` or `.dylib` and adds no python
+  module.
 - never commit anything yourself. ask the maintainer first.
 - there is no `CHANGELOG.md` yet, although `pyproject.toml` already points at
   one. ask before adding it.
@@ -164,7 +165,7 @@ to install a hand-built plugin instead:
 
 ```powershell
 cargo build --release
-copy target\release\vs_nimages.dll .venv\Lib\site-packages\vapoursynth\plugins\nimages\
+copy target\release\vs_nimages.dll .venv\Lib\site-packages\vapoursynth\plugins\
 .venv\Scripts\python.exe -c "import vapoursynth as vs; print([p.identifier for p in vs.core.plugins()])"
 ```
 
