@@ -30,8 +30,12 @@ class Variant(NamedTuple):
 
     #: Suffix between the name and the extension, empty for the baseline build.
     suffix: str
-    #: Value for cargo's `-C target-cpu`.
-    target_cpu: str
+    #: Value for cargo's `-C target-cpu`, or `None` to leave the target alone.
+    #:
+    #: A microarchitecture level only means something on x86-64. Naming one for
+    #: another target makes rustc warn that the processor is not recognized and
+    #: ignore it, so an arm64 build passes no flag at all.
+    target_cpu: str | None
 
 
 def target_triple(environment: dict[str, str]) -> str:
@@ -90,7 +94,7 @@ def variants(environment: dict[str, str]) -> list[Variant]:
     that names it.
     """
     if not is_x86_64(environment):
-        return [Variant("", X86_64_V2)]
+        return [Variant("", None)]
     return [Variant("", X86_64_V2), Variant(".avx2", X86_64_V3)]
 
 
@@ -118,10 +122,11 @@ def release_directory(root: Path, environment: dict[str, str]) -> Path:
 
 def build_plugin(root: Path, environment: dict[str, str], variant: Variant) -> Path:
     cargo = environment.get("CARGO", "cargo")
-    flags = f"-C target-cpu={variant.target_cpu}"
     build_environment = dict(environment)
-    existing = build_environment.get("RUSTFLAGS", "").strip()
-    build_environment["RUSTFLAGS"] = f"{existing} {flags}".strip()
+    if variant.target_cpu is not None:
+        existing = build_environment.get("RUSTFLAGS", "").strip()
+        flags = f"-C target-cpu={variant.target_cpu}"
+        build_environment["RUSTFLAGS"] = f"{existing} {flags}".strip()
 
     try:
         subprocess.run(
@@ -133,9 +138,8 @@ def build_plugin(root: Path, environment: dict[str, str], variant: Variant) -> P
     except FileNotFoundError as error:
         raise RuntimeError("Cargo is required to build the VapourSynth plugin") from error
     except subprocess.CalledProcessError as error:
-        raise RuntimeError(
-            f"Cargo failed while building the {variant.target_cpu} plugin"
-        ) from error
+        target = variant.target_cpu or "the default target"
+        raise RuntimeError(f"Cargo failed while building for {target}") from error
 
     # Cargo names every variant of the library the same, because the variant is a
     # compiler flag and not a cargo feature, so the suffix is added here. A
