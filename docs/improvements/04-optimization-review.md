@@ -46,7 +46,7 @@ for 05, 06 and 12.
 | 4 | 08 property-driven posterize tables | rejected | the 16-bit build is 0.197 ms against a 15.44 ms walk, 1.3% |
 | 5 | 09 striped histogram counters | kept for 8 bits with bounded probe | 2.11x median, 1.30x worst on 16 real planes for the bounded v2 reader; 256-pair cap and direct fallback below 16384 pixels; 16-bit excluded |
 | 6 | 10 fresh Deblur output planes | deferred | `write` is 10.8 to 12.2 ms of a 46 to 156 ms frame, and the copy is part of that |
-| 7 | 11 streaming blur scratch | not implemented | 48 MB per concurrent frame at 12 Mpx, pinned and planned in its record |
+| 7 | 11 streaming blur scratch | not implemented, saving measured | scratch is 91% of `Deblur`'s peak rss at a 12 Mpx fan-in and a 32 MiB cache; one of five planes is 119 MiB of a 652 MiB peak |
 | 8 | 12 Deblur conversion dispatch | kept | the write stage falls 39% and 58%, 18.59 to 11.39 ms and 21.86 to 9.15 ms over two rounds, at the same bytes |
 | 9 | 13 peak prominence pruning | kept | same winner in six workloads, 228,000 to 76,000 prominence scans |
 

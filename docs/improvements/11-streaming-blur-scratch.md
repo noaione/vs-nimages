@@ -55,8 +55,8 @@ or shrink all pooled buffers at the same time as this experiment.
 
 ## result
 
-status: not implemented. the objective is real and the change is the largest
-one in the review; the current state is measured and the plan is fixed below.
+status: not implemented. the objective is real and now measured, 91% of peak rss
+at a small cache; the change is the largest in the review and the plan is below.
 
 `Workspace` holds five `f32` planes sized `width * height`: `luma`, `first`,
 `second`, `third` and `temp`. that is 20 bytes a sample, so a 12 megapixel
@@ -81,6 +81,47 @@ wall for one frame on its own, 578.6 ms for 13 frames through a
 `std.AverageFrames` fan-in, and 9.56x concurrency measured as reported work over
 wall. the pool grows to the frames in flight, so the 48 MB is per concurrent
 frame, not per process.
+
+## what the scratch costs a process
+
+the review asks whether the workspace is visible in a process at all, and that
+was unmeasured. `.tmpbuild/deblur_rss.py` measures it: each case runs in its own
+process, builds a `std.AverageFrames` fan-in of `frames` through either `Deblur`
+or `PeakGrayShades`, pulls the centre frame and reports the peak resident set.
+`PeakGrayShades` copies frames and allocates no scratch, so the gap between the
+two fan-ins is the workspace storage in flight. the cache is held at 32 MiB so
+it cannot dominate the gap.
+
+| size | case | frames | peak rss | wall |
+| --- | --- | ---: | ---: | ---: |
+| 2048x2048 | control | 1 | 39.6 MiB | 7.2 ms |
+| 2048x2048 | control | 13 | 88.4 MiB | 59.0 ms |
+| 2048x2048 | `Deblur` | 1 | 119.4 MiB | 70.3 ms |
+| 2048x2048 | `Deblur` | 13 | 728.6 MiB | 717.2 ms |
+| 2903x4128 | control | 1 | 54.6 MiB | 15.7 ms |
+| 2903x4128 | control | 13 | 194.4 MiB | 225.0 ms |
+| 2903x4128 | `Deblur` | 1 | 283.2 MiB | 218.8 ms |
+| 2903x4128 | `Deblur` | 13 | 651.7 MiB | 2071.4 ms |
+
+one `Deblur` frame costs 79.8 MiB over the control at 2048x2048 and 228.6 MiB at
+2903x4128, against workspace payloads of 83.9 MB and 239.7 MB. that is one
+workspace to within a few percent, which is what makes the rest of the table
+attributable rather than a guess.
+
+the control's own growth is the frame cache: 139.8 MiB over twelve more frames
+of 12 MB is 11.4 MiB a frame, the decoded `GRAY8` page. `Deblur` grows 368.5 MiB
+over the same twelve, which is 1.6 further workspaces, so about 2.6 are live at
+this size and the scratch is roughly 594 MiB of the 652 MiB peak, 91%.
+
+at the bench's 512 MiB cache the frame cache adds several hundred MiB on top, so
+the scratch share there is smaller than this 91%. the ring removes one of five
+planes, 20% of a workspace, which is about 119 MiB off this 652 MiB peak and
+proportionally less of the bench's 969 MiB.
+
+so the memory objective is measured rather than assumed, and it is real: the
+workspace dominates `Deblur`'s peak at a small cache. this table says nothing
+about throughput, since it is one pull per case. the decision now rests on the
+implementation cost and its wrong-pixel risk, not on whether the saving exists.
 
 the reason this is deferred rather than attempted and reverted: it cannot be
 landed as a local change to `blur` alone. `blur_row_avx2` writes one horizontal
