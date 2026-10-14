@@ -79,4 +79,4 @@ jobs:
           TWINE_PASSWORD: ${{ secrets.PYPI_PASSWORD }}
         run: |
           set -euo pipefail
-          twine upload --repository-url https://pypi.serik.at/legacy --non-interactive --disable-progress-bar --skip-existing dist/*
+          twine upload --repository-url https://pypi.serik.at/legacy --non-interactive --disable-progress-bar dist/*
