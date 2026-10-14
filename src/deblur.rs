@@ -275,35 +275,53 @@ impl Workspace {
             *estimate = value + PEDESTAL;
         }
 
+        let width = plane.width;
         for _ in 0..params.iterations {
-            // `third` holds the blurred estimate, `second` the ratio it
-            // divides into `observed`, and then `third` again the blurred
-            // ratio the estimate is scaled by.
-            blur(
+            // each completed gaussian row is consumed while it is still in
+            // cache. the first gaussian reads `first` and its consumer writes
+            // the ratio into `second`, so every estimate sample stays intact
+            // until it finishes. the second gaussian reads `second` and its
+            // consumer scales `first`, which is a different plane.
+            let luma = &self.luma[..length];
+            let ratios = &mut self.second[..length];
+            blur_rows(
                 &self.first[..length],
                 &mut self.third[..length],
                 &mut self.temp,
                 plane,
                 &self.weights,
                 radius,
+                |row, blurred| {
+                    let start = row * width;
+                    if let (Some(ratio_row), Some(value_row)) = (
+                        ratios.get_mut(start..start + width),
+                        luma.get(start..start + width),
+                    ) {
+                        for (ratio, (blurred, value)) in
+                            ratio_row.iter_mut().zip(blurred.iter().zip(value_row))
+                        {
+                            *ratio = (value + PEDESTAL) / blurred.max(DIVISION_FLOOR);
+                        }
+                    }
+                },
             );
-            for (ratio, (blurred, value)) in self.second[..length]
-                .iter_mut()
-                .zip(self.third[..length].iter().zip(&self.luma[..length]))
-            {
-                *ratio = (value + PEDESTAL) / blurred.max(DIVISION_FLOOR);
-            }
-            blur(
+            let estimates = &mut self.first[..length];
+            blur_rows(
                 &self.second[..length],
                 &mut self.third[..length],
                 &mut self.temp,
                 plane,
                 &self.weights,
                 radius,
+                |row, factors| {
+                    let start = row * width;
+                    if let Some(estimate_row) = estimates.get_mut(start..start + width) {
+                        for (estimate, factor) in estimate_row.iter_mut().zip(factors) {
+                            *estimate *= factor;
+                        }
+                    }
+                },
             );
-            for (estimate, factor) in self.first[..length].iter_mut().zip(&self.third[..length]) {
-                *estimate *= factor;
-            }
         }
 
         let strength = params.strength;
@@ -654,8 +672,31 @@ fn blur(
     weights: &[f32],
     radius: usize,
 ) {
+    blur_rows(source, target, temp, plane, weights, radius, |_, _| {});
+}
+
+/// [`blur`], handing each completed output row to `consume` with its index.
+///
+/// The consumer is statically dispatched and runs after the vertical read of
+/// that row has finished. It sees the row in `target` and leaves the ring and
+/// the source alone, so it must not write anything the gaussian still reads.
+#[inline]
+fn blur_rows<C: FnMut(usize, &[f32])>(
+    source: &[f32],
+    target: &mut [f32],
+    temp: &mut [f32],
+    plane: Plane,
+    weights: &[f32],
+    radius: usize,
+    mut consume: C,
+) {
     if radius == 0 {
         target.copy_from_slice(source);
+        if plane.width != 0 {
+            for (row, done) in target.chunks_exact(plane.width).enumerate() {
+                consume(row, done);
+            }
+        }
         return;
     }
     let width = plane.width;
@@ -719,6 +760,7 @@ fn blur(
         // SAFETY: every entry of `rows[..taps]` addresses a `width` sample row
         // inside `temp`, which is a distinct allocation from `target`.
         unsafe { accumulate_row(&rows, taps, target_row, weights, vector) };
+        consume(row, target_row);
     }
 }
 

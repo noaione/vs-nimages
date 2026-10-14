@@ -22,6 +22,7 @@ proposals; the outcome section records implementation and measurement.
 | 7 | [11 streaming blur scratch](11-streaming-blur-scratch.md) | Deblur memory and concurrent throughput | replace one full scratch plane with a row ring | reflection and producer/consumer scheduling |
 | 8 | [12 Deblur conversion dispatch](12-deblur-conversion-dispatch.md) | Deblur luma/write, especially RGB | specialize and vectorize sample conversion | f64 quantization and NaN behavior |
 | 9 | [13 peak prominence pruning](13-peak-prominence-pruning.md) | PeakStats with prominence enabled | avoid scans for candidates that cannot win | no gain when prominence is disabled |
+| 10 | [14 Deblur blur consumers](14-deblur-blur-consumers.md) | Deblur deconvolution | consume each blur row while it is in cache | extra active streams raise cache pressure |
 
 05 and 06 attack the same gaussian from different directions. compare each
 against the unchanged baseline first, then benchmark the combination separately.
@@ -49,6 +50,7 @@ for 05, 06 and 12.
 | 7 | 11 streaming blur scratch | kept | ring `temp`: 283.2 to 238.8 MiB per frame and 651.5 to 563.0 MiB at a thirteen frame fan-in, bit-identical, wall unchanged inside the drift |
 | 8 | 12 Deblur conversion dispatch | kept | the write stage falls 39% and 58%, 18.59 to 11.39 ms and 21.86 to 9.15 ms over two rounds, at the same bytes |
 | 9 | 13 peak prominence pruning | kept | same winner in six workloads, 228,000 to 76,000 prominence scans |
+| 10 | 14 Deblur blur consumers | kept | bit-identical, estore median down 10% to 15% and throughput up 8% to 12% through the plugin, under the 15% gate at most settings |
 
 the two combinations the review asked for separately are both in place and were
 measured apart first: 05 and 06 each have their own single-change reading, and
