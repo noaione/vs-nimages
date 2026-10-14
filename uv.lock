@@ -479,13 +479,14 @@ wheels = [
 
 [[package]]
 name = "vapoursynth-imageseqs"
-version = "0.2.0"
+version = "0.3.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/4e/7f/76272c8724513aef17153bd6363b7e96c7feeb32cfd732a77a4a191bea42/vapoursynth_imageseqs-0.2.0.tar.gz", hash = "sha256:b63d307ecfcd8b0cc530d8bcca880944171dff529c617c4f0ce86d9a7281c3e3", size = 357486, upload-time = "2026-09-29T23:33:55.669Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ea/40/baedc8cd07f10d42b64f3b63710501d423305447ce0a8dc81d186ec9fcb3/vapoursynth_imageseqs-0.3.0.tar.gz", hash = "sha256:f90524171b76e55f44d080295a8ad6f02ace37688ecba00f0a4753625c8df345", size = 806248, upload-time = "2026-10-13T10:39:09.736Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/aa/fb/b1a8712cbac3373ce67aa589cfbcf0cbf831900e5999c986e736af317f50/vapoursynth_imageseqs-0.2.0-py3-none-macosx_26_0_arm64.whl", hash = "sha256:a6aec9a3ca1f69de51d76be5e38bced5d439b5e58177a4974f3569f440213379", size = 2465293, upload-time = "2026-09-29T23:33:49.743Z" },
-    { url = "https://files.pythonhosted.org/packages/47/79/262419785e22914318840127ccb36066c3671bdc28f45498ad2137edef10/vapoursynth_imageseqs-0.2.0-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:91ed6e8d884ef2c1da332c97745a1e99fdf178f39691323869c065bba09d9cbf", size = 4959306, upload-time = "2026-09-29T23:33:51.621Z" },
-    { url = "https://files.pythonhosted.org/packages/ce/68/41c18033b506f8c17f5ca725d274e208b7934910ee24f8129a21b2660308/vapoursynth_imageseqs-0.2.0-py3-none-win_amd64.whl", hash = "sha256:29bafec9f99ff446d089abadd19d56e7766be39a60960ba82d13b71b46d85b94", size = 3686670, upload-time = "2026-09-29T23:33:53.555Z" },
+    { url = "https://files.pythonhosted.org/packages/c7/6c/a801ee77af79ed29a6bd7fb7b4307a8e4ca5ec3c46b24ce4b4af03c1c595/vapoursynth_imageseqs-0.3.0-py3-none-macosx_11_0_arm64.whl", hash = "sha256:beff1b6b182213174de36dda99d4a37fa2c41883b21120553c3bd210c42e6efd", size = 3100766, upload-time = "2026-10-13T10:39:01.919Z" },
+    { url = "https://files.pythonhosted.org/packages/84/76/d506f36d84f58edc2c037ae90c20375320abf54313faa9a087d1c0c1ee26/vapoursynth_imageseqs-0.3.0-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:b2092f36bf15c6d9a65e90018a7b17499e7087174f3f7840ce57312c2ddc0c54", size = 11540289, upload-time = "2026-10-13T10:39:03.587Z" },
+    { url = "https://files.pythonhosted.org/packages/8c/27/12d95f7873fe5289f2945bbea9c34fd8ab9d0149fad17beeb7a1524a86cf/vapoursynth_imageseqs-0.3.0-py3-none-musllinux_1_2_x86_64.whl", hash = "sha256:98359f95b5f644193907ccd7175537cacf875ef52778c683072541a2bb465b60", size = 12741220, upload-time = "2026-10-13T10:39:05.634Z" },
+    { url = "https://files.pythonhosted.org/packages/8a/3e/d988276c34a34693fa5ad2c511b784eb513b2e4ffd672e33d101978ff45b/vapoursynth_imageseqs-0.3.0-py3-none-win_amd64.whl", hash = "sha256:3f5b4d0211b685040339a5abfdc7050e3a4403f78c1c592f6b33d5652e45b63c", size = 10947563, upload-time = "2026-10-13T10:39:07.582Z" },
 ]
 
 [[package]]
@@ -523,7 +524,7 @@ requires-dist = [
     { name = "pillow", marker = "extra == 'golden'", specifier = ">=12" },
     { name = "scipy", marker = "extra == 'golden'", specifier = ">=1.14" },
     { name = "vapoursynth", marker = "extra == 'dev'", specifier = ">=79" },
-    { name = "vapoursynth-imageseqs", marker = "extra == 'dev-tests'", specifier = ">=0.2.0" },
+    { name = "vapoursynth-imageseqs", marker = "extra == 'dev-tests'", specifier = ">=0.3.0" },
     { name = "vsrepo", marker = "extra == 'dev'", specifier = ">=2.0" },
 ]
 provides-extras = ["dev", "dev-tests", "golden"]

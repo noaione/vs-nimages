@@ -1,6 +1,6 @@
 # peak prominence pruning
 
-status: proposed. narrow workload, exact winner selection.
+status: implemented. complete. narrow workload, exact winner selection.
 
 ## current cost
 
