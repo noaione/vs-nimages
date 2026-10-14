@@ -43,7 +43,7 @@ directory holding a `manifest.vs` and the native library, and adds no python
 module.
 
 ```console
-python -m pip install vapoursynth-nimages
+python -m pip install vapoursynth-nimages --index-url https://pypi.serik.at/simple
 ```
 
 the x86-64 wheels carry two builds of the same plugin. `manifest.vs` names the

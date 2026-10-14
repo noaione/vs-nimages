@@ -1,0 +1,82 @@
+# Uploads a release to the private index.
+#
+# The index serves readers at https://pypi.serik.at/simple and takes uploads at
+# https://pypi.serik.at/legacy, the endpoint twine posts a distribution to.
+#
+# The publish job reads two repository secrets:
+#
+#   PYPI_USERNAME  the index user
+#   PYPI_PASSWORD  that user's password or token
+#
+# A release published without them fails in the upload step and leaves the built
+# distributions on the run.
+
+name: publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A called workflow reads the caller's name from `github.workflow`, so the run
+# takes `build`'s group, `publish-${{ github.ref }}`, with cancel-in-progress. Two
+# dispatches for one ref therefore leave the later run, and `--skip-existing` on
+# the upload finishes what the cancelled one started.
+
+jobs:
+  build:
+    name: build and check every artifact
+    uses: ./.github/workflows/build.yml
+
+  publish:
+    name: upload to pypi.serik.at
+    needs: build
+    runs-on: ubuntu-26.04
+
+    steps:
+      - name: check out source
+        uses: actions/checkout@v7
+
+      - name: set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      # The project version is written by hand in `pyproject.toml`, so a release
+      # whose tag disagrees with it would publish a version nobody asked for.
+      - name: check the release tag against the project version
+        if: github.event_name == 'release'
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          version=$(python -c "import pathlib, tomllib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text('utf-8'))['project']['version'])")
+          if [ "${TAG#v}" != "$version" ]; then
+            echo "tag $TAG does not match the project version $version" >&2
+            exit 1
+          fi
+
+      - name: download every artifact the build uploaded
+        uses: actions/download-artifact@v7
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: verify the wheels carry the plugin tree
+        run: python tools/verify-wheel.py "dist/*.whl"
+
+      - name: install twine
+        run: python -m pip install --upgrade twine
+
+      # `--skip-existing` lets a re-run of a partly uploaded release finish the
+      # job rather than fail on the files that already landed.
+      - name: upload every distribution to the index
+        env:
+          TWINE_USERNAME: ${{ secrets.PYPI_USERNAME }}
+          TWINE_PASSWORD: ${{ secrets.PYPI_PASSWORD }}
+        run: |
+          set -euo pipefail
+          twine upload --repository-url https://pypi.serik.at/legacy --non-interactive --disable-progress-bar --skip-existing dist/*
