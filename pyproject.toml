@@ -1,7 +1,7 @@
 [project]
 name = "vapoursynth-nimages"
 version = "0.1.0"
-description = "A native VapourSynth plugin for analyzing and manipulating images"
+description = "A rust-based VapourSynth plugin for analyzing and manipulating images"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MPL-2.0" }
@@ -77,6 +77,7 @@ include = [
     "hatch_build.py",
     "pyproject.toml",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE",
     # The release job checks the wheel it rebuilds from this sdist with the
     # same script the wheel jobs run.

@@ -98,8 +98,10 @@ carries a `parity` of `nmanga`, `diverges` or `reference-only` plus the
   directory holding `manifest.vs` and the CPU variants and adds no python
   module.
 - never commit anything yourself. ask the maintainer first.
-- there is no `CHANGELOG.md` yet, although `pyproject.toml` already points at
-  one. ask before adding it.
+- `CHANGELOG.md` is the user-facing record and `pyproject.toml` points at it.
+  unreleased work lands under `### unreleased`, under an `Added` or `Changed`
+  heading, one bullet per change with filter names in backticks. a version
+  heading is cut at release by the maintainer.
 - treat `tests/fixtures/` as generated. change it by running `tools/golden.py`,
   never by editing the json or the `.bin` files.
 - keep `src/` free of VapourSynth types outside `lib.rs`, `src/filters/` and
@@ -334,6 +336,15 @@ card:
 ```powershell
 .venv\Scripts\python.exe tools\deblur_fanin.py --device --sweep
 ```
+
+## readme
+
+README.md is the user-facing entry point. Keep it short and practical: explain
+what the plugin does, how to install and use it, supported inputs, and public
+filter arguments. Use a runnable example and concise reference tables. Keep
+implementation history, benchmark results, and internal validation details in
+their existing docs. Do not add links to docs/improvements/ or move improvement
+notes into README.md.
 
 ## writing style
 
