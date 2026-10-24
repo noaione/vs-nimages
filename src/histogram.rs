@@ -165,6 +165,28 @@ pub struct Histogram {
     max_value: u16,
 }
 
+/// Luma of one 8-bit triple, as `Image.convert("L")` computes it.
+///
+/// The reference pipeline forces every non-gray image to `L` before it counts a
+/// histogram, and Pillow's conversion is BT.601 luma at 16 bit fixed point with
+/// rounding. The weights sum to 65536, so a gray triple comes back as itself.
+fn luma_u8(red: u8, green: u8, blue: u8) -> u8 {
+    let sum =
+        u32::from(red) * 19_595 + u32::from(green) * 38_470 + u32::from(blue) * 7_471 + 32_768;
+    u8::try_from(sum >> 16).unwrap_or(u8::MAX)
+}
+
+/// The same luma over native 16-bit code values.
+///
+/// Three 16 bit samples peak at 4 294 901 760 before the rounding term, and
+/// adding it still fits a `u32`; the shift brings the result back under 65536.
+/// sum needs 33 bits and the shift brings it back under 65536.
+fn luma_u16(red: u16, green: u16, blue: u16) -> u16 {
+    let sum =
+        u64::from(red) * 19_595 + u64::from(green) * 38_470 + u64::from(blue) * 7_471 + 32_768;
+    u16::try_from(sum >> 16).unwrap_or(u16::MAX)
+}
+
 impl Histogram {
     /// An empty 8-bit histogram.
     #[must_use]
@@ -228,6 +250,110 @@ impl Histogram {
             let start = row * stride;
             for sample in data[start..start + row_bytes].as_chunks::<2>().0 {
                 let value = u16::from_ne_bytes(*sample).min(max_value);
+                if let Some(count) = counts.get_mut(usize::from(value)) {
+                    *count = count.saturating_add(1);
+                }
+            }
+        }
+
+        Some(Self {
+            counts: Counts::Wide(counts),
+            total_pixels: pixel_count(width, height),
+            max_value,
+        })
+    }
+
+    /// Counts three 8-bit planes into one table through the reference's luma.
+    ///
+    /// Gray and YUV slices are counted by [`Histogram::from_plane`], which reads
+    /// one plane. An RGB clip has no luma plane, so the reference pipeline's
+    /// `convert("L")` is computed here instead, which is what makes an RGB page
+    /// and the same page decoded as gray report the same properties.
+    ///
+    /// Returns [`None`] when a plane's rows do not fit in its slice.
+    #[must_use]
+    pub fn from_rgb_planes(
+        planes: [&[u8]; 3],
+        strides: [usize; 3],
+        width: usize,
+        height: usize,
+    ) -> Option<Self> {
+        for plane in 0..planes.len() {
+            let stride = strides[plane];
+            if width > stride {
+                return None;
+            }
+            validate_plane_length(planes[plane].len(), stride, width, height)?;
+        }
+
+        let mut counts = [0u64; BINS];
+        for row in 0..height {
+            let start = [row * strides[0], row * strides[1], row * strides[2]];
+            let red = planes[0].get(start[0]..start[0] + width)?;
+            let green = planes[1].get(start[1]..start[1] + width)?;
+            let blue = planes[2].get(start[2]..start[2] + width)?;
+            for ((&red, &green), &blue) in red.iter().zip(green).zip(blue) {
+                let value = usize::from(luma_u8(red, green, blue));
+                if let Some(count) = counts.get_mut(value) {
+                    *count = count.saturating_add(1);
+                }
+            }
+        }
+
+        Some(Self {
+            counts: Counts::U8(counts),
+            total_pixels: pixel_count(width, height),
+            max_value: u8::MAX as u16,
+        })
+    }
+
+    /// Counts three native 16-bit planes into one table through the same luma.
+    ///
+    /// Values above `max_value` are clamped to it, the way the single-plane
+    /// reader clamps them, so a 10 bit plane lands in its own 1024 bins.
+    ///
+    /// Returns [`None`] when a plane's rows do not fit or the bounded table
+    /// cannot be allocated.
+    #[must_use]
+    pub fn from_rgb_u16_planes(
+        planes: [&[u8]; 3],
+        strides: [usize; 3],
+        width: usize,
+        height: usize,
+        max_value: u16,
+    ) -> Option<Self> {
+        let row_bytes = width.checked_mul(2)?;
+        for plane in 0..planes.len() {
+            let stride = strides[plane];
+            if row_bytes > stride {
+                return None;
+            }
+            validate_plane_length(planes[plane].len(), stride, row_bytes, height)?;
+        }
+
+        let length = usize::from(max_value).checked_add(1)?;
+        let mut counts = Vec::new();
+        counts.try_reserve_exact(length).ok()?;
+        counts.resize(length, 0u64);
+
+        for row in 0..height {
+            let start = [row * strides[0], row * strides[1], row * strides[2]];
+            let red = planes[0].get(start[0]..start[0] + row_bytes)?;
+            let green = planes[1].get(start[1]..start[1] + row_bytes)?;
+            let blue = planes[2].get(start[2]..start[2] + row_bytes)?;
+            let samples = red
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .zip(green.as_chunks::<2>().0)
+                .zip(blue.as_chunks::<2>().0);
+            for ((red, green), blue) in samples {
+                let value = luma_u16(
+                    u16::from_ne_bytes(*red),
+                    u16::from_ne_bytes(*green),
+                    u16::from_ne_bytes(*blue),
+                )
+                .min(max_value);
                 if let Some(count) = counts.get_mut(usize::from(value)) {
                     *count = count.saturating_add(1);
                 }
@@ -614,5 +740,159 @@ mod tests {
             .expect("1024 bins cover 10 bits");
         assert_eq!(histogram.counts().len(), 1024);
         assert_eq!(histogram.max_value(), 1023);
+    }
+
+    #[test]
+    fn luma_matches_the_reference_conversion() {
+        // `Image.convert("L")` on an RGB image is BT.601 luma at 16 bit fixed
+        // point with rounding, measured against Pillow on 4096 colours with no
+        // difference at all.
+        assert_eq!(luma_u8(255, 0, 0), 76);
+        assert_eq!(luma_u8(0, 255, 0), 150);
+        assert_eq!(luma_u8(0, 0, 255), 29);
+        assert_eq!(luma_u8(10, 200, 30), 124);
+
+        // A gray triple is its own luma, which is what makes an RGB page and the
+        // same page decoded as gray report the same properties.
+        for value in 0..=255u8 {
+            assert_eq!(luma_u8(value, value, value), value);
+        }
+        assert_eq!(luma_u16(0, 0, 0), 0);
+        assert_eq!(luma_u16(65_535, 65_535, 65_535), 65_535);
+        assert_eq!(luma_u16(65_535, 0, 0), 19_595);
+        for value in [0u16, 1, 1023, 4095, 65_535] {
+            assert_eq!(luma_u16(value, value, value), value);
+        }
+    }
+
+    /// Fills three planes whose strides differ, with a padding byte no active
+    /// sample produces, and returns them with their strides.
+    fn rgb_planes(width: usize, height: usize) -> ([Vec<u8>; 3], [usize; 3]) {
+        let strides = [width + 3, width + 7, width];
+        let mut state = 0x2026_1017u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut planes = [
+            vec![0xA5u8; strides[0] * height],
+            vec![0xA5u8; strides[1] * height],
+            vec![0xA5u8; strides[2] * height],
+        ];
+        for row in 0..height {
+            for column in 0..width {
+                for plane in 0..3 {
+                    planes[plane][row * strides[plane] + column] = (next() & 0xFF) as u8;
+                }
+            }
+        }
+        (planes, strides)
+    }
+
+    #[test]
+    fn rgb_planes_are_counted_through_their_luma() {
+        let (width, height) = (13usize, 7usize);
+        let (planes, strides) = rgb_planes(width, height);
+        let histogram = Histogram::from_rgb_planes(
+            [&planes[0], &planes[1], &planes[2]],
+            strides,
+            width,
+            height,
+        )
+        .expect("the padded rows fit");
+
+        let mut want = [0u64; BINS];
+        for row in 0..height {
+            for column in 0..width {
+                let red = planes[0][row * strides[0] + column];
+                let green = planes[1][row * strides[1] + column];
+                let blue = planes[2][row * strides[2] + column];
+                want[usize::from(luma_u8(red, green, blue))] += 1;
+            }
+        }
+        assert_eq!(histogram.counts(), want);
+        assert_eq!(histogram.total_pixels(), (width * height) as u64);
+        assert_eq!(
+            histogram.counts().iter().sum::<u64>(),
+            (width * height) as u64
+        );
+    }
+
+    #[test]
+    fn rgb_words_are_counted_through_their_luma() {
+        let (width, height) = (13usize, 5usize);
+        let strides = [width * 2 + 6, width * 2, width * 2 + 2];
+        let mut planes = [
+            vec![0u8; strides[0] * height],
+            vec![0u8; strides[1] * height],
+            vec![0u8; strides[2] * height],
+        ];
+        let mut state = 0x5eed_1017u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for row in 0..height {
+            for column in 0..width {
+                for plane in 0..3 {
+                    let value = (next() % 1024) as u16;
+                    let start = row * strides[plane] + column * 2;
+                    planes[plane][start..start + 2].copy_from_slice(&value.to_ne_bytes());
+                }
+            }
+        }
+
+        let histogram = Histogram::from_rgb_u16_planes(
+            [&planes[0], &planes[1], &planes[2]],
+            strides,
+            width,
+            height,
+            1023,
+        )
+        .expect("the padded rows fit");
+
+        let mut want = [0u64; BINS * 4];
+        for row in 0..height {
+            for column in 0..width {
+                let mut values = [0u16; 3];
+                for plane in 0..3 {
+                    let start = row * strides[plane] + column * 2;
+                    values[plane] =
+                        u16::from_ne_bytes([planes[plane][start], planes[plane][start + 1]]);
+                }
+                let value = luma_u16(values[0], values[1], values[2]).min(1023);
+                want[usize::from(value)] += 1;
+            }
+        }
+        assert_eq!(histogram.counts(), &want[..1024]);
+        assert_eq!(histogram.total_pixels(), (width * height) as u64);
+        assert_eq!(histogram.max_value(), 1023);
+    }
+
+    #[test]
+    fn an_rgb_plane_that_does_not_fit_is_rejected() {
+        let stride = 8usize;
+        assert!(
+            Histogram::from_rgb_planes([&[0; 8], &[0; 8], &[0; 7]], [stride; 3], 8, 1).is_none()
+        );
+        assert!(Histogram::from_rgb_planes([&[0; 8], &[0; 8], &[0; 8]], [4, 8, 8], 8, 1).is_none());
+        assert!(
+            Histogram::from_rgb_u16_planes([&[0; 16], &[0; 16], &[0; 15]], [16; 3], 8, 1, 1023)
+                .is_none()
+        );
+        assert!(
+            Histogram::from_rgb_u16_planes(
+                [&[0; 16], &[0; 16], &[0; 16]],
+                [15, 16, 16],
+                8,
+                1,
+                1023
+            )
+            .is_none()
+        );
     }
 }

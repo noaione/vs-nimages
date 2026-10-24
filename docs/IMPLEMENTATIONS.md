@@ -201,10 +201,17 @@ For Gray formats above 8 bits, peak property values use the frame's native code
 units. `upper_limit` remains in 8-bit-equivalent units and scales to the sample
 maximum.
 
-`gpu=1` counts plane 0 on the Vulkan device, reads the table back, and runs the
-same peak search, so the properties are identical to `gpu=0`. It requires
-VapourSynth R80, a Vulkan 1.4 device and a constant format, and it is worth it
-after a device producer: counting is 10x to 18x cheaper there. See
+The analyzers take an integer `Gray`, `YUV` or `RGB` clip from 8 to 16 bits. A
+`YUV` clip is analysed through plane 0, which is luma and is never subsampled,
+and an `RGB` clip through the fixed-point luma of its three planes:
+`(r * 19595 + g * 38470 + b * 7471 + 32768) >> 16`, byte-identical to Pillow's
+`Image.convert("L")` at 8 bit and its natural extension above. A limited-range
+`YUV` clip reports limited-range luma, because plane 0 is read as it arrives.
+
+`gpu=1` counts on the Vulkan device, reads the table back, and runs the same peak
+search, so the properties are identical to `gpu=0`. It requires VapourSynth R80,
+a Vulkan 1.4 device and a constant format, and it is worth it after a device
+producer: counting is 10x to 18x cheaper there, and 20x for `RGB`.
 [19](improvements/19-vulkan-histogram-analyzers.md#outcome-so-far).
 
 ### 5.2 `PeakGrayShades`
@@ -216,8 +223,8 @@ shades = core.nimages.PeakGrayShades(
 )
 ```
 
-Input and output pixels are unchanged. The returned frames contain parallel
-property arrays:
+Input and output pixels are unchanged, on the same `Gray`, `YUV` and `RGB` clips
+`PeakStats` takes. The returned frames contain parallel property arrays:
 
 | Property | Type | Meaning |
 |---|---:|---|
@@ -301,15 +308,15 @@ plane independently over its full native sample range. RGB input is not
 converted to gray.
 
 `method=0` (the default) spaces the levels evenly, and `method=1` solves them for
-each frame from plane 0's histogram with Lloyd-Max. Plane 0 is the gray plane of
-a Gray clip and the luma plane of a YUV one, and the solved table then applies to
-every plane; an RGB caller that wants the grayscale behaviour converts first. The
-levels are recomputed for every frame, so a clip whose frames differ gets a level
-set each.
+each frame from the frame's own histogram with Lloyd-Max. The histogram is plane
+0 for a Gray or YUV clip and the fixed-point luma for an RGB one, and the solved
+table then applies to every plane; an RGB caller that wants the grayscale
+behaviour converts first. The levels are recomputed for every frame, so a clip
+whose frames differ gets a level set each.
 
 `gpu=1` maps the table on the Vulkan device, byte-identical to `gpu=0`.
-`method=1` works there too: plane 0's histogram is counted on the device, read
-back, and solved with the same host code, which takes `PeakGrayShades` into
+`method=1` works there too: the histogram is counted on the device, read back,
+and solved with the same host code, which takes `PeakGrayShades` into
 `Posterize(method=1)` from 20.0 ms to 6.2 ms at 12 MP `GRAY8` and from 49.1 ms
 to 14.0 ms at `GRAY16`. `use_props=True` works under `gpu=1` and rebuilds the
 table per frame.

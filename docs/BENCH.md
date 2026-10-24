@@ -231,14 +231,18 @@ which is what a caller with a bounded pipeline has, is the shape to quote.
 
 ## the histogram analyzers
 
-`PeakStats(gpu=1)` and `PeakGrayShades(gpu=1)` count plane 0 on the device, read
-the table back, and run the same host analysis on it. 12 MP, flat page, median of
-20 frames, from `tools/histogram_hash.py --bench`:
+`PeakStats(gpu=1)` and `PeakGrayShades(gpu=1)` count on the device, read the
+table back, and run the same host analysis on it. a `YUV` clip is counted through
+plane 0, and an `RGB` one through the reference's fixed-point luma, which is what
+`Image.convert("L")` computes. 12 MP, flat page, median of 20 frames, from
+`tools/histogram_hash.py --bench`:
 
-| piece | `GRAY8` | `GRAY16` | host `GRAY8` | host `GRAY16` |
-| --- | ---: | ---: | ---: | ---: |
-| counting, marginal in a device chain | 0.5 ms | 1.3 to 2.4 ms | 7.7 to 8.0 ms | 19.7 to 23.4 ms |
-| counting, with the frame uploaded and downloaded | 5.3 ms | 12.7 to 13.9 ms | 8.5 ms | 24.7 ms |
+| format | counting, device chain | counting, roundtrip | host counting |
+| --- | ---: | ---: | ---: |
+| `GRAY8` | 0.5 ms | 5.3 ms | 7.7 to 8.0 ms |
+| `GRAY16` | 1.3 to 2.4 ms | 12.7 to 13.9 ms | 19.7 to 23.4 ms |
+| `YUV420P8` | under 1 ms | 10.8 ms | 8.7 to 9.1 ms |
+| `RGB24` | under 1 ms | 24.1 ms | 23.1 to 24.5 ms |
 
 a lone analyzer is transfer bound: 12 MB up and 12 or 24 MB back is more than the
 7.7 or 20 ms of counting it removes, so the gain is 1.6x to 1.9x. after a device
@@ -249,10 +253,17 @@ producer it is 10x to 18x cheaper than the host's counting, which is what makes
 | --- | ---: | ---: | ---: |
 | `PeakGrayShades` into `Posterize(use_props=True, method=1)`, `GRAY8` | 20.0 to 21.1 ms | 6.2 to 6.4 ms | 3.2x |
 | the same, `GRAY16` | 49.1 to 51.8 ms | 14.0 to 14.2 ms | 3.6x |
+| the same, `YUV420P8` | 26.4 to 27.1 ms | 12.1 to 12.4 ms | 2.2x |
+| the same, `RGB24` | 70.8 to 71.0 ms | 25.7 to 26.3 ms | 2.7x |
 
-both analyzers write the same four properties and the same two shade arrays as
-`gpu=0` and hand back the input's pixels: `tools/histogram_hash.py --device`
-compares 35 cases, the flat, four-tone, sparse and noise pages included.
+`RGB24` counting costs three times the gray pass on the host, which is the two
+extra plane reads and the luma arithmetic, and is still 20x cheaper on the device.
+the roundtrip row is what a lone analyzer pays, so the device path is only a
+chain member for colour too. every family writes the same four properties and the
+same two shade arrays as `gpu=0` and hands back the input's pixels:
+`tools/histogram_hash.py --device` compares 50 cases, and checks separately that a
+`YUV` clip matches its extracted plane 0 and an `RGB` page with equal planes
+matches itself as gray.
 
 ## what a webp actually hands out
 

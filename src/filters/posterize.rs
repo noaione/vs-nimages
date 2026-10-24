@@ -32,8 +32,8 @@ use crate::posterize::{
 };
 
 use super::{
-    Accept, FrameTrace, MappingTable, add_filter, check_frame_format, checked_info, describe_frame,
-    device_table, input_failed, map_frame, plane_histogram, read_clip, read_int,
+    Accept, FrameTrace, MappingTable, add_filter, analyzer_histogram, check_frame_format,
+    checked_info, describe_frame, device_table, input_failed, map_frame, read_clip, read_int,
     report_settings_once,
 };
 
@@ -372,12 +372,11 @@ fn shade_bits(frame: &VideoFrame, sample_depth: u8) -> Result<u8> {
 
 /// Solves one frame's levels with Lloyd-Max and builds its lookup table.
 ///
-/// The histogram comes from plane 0, which is the gray plane of a Gray clip and
-/// the luma plane of a YUV one. The table then applies to every plane, exactly as
-/// the evenly spaced table does, so an RGB caller that wants gray behaviour
-/// converts first.
+/// The histogram comes from plane 0 for a Gray or YUV clip and from the
+/// reference's fixed-point luma for an RGB one. The table then applies to every
+/// plane, exactly as the evenly spaced table does.
 fn resolve_lloyd(frame: &VideoFrame, bits: u8, sample_depth: u8) -> Result<ResolvedBits> {
-    resolve_lloyd_from(plane_histogram(frame)?, bits, sample_depth)
+    resolve_lloyd_from(analyzer_histogram(frame)?, bits, sample_depth)
 }
 
 /// Solves one frame's levels from a histogram and builds its lookup table.

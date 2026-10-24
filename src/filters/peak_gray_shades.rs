@@ -15,8 +15,8 @@ use crate::gpu::histogram::Engine;
 use crate::gray_shades::analyze_gray_shades;
 
 use super::{
-    Accept, FrameTrace, add_filter, check_frame_format, checked_info, describe_frame, input_failed,
-    plane_histogram, read_clip, read_float, read_int, report_settings_once,
+    Accept, FrameTrace, add_filter, analyzer_histogram, check_frame_format, checked_info,
+    describe_frame, input_failed, read_clip, read_float, read_int, report_settings_once,
 };
 
 /// Default `threshold`, matching `nmanga`.
@@ -61,7 +61,7 @@ impl Filter for PeakGrayShades {
         mut core: CoreRef,
     ) -> Result<()> {
         let source = read_clip(&input, "PeakGrayShades")?;
-        let info = checked_info(&source, "PeakGrayShades", Accept::GrayInteger8To16)?;
+        let info = checked_info(&source, "PeakGrayShades", Accept::Analyzer)?;
 
         let threshold = read_float(&input, key!(c"threshold"))?.unwrap_or(DEFAULT_THRESHOLD);
         if !threshold.is_finite() || threshold < 0.0 {
@@ -130,7 +130,7 @@ impl Filter for PeakGrayShades {
                 let mut trace = FrameTrace::new(self.debug, "PeakGrayShades");
 
                 let input = self.source.get_frame_filter(n, &mut frame_ctx);
-                check_frame_format(&input, "PeakGrayShades", Accept::GrayInteger8To16)?;
+                check_frame_format(&input, "PeakGrayShades", Accept::Analyzer)?;
 
                 let settings = describe_frame(&input);
                 report_settings_once(
@@ -146,7 +146,7 @@ impl Filter for PeakGrayShades {
                 let mark = Instant::now();
                 let histogram = match &self.engine {
                     Some(engine) => engine.count(&core, &input)?,
-                    None => plane_histogram(&input)?,
+                    None => analyzer_histogram(&input)?,
                 };
                 trace.mark("histogram", mark);
 

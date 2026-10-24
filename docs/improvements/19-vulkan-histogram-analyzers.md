@@ -241,3 +241,7 @@ whether `u16` moved, is recorded here with the numbers from
 [16](16-vulkan-validation.md).
 
 all three hold, and the gate is `tools/histogram_hash.py`.
+
+both analyzers took `Gray` only when this plan landed. the color input surface is
+[20](20-analyzer-color-inputs.md), which widened them to `YUV` and `RGB` the same
+day.

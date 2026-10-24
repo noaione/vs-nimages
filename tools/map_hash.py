@@ -185,6 +185,11 @@ def cases() -> list[Case]:
             {"bits": 4, "method": 1},
         ),
         Case(
+            "posterize/rgb48/lloyd-bits12",
+            lambda: source(129, 97, vs.RGB48),
+            {"bits": 12, "method": 1},
+        ),
+        Case(
             "posterize/gray8/lloyd-use-props",
             lambda: CORE.nimages.PeakGrayShades(gray(97, 65), threshold=0.01),
             {"use_props": 1, "method": 1},

@@ -581,12 +581,16 @@ def check_errors() -> None:
     gray16 = core.std.BlankClip(width=8, height=8, format=vs.GRAY16, length=1)
 
     expect_error(
-        "PeakStats on RGB", lambda: core.nimages.PeakStats(rgb), contains="Gray 8 to 16 bit"
+        "PeakStats on float RGB",
+        lambda: core.nimages.PeakStats(core.std.BlankClip(width=8, height=8, format=vs.RGBS)),
+        contains="Gray, YUV or RGB 8 to 16 bit",
     )
     expect_error(
-        "PeakGrayShades on YUV",
-        lambda: core.nimages.PeakGrayShades(core.std.BlankClip(width=8, height=8, format=vs.YUV420P8)),
-        contains="Gray 8 to 16 bit",
+        "PeakGrayShades on float Gray",
+        lambda: core.nimages.PeakGrayShades(
+            core.std.BlankClip(width=8, height=8, format=vs.GRAYS)
+        ),
+        contains="Gray, YUV or RGB 8 to 16 bit",
     )
     expect_error(
         "Posterize bits above GRAY16 depth",
@@ -1403,6 +1407,80 @@ def check_deblur_errors() -> None:
     )
     expect_error("Deblur without a clip", lambda: core.nimages.Deblur())  # type: ignore
 
+def analyzer_keys(clip) -> dict:
+    """The properties an analyzer owns, with one-element arrays made iterable."""
+    props = props_of(clip)
+    keys = {
+        "NImagesBlackLevel",
+        "NImagesWhiteLevel",
+        "NImagesBlackPeakFound",
+        "NImagesWhitePeakFound",
+    }
+    out = {key: props[key] for key in keys if key in props}
+    for key in ("NImagesGrayShades", "NImagesGrayShadePercentages"):
+        if key in props:
+            value = props[key]
+            out[key] = [value] if isinstance(value, (int, float)) else list(value)
+    return out
+
+
+def check_color_analysis() -> None:
+    section("analysis on YUV and RGB clips")
+    height, width = 48, 64
+    luma = (
+        (np.arange(height)[:, None] * 3 + np.arange(width)[None, :] * 7) % 256
+    ).astype(np.uint8)
+
+    yuv = core.std.BlankClip(width=width, height=height, format=vs.YUV420P8, length=1)
+
+    def fill_yuv(n: int, f: vs.VideoFrame) -> vs.VideoFrame:
+        out = f.copy()
+        np.asarray(out[0])[...] = luma
+        np.asarray(out[1])[...] = 120
+        np.asarray(out[2])[...] = 130
+        return out
+
+    yuv = core.std.ModifyFrame(yuv, yuv, fill_yuv)
+    extracted = core.std.ShufflePlanes(yuv, 0, vs.GRAY)
+    same(
+        analyzer_keys(core.nimages.PeakStats(yuv)),
+        analyzer_keys(core.nimages.PeakStats(extracted)),
+        "a YUV clip reports its luma plane's levels",
+    )
+    same(
+        analyzer_keys(core.nimages.PeakGrayShades(yuv)),
+        analyzer_keys(core.nimages.PeakGrayShades(extracted)),
+        "a YUV clip reports its luma plane's shades",
+    )
+
+    rgb = core.std.BlankClip(width=width, height=height, format=vs.RGB24, length=1)
+
+    def fill_rgb(n: int, f: vs.VideoFrame) -> vs.VideoFrame:
+        out = f.copy()
+        for plane in range(3):
+            np.asarray(out[plane])[...] = luma
+        return out
+
+    rgb = core.std.ModifyFrame(rgb, rgb, fill_rgb)
+    gray = clip_of(luma)
+    same(
+        analyzer_keys(core.nimages.PeakStats(rgb)),
+        analyzer_keys(core.nimages.PeakStats(gray)),
+        "an RGB page with equal planes reports the gray levels",
+    )
+    same(
+        analyzer_keys(core.nimages.PeakGrayShades(rgb)),
+        analyzer_keys(core.nimages.PeakGrayShades(gray)),
+        "an RGB page with equal planes reports the gray shades",
+    )
+
+    for color, want in (((255, 0, 0), 76), ((0, 255, 0), 150), ((0, 0, 255), 29)):
+        flat = core.std.BlankClip(
+            width=8, height=8, format=vs.RGB24, length=1, color=list(color)
+        )
+        shades = analyzer_keys(core.nimages.PeakGrayShades(flat))["NImagesGrayShades"]
+        same(shades, [want], f"RGB {color} converts to luma {want}")
+
 
 def main() -> int:
     if not hasattr(core, "imgseqs"):
@@ -1435,6 +1513,7 @@ def main() -> int:
     check_high_depth_integer_mapping()
     check_high_depth_analysis()
     check_float_levels()
+    check_color_analysis()
     check_unified_level_endpoints()
     check_mixed_depth_levels()
     check_dynamic_dimensions(posterize)

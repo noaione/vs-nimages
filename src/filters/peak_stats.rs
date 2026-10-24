@@ -15,8 +15,9 @@ use crate::gpu::histogram::Engine;
 use crate::peaks::{PeakOptions, find_local_peak};
 
 use super::{
-    Accept, FrameTrace, add_filter, check_frame_format, checked_info, describe_frame, input_failed,
-    plane_histogram, read_clip, read_float, read_int, report_settings_once, validate_percentage,
+    Accept, FrameTrace, add_filter, analyzer_histogram, check_frame_format, checked_info,
+    describe_frame, input_failed, read_clip, read_float, read_int, report_settings_once,
+    validate_percentage,
 };
 
 /// Lower bound of `upper_limit`, matching the `nmanga` cli and orchestrator.
@@ -65,7 +66,7 @@ impl Filter for PeakStats {
         mut core: CoreRef,
     ) -> Result<()> {
         let source = read_clip(&input, "PeakStats")?;
-        let info = checked_info(&source, "PeakStats", Accept::GrayInteger8To16)?;
+        let info = checked_info(&source, "PeakStats", Accept::Analyzer)?;
 
         let upper_limit = read_int(&input, key!(c"upper_limit"))?.unwrap_or(DEFAULT_UPPER_LIMIT);
         if !(MIN_UPPER_LIMIT..=MAX_UPPER_LIMIT).contains(&upper_limit) {
@@ -155,7 +156,7 @@ impl Filter for PeakStats {
                 let mut trace = FrameTrace::new(self.debug, "PeakStats");
 
                 let input = self.source.get_frame_filter(n, &mut frame_ctx);
-                check_frame_format(&input, "PeakStats", Accept::GrayInteger8To16)?;
+                check_frame_format(&input, "PeakStats", Accept::Analyzer)?;
                 let settings = describe_frame(&input);
                 let options = &self.options;
                 let line = format!(
@@ -171,7 +172,7 @@ impl Filter for PeakStats {
                 let mark = Instant::now();
                 let histogram = match &self.engine {
                     Some(engine) => engine.count(&core, &input)?,
-                    None => plane_histogram(&input)?,
+                    None => analyzer_histogram(&input)?,
                 };
                 trace.mark("histogram", mark);
 

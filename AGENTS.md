@@ -16,13 +16,14 @@ shipped as `vapoursynth-nimages`. keep the public identity unchanged:
   wheel stages both, plus a `manifest.vs`, under `vapoursynth/plugins/nimages/`
 - python distribution: `vapoursynth-nimages`
 
-the first release is 8 bit integer only. `PeakStats` and `PeakGrayShades` take a
-Gray clip and leave pixels alone, attaching their results as frame properties, so
-a caller composes `PeakStats` -> `Levels(use_props=True)` instead of asking for
-automatic levels in one call. `Levels` and `Posterize` take any 8 bit integer
-family and rewrite every plane. `Deblur` takes Gray, RGB and YUV formats, at
-any integer depth from 8 to 16 bits and the 32 bit float ones. Every filter
-handles a clip whose dimensions are not known until a frame is asked for.
+the first release is 8 bit integer only. `PeakStats` and `PeakGrayShades` take an
+integer Gray, YUV or RGB clip and leave pixels alone, attaching their results as
+frame properties, so a caller composes `PeakStats` -> `Levels(use_props=True)`
+instead of asking for automatic levels in one call. `Levels` and `Posterize`
+take any 8 bit integer family and rewrite every plane. `Deblur` takes Gray, RGB
+and YUV formats, at any integer depth from 8 to 16 bits and the 32 bit float
+ones. Every filter handles a clip whose dimensions are not known until a frame
+is asked for.
 
 `docs/IMPLEMENTATIONS.md` is the plan of record for the filter surface, the
 argument names and the property names. read it before changing anything public.
@@ -50,15 +51,20 @@ byte-identical to the host path; they are worth it only inside a device chain,
 1.2x to 1.5x while the chain fits and a loss at a wide fan-in, and
 [18](docs/improvements/18-vulkan-pointwise-maps.md#outcome-so-far) records both.
 
-`PeakStats(gpu=1)` and `PeakGrayShades(gpu=1)` count plane 0 on the device and
-analyse the table with the same host code, so the properties, the shade arrays
-and the pixels match `gpu=0` exactly; `Posterize(method=1, gpu=1)` solves its
+`PeakStats(gpu=1)` and `PeakGrayShades(gpu=1)` count on the device and analyse
+the table with the same host code, so the properties, the shade arrays and the
+pixels match `gpu=0` exactly; `Posterize(method=1, gpu=1)` solves its
 levels from that table. counting is 10x to 18x cheaper than the host's inside a
 device chain, which takes `PeakGrayShades` into `Posterize(method=1)` from 20.0
 to 6.2 ms at 12 MP `GRAY8` and from 49.1 to 14.0 ms at `GRAY16`; a lone analyzer
 is transfer bound at 1.6x to 1.9x.
 [19](docs/improvements/19-vulkan-histogram-analyzers.md#outcome-so-far) records
 both, and `tools/histogram_hash.py` is the gate.
+the analyzers also take `YUV` and `RGB`: plane 0 for `YUV`, the reference's
+fixed-point luma for `RGB`, so an `RGB` page with equal planes reports what the
+same page as gray does. that puts the `Posterize(method=1)` chain at 2.2x for
+`YUV420P8` and 2.7x for `RGB24`;
+[20](docs/improvements/20-analyzer-color-inputs.md#outcome-so-far) records it.
 
 `docs/improvements/15-vulkan-device-path.md` records what the pinned binding
 offers, what the host/device bus costs, and which filters pay for it: the device
@@ -233,11 +239,14 @@ argument and property tables.
 - a filter checks the format the node declares, and re-checks the format of each
   frame. a clip whose dimensions or format vary reports `Undefined`, and only the
   frame can answer for it.
-- `PeakStats` and `PeakGrayShades` take a Gray clip, because a histogram of one
-  plane only means something for one. `Levels` and `Posterize` take any 8 bit
-  integer family and rewrite every plane. `Deblur` takes Gray, RGB and YUV
-  integer and float formats and moves luma alone, with chroma carried through
-  and an RGB delta limited to the gamut each pixel has left.
+- `PeakStats` and `PeakGrayShades` take an integer Gray, YUV or RGB clip from 8 to
+  16 bits. a Gray clip counts its one plane, a YUV clip plane 0, which is luma,
+  and an RGB clip the reference's fixed-point luma of its three planes, so an
+  RGB page with equal planes reports what the same page as gray does. `Levels`
+  and `Posterize` take any 8 bit integer family and rewrite every plane.
+  `Deblur` takes Gray, RGB and YUV integer and float formats and moves luma
+  alone, with chroma carried through and an RGB delta limited to the gamut each
+  pixel has left.
 - every plane walk uses the frame's own `frame_width`, `frame_height` and
   `stride`, so variable dimensions and subsampled chroma both work. samples are
   one byte apart: VapourSynth hands an RGB24 frame out as three separate plane
