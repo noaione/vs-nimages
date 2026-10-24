@@ -301,6 +301,34 @@ pub(super) enum MappingTable {
     F32 { black: f64, white: f64, gamma: f64 },
 }
 
+impl MappingTable {
+    /// The table as device words, or `None` for the float curve, which is not a
+    /// table and stays on the host.
+    pub(super) fn device_words(&self) -> Option<Vec<u32>> {
+        match self {
+            Self::U8(table) => Some(table.iter().map(|&value| u32::from(value)).collect()),
+            Self::U16(table) => Some(table.iter().map(|&value| u32::from(value)).collect()),
+            Self::F32 { .. } => None,
+        }
+    }
+}
+
+/// Uploads one table as the device frame the map kernel indexes.
+///
+/// The words keep their native code value, so the kernel's index is the sample
+/// itself and no scaling happens on either side. `None` when the table is the
+/// float curve, which has no device form.
+pub(super) fn device_table(
+    core: &CoreRef<'_>,
+    table: &MappingTable,
+) -> Result<Option<(VideoFrame, u32)>> {
+    let Some(words) = table.device_words() else {
+        return Ok(None);
+    };
+    let length = u32::try_from(words.len()).unwrap_or(u32::MAX);
+    Ok(Some((crate::gpu::upload_words(core, &words)?, length)))
+}
+
 /// Rewrites every sample of one plane through `table`.
 fn map_plane(
     source: &VideoFrame,

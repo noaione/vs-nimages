@@ -35,6 +35,10 @@ FIXTURES = REPO_ROOT / "tests" / "fixtures"
 PLUGIN_ID = "xyz.n4o.nimages"
 NAMESPACE = "nimages"
 FUNCTIONS = ("Deblur", "Levels", "PeakGrayShades", "PeakStats", "Posterize")
+# The filters with a `gpu` argument declare their output as `all`, which the
+# instance answers: a `gpu=0` run still hands back a host frame.
+DEVICE_FILTERS = ("Deblur", "Levels", "Posterize")
+CLIP_ALL = "clip:vnode:all;"
 
 # Histogram cases above this many pixels are left to the Rust tests; building a
 # frame that wide is not worth the time here.
@@ -204,11 +208,11 @@ def check_registration() -> None:
 
     for name in FUNCTIONS:
         exported = getattr(core.nimages, name)
-        # `all` is the per-instance residency form: `Deblur` answers it from
-        # `gpu`, so a `gpu=0` run still returns a host frame.
+        # Three filters answer `all` from their own `gpu` argument, so a `gpu=0`
+        # run still returns a host frame; the analyzers have no device path.
         same(
             exported.return_signature,
-            "clip:vnode:all;" if name == "Deblur" else "clip:vnode;",
+            CLIP_ALL if name in DEVICE_FILTERS else "clip:vnode;",
             f"{name}: return signature",
         )
         check(

@@ -193,6 +193,41 @@ planes over the bus, 14.2 ms at 12 MP against Gray's 5.1, and still wins
 because its host path reads three planes too. YUV420P8 moves 1.5 samples per
 pixel and wins least because its host path only touches one.
 
+## the pointwise maps
+
+`Levels(gpu=1)` and `Posterize(gpu=1)` are one table lookup per sample, so alone
+they are a loss: a host clip costs more to upload and download than the 4.6 ms
+and 4.3 ms of lookups they replace. they earn their place after a device
+producer, where the frame is already there and only the final download is left.
+`tools/map_hash.py` compares them on 29 cases: every integer family and depth is
+byte-identical to `gpu=0`, and the float `Levels` and the Lloyd `Posterize` are
+refused by name.
+
+one frame per pull through `Deblur(gpu=1)` and the two maps, 12 MP `GRAY8`,
+| method | host maps | device maps | saved |
+| --- | ---: | ---: | ---: |
+| `1` | 38.3 ms | 22.3 ms | 42% |
+| `0` | 66.9 ms | 50.1 ms | 25% |
+
+aggregate, 13 frames through `std.AverageFrames`, median of three:
+
+| frames in flight | method | host maps | device maps | ratio |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 1 | 28.4 fps | 39.6 fps | 1.40x |
+| 1 | 0 | 15.5 fps | 23.2 fps | 1.49x |
+| 3 | 1 | 60.1 fps | 72.3 fps | 1.20x |
+| 3 | 0 | 28.0 fps | 32.3 fps | 1.15x |
+| 5 | 1 | 74.2 fps | 90.9 fps | 1.22x |
+| 5 | 0 | 36.2 fps | 35.6 fps | 0.98x |
+| 13 | 1 | 114.1 fps | 103.6 fps | 0.91x |
+| 13 | 0 | 42.2 fps | 10.3 fps | 0.24x |
+
+the chain wins while it fits, 1.2x to 1.5x up to five frames in flight. past
+that each device filter's output frame is one more frame against the card's
+memory, and the wide-fan-in number is the allocator rather than the kernel: the
+same wall the `Deblur` section above records at 24 MP. one frame at a time,
+which is what a caller with a bounded pipeline has, is the shape to quote.
+
 ## what a webp actually hands out
 
 two things about the `level-webp-check` set are worth recording, because both
