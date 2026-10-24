@@ -22,7 +22,7 @@ outcomes.
 | --- | --- | --- |
 | [15 the device path](15-vulkan-device-path.md) | proposed, research complete | the binding surface, the gates, the bus budget, the per-filter verdict |
 | [16 validating a device kernel](16-vulkan-validation.md) | proposed | the device gate in `tests/check-nimages.py`, the Deblur hash harness, the bench protocol |
-| [17 Deblur on the device](17-vulkan-deblur.md) | proposed | both methods, 31 dispatches in one recording, the exactness rules, the milestones |
+| [17 Deblur on the device](17-vulkan-deblur.md) | in progress: `method=1` on 8 bit Gray landed and byte-identical, 9.7x at 12 MP; `method=0` and the wider formats pending |
 | [18 pointwise maps](18-vulkan-pointwise-maps.md) | proposed | `Levels` and `Posterize` as chain members, standalone is a loss |
 | [19 histogram analyzers](19-vulkan-histogram-analyzers.md) | proposed | `PeakStats`/`PeakGrayShades` on the device, and `Posterize(method=1)` after them |
 

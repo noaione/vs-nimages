@@ -35,7 +35,10 @@ the five filters are implemented and covered by `tests/check-nimages.py`.
 `docs/FINDINGS.md` §8 tracks the milestones: M1, M2 and M3 are done, M4 is
 deferred because it touches the sibling checkout, and M5 is distribution work.
 
-the Vulkan device path is planned and not implemented.
+the Vulkan device path is in part implemented. `Deblur(gpu=1)` runs `method=1` on
+8 bit Gray, byte-identical to `gpu=0`, and refuses `method=0`, 16 bit, float and
+RGB/YUV for now; [17](docs/improvements/17-vulkan-deblur.md#outcome-so-far) has
+the numbers.
 `docs/improvements/15-vulkan-device-path.md` records what the pinned binding
 offers, what the host/device bus costs, and which filters pay for it: the device
 `Deblur` is a win, the pointwise maps and the histogram analyzers are chain
@@ -84,10 +87,10 @@ carries a `parity` of `nmanga`, `diverges` or `reference-only` plus the
 - `src/filters/{peak_stats,peak_gray_shades,levels,posterize,deblur}.rs`: the
   five filters. all `Parallel`, all with a strict spatial dependency on their
   input.
-- `src/gpu/`: the device layer, when it lands. `mod.rs` is the VapourSynth-facing
-  half, `shared.rs` the launch geometry and the GLSL preamble, and one module per
-  filter holds its kernels. see
-  `docs/improvements/15-vulkan-device-path.md`.
+- `src/gpu/`: the device layer. `mod.rs` is the VapourSynth-facing half (gate,
+  pipeline, pool, plane binding, barriers, upload/download), `shared.rs` the
+  launch geometry and the GLSL preamble with no binding type, and `deblur.rs`
+  the Deblur kernels. see `docs/improvements/15-vulkan-device-path.md`.
 - `src/histogram.rs`: the stride-aware `[u64; 256]` histogram every analyzer
   shares. `from_plane` refuses rows that do not fit instead of reading past them.
 - `src/peaks.rs`: `find_local_peak`, a dependency-free replacement for

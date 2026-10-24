@@ -122,6 +122,29 @@ decode instead. read the plugin's `decode + resize` against the reference's
 | 44 | levels (webp) | vapoursynth vs nmanga | 1.92x | 1.41x | 44/44 |
 <!-- bench:end -->
 
+## the device path
+
+`Deblur(gpu=1)` runs `method=1` on 8 bit Gray on the Vulkan device; the rest of
+the filter surface is still on the host and `gpu=1` refuses it by name. the
+parity gate is `tools/deblur_hash.py --device`, which compares `gpu=1` through
+`std.GPUDownload` against `gpu=0` on the same 24 cases and reports the seven
+8 bit Gray `method=1` cases byte-identical (2026-10-24).
+
+the numbers below are one frame on a quiet machine, a fresh `Deblur` node per
+request, median of seven, on a `BlankClip` source so the frame costs nothing to
+make and both engines see the same input. `device + download` is what a caller
+pays; `bus` is a `std.GPUUpload` -> `std.GPUDownload` round trip of the same
+frame, measured the same way.
+
+| page | CPU | device + download | bus | speedup |
+| --- | ---: | ---: | ---: | ---: |
+| 2902x4128, 12.0 MP | 156.4 ms | 16.1 ms | 6.9 ms | 9.7x |
+| 5806x4128, 24.0 MP | 314.9 ms | 32.1 ms | 12.8 ms | 9.8x |
+
+this is latency, not throughput: the fan-in a volume encode sees has not been
+measured. [`docs/improvements/17-vulkan-deblur.md`](improvements/17-vulkan-deblur.md#measured)
+has the method, the parity result and what the first kernel cost.
+
 ## what a webp actually hands out
 
 two things about the `level-webp-check` set are worth recording, because both

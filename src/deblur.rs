@@ -12,6 +12,10 @@
 //! during a frame. The blur is the separable direct convolution with the interior
 //! split from the borders, so the tap loop reads a bounds-free window and only
 //! the border samples pay for the reflection.
+//!
+//! The module also carries the host-side device plan: the taps and radii a
+//! shader is told, the sample scale it quantises with, and the mask and blend
+//! constants, all resolved by the same expressions the host path runs.
 
 /// The sample range the kernels work in: the reference's `[0, 1]` times 255.
 const CODE_VALUES: f32 = 255.0;
@@ -41,7 +45,7 @@ pub const MAX_RADIUS: f32 = 16.0;
 /// The largest number of refinement passes a caller may ask for.
 pub const MAX_ITERATIONS: u32 = 64;
 /// The most taps any kernel can have, which is what `MAX_RADIUS` truncates to.
-const MAX_KERNEL_TAPS: usize = 2 * ((TRUNCATE * MAX_RADIUS + 0.5) as usize) + 1;
+pub(crate) const MAX_KERNEL_TAPS: usize = 2 * ((TRUNCATE * MAX_RADIUS + 0.5) as usize) + 1;
 /// The tap count at which the register accumulator stops paying.
 ///
 /// Measured on a 2903x4128 plane: the vertical pass is 1.29x to 1.41x faster
@@ -620,29 +624,42 @@ fn ensure(buffer: &mut Vec<f32>, length: usize) -> Result<(), DeblurError> {
 
 /// Builds the normalized Gaussian weights for `sigma` and returns the radius.
 ///
+/// The weights come from [`kernel_taps`], so the host path and a device plan
+/// build the same taps.
+fn build_kernel(sigma: f32, weights: &mut Vec<f32>) -> usize {
+    let mut taps = [0.0f32; MAX_KERNEL_TAPS];
+    let (radius, count) = kernel_taps(sigma, &mut taps);
+    weights.clear();
+    weights.extend_from_slice(&taps[..count]);
+    radius
+}
+
+/// Fills `taps` with the normalized Gaussian weights for `sigma`, returning the
+/// radius and the number of live taps.
+///
 /// The radius reproduces scipy's `lw = int(truncate * sigma + 0.5)`, so a small
 /// sigma gives a radius of zero and the blur is the identity, exactly as the
-/// reference's `gaussian_filter` is.
-fn build_kernel(sigma: f32, weights: &mut Vec<f32>) -> usize {
-    let radius = (TRUNCATE * sigma + 0.5) as usize;
+/// reference's `gaussian_filter` is. The radius is capped at what
+/// [`MAX_KERNEL_TAPS`] holds, which only a sigma past [`MAX_RADIUS`] reaches;
+/// [`Params::validate`] refuses those before a kernel is built.
+fn kernel_taps(sigma: f32, taps: &mut [f32; MAX_KERNEL_TAPS]) -> (usize, usize) {
+    let radius = ((TRUNCATE * sigma + 0.5) as usize).min((MAX_KERNEL_TAPS - 1) / 2);
     let length = 2 * radius + 1;
-    weights.clear();
-    weights.resize(length, 0.0);
 
     let scale = -0.5 / f64::from(sigma) / f64::from(sigma);
     let mut total = 0.0f64;
-    for (index, weight) in weights.iter_mut().enumerate() {
+    for (index, weight) in taps.iter_mut().enumerate().take(length) {
         let offset = index as f64 - radius as f64;
         let value = (scale * offset * offset).exp();
         *weight = value as f32;
         total += value;
     }
     if total > 0.0 {
-        for weight in weights.iter_mut() {
+        for weight in taps.iter_mut().take(length) {
             *weight = (f64::from(*weight) / total) as f32;
         }
     }
-    radius
+    (radius, length)
 }
 
 /// Blurs `source` into `target` with a separable Gaussian, using `temp` for the
@@ -1040,7 +1057,7 @@ fn reflected_tap(source: &[f32], index: isize, weights: &[f32], radius: usize) -
 
 /// Folds an out-of-range index back into `0..length` by repeating the edge
 /// sample, which is scipy's `mode="reflect"`.
-fn reflect(index: isize, length: usize) -> usize {
+pub(crate) fn reflect(index: isize, length: usize) -> usize {
     if length == 0 {
         return 0;
     }
@@ -1067,7 +1084,7 @@ fn sobel_mask(base: &[f32], mask: &mut [f32], plane: Plane, threshold: f32) {
     if width == 0 || height == 0 {
         return;
     }
-    let ramp = (RAMP * threshold).max(RAMP_FLOOR);
+    let ramp = mask_ramp(threshold);
 
     #[cfg(target_arch = "x86_64")]
     if is_x86_feature_detected!("avx2") && width > 2 {
@@ -1251,6 +1268,209 @@ fn clamp(value: f32, low: f32, high: f32) -> f32 {
     } else {
         value
     }
+}
+
+/// The sample format a device plan is built for.
+///
+/// It is the part of a frame format the plan depends on, named without a
+/// VapourSynth type so `src/gpu` can hold a plan and this module still tests
+/// without a core. The filter layer has already refused a format `Deblur`
+/// does not accept.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SampleFormat {
+    /// Integer samples of 8 to 16 bits.
+    Integer(u32),
+    /// 32 bit float samples, in the reference's `[0, 1]` range.
+    Float32,
+}
+
+/// How one sample turns into an 8 bit code value and back.
+///
+/// These are the constants `Convert` in `src/filters/deblur.rs` applies; the
+/// device layer is told the same scale so a shader writes an output sample
+/// exactly as the host does. The two must stay in step, and the tests below
+/// pin both depths.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Quantisation {
+    /// Samples to code values.
+    pub(crate) scale: f32,
+    /// Code values to samples.
+    pub(crate) inverse: f64,
+    /// Bytes one sample occupies.
+    pub(crate) bytes: usize,
+    /// Whether the samples are floats, which have no rounding step.
+    pub(crate) float: bool,
+    /// The largest integer sample value, or zero on the float path.
+    pub(crate) max_value: f64,
+}
+
+impl Quantisation {
+    /// Resolves the scale for `format`, or `None` outside 8 to 16 bit integers.
+    #[must_use]
+    pub(crate) fn new(format: SampleFormat) -> Option<Self> {
+        match format {
+            SampleFormat::Float32 => Some(Self {
+                scale: CODE_VALUES,
+                inverse: 1.0 / f64::from(CODE_VALUES),
+                bytes: 4,
+                float: true,
+                max_value: 0.0,
+            }),
+            SampleFormat::Integer(bits) if (8..=16).contains(&bits) => {
+                let max_value = f64::from((1u32 << bits) - 1);
+                Some(Self {
+                    scale: (f64::from(CODE_VALUES) / max_value) as f32,
+                    inverse: max_value / f64::from(CODE_VALUES),
+                    bytes: if bits <= 8 { 1 } else { 2 },
+                    float: false,
+                    max_value,
+                })
+            }
+            SampleFormat::Integer(_) => None,
+        }
+    }
+}
+
+/// One Gaussian's taps, as both axes of the separable blur read them.
+///
+/// The kernel is isotropic, so the horizontal and vertical passes share one
+/// weight table. The radius is the reflection distance at each border, which
+/// is also the offset of tap zero from the output sample.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Gaussian {
+    taps: [f32; MAX_KERNEL_TAPS],
+    count: usize,
+    radius: usize,
+}
+
+impl Gaussian {
+    /// Builds the kernel `sigma` selects with the host path's rule.
+    #[must_use]
+    pub(crate) fn new(sigma: f32) -> Self {
+        let mut taps = [0.0f32; MAX_KERNEL_TAPS];
+        let (radius, count) = kernel_taps(sigma, &mut taps);
+        Self {
+            taps,
+            count,
+            radius,
+        }
+    }
+
+    /// The taps both axes read.
+    #[must_use]
+    pub(crate) fn taps(&self) -> &[f32] {
+        self.taps.get(..self.count).unwrap_or_default()
+    }
+
+    /// How many taps there are.
+    #[must_use]
+    pub(crate) fn count(&self) -> usize {
+        self.count
+    }
+
+    /// The horizontal radius, in pixels.
+    #[must_use]
+    pub(crate) fn horizontal_radius(&self) -> usize {
+        self.radius
+    }
+
+    /// The vertical radius, in pixels.
+    #[must_use]
+    pub(crate) fn vertical_radius(&self) -> usize {
+        self.radius
+    }
+}
+
+/// The edge mask's parameters, in 8 bit levels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Mask {
+    /// Edge threshold in 8 bit levels.
+    pub(crate) threshold: f32,
+    /// Ramp width of the smoothstep, floored away from zero.
+    pub(crate) ramp: f32,
+    /// The Sobel response of a full black to white step, in 8 bit levels.
+    pub(crate) sobel_span: f32,
+}
+
+/// The blend's constants, in 8 bit code values.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Blend {
+    /// Extra excursion past the local extremes, in 8 bit steps.
+    pub(crate) overshoot: f32,
+    /// The deconvolution's pedestal.
+    pub(crate) pedestal: f32,
+    /// Floor under the deconvolution's division.
+    pub(crate) division_floor: f32,
+    /// The 8 bit code value range.
+    pub(crate) code_values: f32,
+}
+
+/// Everything a device `Deblur` kernel is told.
+///
+/// The plan is the host path's own arithmetic resolved once: the three
+/// Gaussians come from [`Gaussian::new`], the mask's ramp from the expression
+/// [`sobel_mask`] uses, and the quantisation from the constants `Convert`
+/// applies. A shader repeats these steps, so it is told the resolved values
+/// instead of deriving them again.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Plan {
+    /// Which candidate the shader builds.
+    pub(crate) method: Method,
+    /// How much of the candidate is blended back.
+    pub(crate) strength: f32,
+    /// Refinement passes, `Method::Deconvolution` only.
+    pub(crate) iterations: u32,
+    /// The Gaussian of the assumed blur.
+    pub(crate) gaussian: Gaussian,
+    /// The edge detector's prefilter.
+    pub(crate) prefilter: Gaussian,
+    /// The mask's own blur.
+    pub(crate) mask_blur: Gaussian,
+    /// The edge mask's parameters.
+    pub(crate) mask: Mask,
+    /// The blend's constants.
+    pub(crate) blend: Blend,
+    /// How samples scale in and out.
+    pub(crate) quantisation: Quantisation,
+}
+
+impl Plan {
+    /// Resolves the plan for `params` over `format`.
+    ///
+    /// `None` when the parameters are outside [`Params::validate`]'s bounds or
+    /// `format` is not an 8 to 16 bit integer or a 32 bit float. The filter
+    /// layer refuses both before a node is registered, so a device path treats
+    /// `None` as a frame that stays on the host.
+    #[must_use]
+    pub(crate) fn new(params: &Params, format: SampleFormat) -> Option<Self> {
+        params.validate().ok()?;
+        Some(Self {
+            method: params.method,
+            strength: params.strength,
+            iterations: params.iterations,
+            gaussian: Gaussian::new(params.radius),
+            prefilter: Gaussian::new(PREFILTER_SIGMA),
+            mask_blur: Gaussian::new(MASK_SIGMA),
+            mask: Mask {
+                threshold: params.threshold,
+                ramp: mask_ramp(params.threshold),
+                sobel_span: SOBEL_SPAN,
+            },
+            blend: Blend {
+                overshoot: params.overshoot,
+                pedestal: PEDESTAL,
+                division_floor: DIVISION_FLOOR,
+                code_values: CODE_VALUES,
+            },
+            quantisation: Quantisation::new(format)?,
+        })
+    }
+}
+
+/// The ramp width of the mask's smoothstep, floored so `threshold = 0` opens
+/// the mask instead of dividing by zero.
+fn mask_ramp(threshold: f32) -> f32 {
+    (RAMP * threshold).max(RAMP_FLOOR)
 }
 
 #[cfg(test)]
@@ -1812,5 +2032,125 @@ mod tests {
             .validate(),
             Err(DeblurError::Overshoot)
         );
+    }
+
+    #[test]
+    fn the_plan_pins_the_taps_of_the_three_sigmas() {
+        for (sigma, radius, count) in [(0.8f32, 3usize, 7usize), (0.5, 2, 5), (0.45, 2, 5)] {
+            let kernel = Gaussian::new(sigma);
+            assert_eq!(kernel.horizontal_radius(), radius, "sigma {sigma} radius");
+            assert_eq!(kernel.vertical_radius(), radius, "sigma {sigma} radius");
+            assert_eq!(kernel.count(), count, "sigma {sigma} count");
+            assert_eq!(kernel.taps().len(), count, "sigma {sigma} taps");
+            // One table feeds both axes, so the kernel is isotropic by
+            // construction; the table itself is symmetric.
+            assert_eq!(
+                kernel.taps()[0],
+                kernel.taps()[count - 1],
+                "sigma {sigma} symmetry"
+            );
+
+            let total: f32 = kernel.taps().iter().sum();
+            assert!((total - 1.0).abs() < 1e-6, "sigma {sigma} sums to {total}");
+            for (index, weight) in kernel.taps().iter().enumerate() {
+                let mirrored = kernel.taps()[count - 1 - index];
+                assert!(
+                    (weight - mirrored).abs() < 1e-9,
+                    "sigma {sigma} tap {index} is not symmetric"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_plan_reuses_the_host_taps() {
+        for sigma in [0.45f32, 0.5, 0.8, 2.0, 16.0] {
+            let mut weights = Vec::new();
+            let radius = build_kernel(sigma, &mut weights);
+            let kernel = Gaussian::new(sigma);
+            assert_eq!(radius, kernel.horizontal_radius(), "sigma {sigma} radius");
+            assert_eq!(weights.len(), kernel.count(), "sigma {sigma} count");
+            let host: Vec<u32> = weights.iter().map(|value| value.to_bits()).collect();
+            let plan: Vec<u32> = kernel.taps().iter().map(|value| value.to_bits()).collect();
+            assert_eq!(host, plan, "sigma {sigma} taps moved");
+        }
+    }
+
+    #[test]
+    fn the_plan_pins_the_eight_and_sixteen_bit_quantisation() {
+        let eight = Quantisation::new(SampleFormat::Integer(8)).expect("8 bit");
+        assert_eq!(eight.scale.to_bits(), 1.0f32.to_bits());
+        assert_eq!(eight.inverse, 1.0);
+        assert_eq!(eight.bytes, 1);
+        assert!(!eight.float);
+        assert_eq!(eight.max_value, 255.0);
+
+        let sixteen = Quantisation::new(SampleFormat::Integer(16)).expect("16 bit");
+        assert_eq!(
+            sixteen.scale.to_bits(),
+            ((f64::from(CODE_VALUES) / 65535.0) as f32).to_bits()
+        );
+        assert_eq!(sixteen.inverse, 257.0);
+        assert_eq!(sixteen.bytes, 2);
+        assert!(!sixteen.float);
+        assert_eq!(sixteen.max_value, 65535.0);
+
+        let float = Quantisation::new(SampleFormat::Float32).expect("float");
+        assert_eq!(float.scale, CODE_VALUES);
+        assert_eq!(float.inverse, 1.0 / f64::from(CODE_VALUES));
+        assert_eq!(float.bytes, 4);
+        assert!(float.float);
+        assert_eq!(float.max_value, 0.0);
+
+        assert!(Quantisation::new(SampleFormat::Integer(7)).is_none());
+        assert!(Quantisation::new(SampleFormat::Integer(17)).is_none());
+        assert!(Quantisation::new(SampleFormat::Integer(12)).is_some());
+    }
+
+    #[test]
+    fn the_reflection_covers_a_kernel_window() {
+        // A radius three kernel over five samples reflects three samples at
+        // each end, and both edges repeat their own sample.
+        let expected: [usize; 11] = [2, 1, 0, 0, 1, 2, 3, 4, 4, 3, 2];
+        for (offset, want) in (-3..=7).zip(expected) {
+            assert_eq!(reflect(offset, 5), want, "index {offset}");
+        }
+        assert_eq!(reflect(-1, 0), 0);
+    }
+
+    #[test]
+    fn the_plan_carries_the_mask_and_blend() {
+        let params = Params::default();
+        let plan = Plan::new(&params, SampleFormat::Integer(8)).expect("planned");
+        assert_eq!(plan.method, Method::Deconvolution);
+        assert_eq!(plan.strength, params.strength);
+        assert_eq!(plan.iterations, params.iterations);
+        assert_eq!(plan.gaussian.horizontal_radius(), 3);
+        assert_eq!(plan.prefilter.horizontal_radius(), 2);
+        assert_eq!(plan.mask_blur.horizontal_radius(), 2);
+        assert_eq!(plan.mask.threshold, 2.0);
+        assert_eq!(plan.mask.ramp, 6.0);
+        assert_eq!(plan.mask.sobel_span, 8.0);
+        assert_eq!(plan.blend.overshoot, 0.0);
+        assert_eq!(plan.blend.pedestal, 1.0);
+        assert_eq!(plan.blend.division_floor, 1e-7);
+        assert_eq!(plan.blend.code_values, 255.0);
+        assert_eq!(plan.quantisation.bytes, 1);
+
+        // A threshold of zero still gets a ramp the shader can divide by.
+        let open = Params {
+            threshold: 0.0,
+            ..Params::default()
+        };
+        let plan = Plan::new(&open, SampleFormat::Integer(16)).expect("planned");
+        assert_eq!(plan.mask.ramp, RAMP_FLOOR);
+
+        // Both refusals leave the frame on the host instead of guessing.
+        let broken = Params {
+            radius: 0.0,
+            ..Params::default()
+        };
+        assert!(Plan::new(&broken, SampleFormat::Integer(8)).is_none());
+        assert!(Plan::new(&Params::default(), SampleFormat::Integer(7)).is_none());
     }
 }

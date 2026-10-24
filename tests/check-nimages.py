@@ -204,8 +204,17 @@ def check_registration() -> None:
 
     for name in FUNCTIONS:
         exported = getattr(core.nimages, name)
-        same(exported.return_signature, "clip:vnode;", f"{name}: return signature")
-        check(exported.signature.startswith("clip:vnode;"), f"{name}: takes a clip first")
+        # `all` is the per-instance residency form: `Deblur` answers it from
+        # `gpu`, so a `gpu=0` run still returns a host frame.
+        same(
+            exported.return_signature,
+            "clip:vnode:all;" if name == "Deblur" else "clip:vnode;",
+            f"{name}: return signature",
+        )
+        check(
+            exported.signature.startswith(("clip:vnode;", "clip:vnode:all;")),
+            f"{name}: takes a clip first",
+        )
 
 
 def check_frame_peaks(frames: dict, fixtures: dict) -> None:
