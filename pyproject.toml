@@ -40,7 +40,7 @@ dev = [
     "build>=1.2",
     "hatchling>=1.27",
     "packaging>=26.3",
-    "VapourSynth>=79",
+    "VapourSynth>=80",
     "vsrepo>=2.0"
 ]
 dev-tests = [
@@ -53,7 +53,7 @@ dev-tests = [
 golden = [
     "numpy>=2.0",
     "scipy>=1.14",
-    "pillow>=12",
+    "pillow>=13.0.0",
 ]
 
 [build-system]
