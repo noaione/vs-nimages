@@ -36,9 +36,10 @@ the five filters are implemented and covered by `tests/check-nimages.py`.
 deferred because it touches the sibling checkout, and M5 is distribution work.
 
 the Vulkan device path is in part implemented. `Deblur(gpu=1)` runs both methods
-on 8 bit Gray, byte-identical to `gpu=0`, and refuses 16 bit, float and RGB/YUV
-for now; [17](docs/improvements/17-vulkan-deblur.md#outcome-so-far) has the
-numbers.
+on Gray 8 to 16 bit and 32 bit float; 8 bit is byte-identical to `gpu=0`, the
+deeper integers within one LSB and the float path within two ULP, and RGB/YUV
+is refused for now; [17](docs/improvements/17-vulkan-deblur.md#outcome-so-far)
+has the numbers.
 `docs/improvements/15-vulkan-device-path.md` records what the pinned binding
 offers, what the host/device bus costs, and which filters pay for it: the device
 `Deblur` is a win, the pointwise maps and the histogram analyzers are chain

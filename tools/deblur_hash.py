@@ -25,9 +25,10 @@ Run it with the development interpreter after the plugin is installed::
 `target/bench-images/deblur-hash.json`, which the tree ignores. `--check`
 recomputes the table, fails on any case whose hash or arguments moved, and
 reports a revision difference as a note because the pixels are what it compares.
-`--device` exits nonzero when a device frame differs from its CPU equivalent,
-and exits 0 with a `device: skipped` line when the core has no usable device or
-the filter has no `gpu` argument yet.
+`--device` exits nonzero when a device frame differs from its CPU equivalent
+beyond what the format allows (8 bit exact, deeper integer one LSB, float the
+fixture's 1/255), and exits 0 with a `device: skipped` line when the core has no
+usable device or the filter has no `gpu` argument yet.
 
 numpy is the only dependency beyond the plugin, so the dev-tests extra is enough.
 """
@@ -287,22 +288,35 @@ def run_case(case: Case) -> dict[str, Any]:
     }
 
 
-def compare_nodes(host: vs.VideoNode, device: vs.VideoNode) -> int:
-    """Byte-compares two nodes frame by frame, returning the differing count.
+def compare_nodes(host: vs.VideoNode, device: vs.VideoNode) -> tuple[int, float]:
+    """Compares two nodes frame by frame, returning (bad planes, worst sample gap).
 
-    `tobytes` keeps a float frame's bit pattern, so `-0.0` and NaN are compared
-    as bits rather than by `==`, which is what a device port has to reproduce.
+    8 bit planes are compared byte for byte. Deeper integer planes allow one
+    LSB: the device writes through an f32 multiply where the host uses f64. Float
+    planes allow the frozen fixture's 1/255, which a 1 ULP code difference is far
+    inside. A plane over its bound counts as a failure.
     """
-    differences = 0
+    bad = 0
+    worst = 0.0
     for n in range(host.num_frames):
         with host.get_frame(n) as left, device.get_frame(n) as right:
             if (left.width, left.height) != (right.width, right.height):
-                differences += 1
+                bad += 1
                 continue
             for plane in range(left.format.num_planes):
-                if np.asarray(left[plane]).tobytes() != np.asarray(right[plane]).tobytes():
-                    differences += 1
-    return differences
+                a = np.asarray(left[plane])
+                b = np.asarray(right[plane])
+                if a.tobytes() == b.tobytes():
+                    continue
+                if a.dtype == np.uint8:
+                    bad += 1
+                    continue
+                diff = np.abs(a.astype(np.float64) - b.astype(np.float64))
+                worst = max(worst, float(diff.max()) if diff.size else 0.0)
+                limit = 1.0 if a.dtype == np.uint16 else 1.0 / 255.0
+                if diff.size and float(diff.max()) > limit:
+                    bad += 1
+    return bad, worst
 
 
 # ---------------------------------------------------------------------------
@@ -510,8 +524,14 @@ def compare_device(table: list[Case]) -> int:
             print(f"{case.name:<36} skip ({error})")
             skipped += 1
             continue
-        differences = compare_nodes(host, device)
-        print(f"{case.name:<36} {'ok' if not differences else f'MISMATCH ({differences})'}")
+        differences, worst = compare_nodes(host, device)
+        if differences:
+            verdict = f"MISMATCH ({differences})"
+        elif worst > 0.0:
+            verdict = f"ok (max {worst:g})"
+        else:
+            verdict = "ok"
+        print(f"{case.name:<36} {verdict}")
         failures += bool(differences)
     if failures:
         print(f"{failures} case(s) differ between gpu=0 and gpu=1", file=sys.stderr)

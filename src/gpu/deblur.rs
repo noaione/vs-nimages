@@ -24,15 +24,19 @@ use super::{
     BarrierFn, Device, barrier_fn, compute_barrier, gpu_error, gray32_frame, upload_floats,
 };
 
-/// Storage buffers one prepare dispatch binds: the input plane and the `GRAY32`
-/// luma it writes.
+/// Storage buffers one prepare dispatch binds: the input plane, the `GRAY32`
+/// luma it writes, and the estimate either writes or stands in for.
 const PREPARE_BINDINGS: u32 = 3;
 /// Storage buffers one blur dispatch binds: source, taps, destination, aux.
 const BLUR_BINDINGS: u32 = 4;
 /// Storage buffers one Sobel dispatch binds: the blurred luma and the mask.
 const SOBEL_BINDINGS: u32 = 2;
-/// Storage buffers one blend dispatch binds: luma, candidate, mask, output.
+/// Storage buffers one blend dispatch binds: luma, candidate, mask, the restored
+/// `GRAY32` plane it writes. the output samples are a separate pass.
 const BLEND_BINDINGS: u32 = 4;
+/// Storage buffers one store dispatch binds: the restored plane and the frame's
+/// output plane.
+const STORE_BINDINGS: u32 = 2;
 
 /// Columns one blend invocation packs into one output word.
 const BLEND_LANES: u32 = 4;
@@ -48,12 +52,14 @@ struct PreparePush {
     src_stride_bytes: u32,
     luma_stride: u32,
     estimate_stride: u32,
+    src_bytes: u32,
     scale: f32,
     pedestal: f32,
     mode: u32,
+    is_float: u32,
 }
 
-const _: () = assert!(size_of::<PreparePush>() == 10 * size_of::<u32>());
+const _: () = assert!(size_of::<PreparePush>() == 12 * size_of::<u32>());
 
 /// What the separable blur is told.
 ///
@@ -111,15 +117,31 @@ struct BlendPush {
     luma_stride: u32,
     candidate_stride: u32,
     mask_stride: u32,
-    dst_stride_bytes: u32,
-    inverse: f32,
-    max_value: f32,
+    dst_stride_words: u32,
     strength: f32,
     pedestal: f32,
     mode: u32,
 }
 
-const _: () = assert!(size_of::<BlendPush>() == 15 * size_of::<u32>());
+/// What the store kernel is told.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct StorePush {
+    units: u32,
+    stride: u32,
+    column_groups: u32,
+    width: u32,
+    height: u32,
+    src_stride_words: u32,
+    dst_stride_bytes: u32,
+    inverse: f32,
+    max_value: f32,
+    bytes: u32,
+    is_float: u32,
+}
+
+const _: () = assert!(size_of::<StorePush>() == 11 * size_of::<u32>());
+const _: () = assert!(size_of::<BlendPush>() == 13 * size_of::<u32>());
 
 const PREPARE_BODY: &str = r#"
 layout(push_constant) uniform Params {
@@ -130,26 +152,42 @@ layout(push_constant) uniform Params {
     uint src_stride_bytes;
     uint luma_stride;
     uint estimate_stride;
+    uint src_bytes;
     float scale;
     float pedestal;
     uint mode;
+    uint is_float;
 } p;
 
 layout(std430, set = 0, binding = 0) readonly buffer Src { uint words[]; } src;
 layout(std430, set = 0, binding = 1) writeonly buffer Luma { float values[]; } luma;
 layout(std430, set = 0, binding = 2) writeonly buffer Estimate { float values[]; } estimate;
 
+// One byte of the source plane. A byte offset is derived from the plane, not
+// from a sample, so any row stride is addressable.
+uint load_byte(uint offset) {
+    uint word = src.words[offset >> 2u];
+    return (word >> (8u * (offset & 3u))) & 0xFFu;
+}
+
 void main() {
     for (uint unit = gl_GlobalInvocationID.x; unit < p.units; unit += p.stride) {
         uint x = unit % p.width;
         uint y = unit / p.width;
-        uint byte = y * p.src_stride_bytes + x;
-        uint word = src.words[byte >> 2u];
-        uint code = (word >> (8u * (byte & 3u))) & 0xFFu;
-        precise float value = float(code) * p.scale;
-        luma.values[y * p.luma_stride + x] = value;
+        uint byte = y * p.src_stride_bytes + x * p.src_bytes;
+        float value;
+        if (p.is_float == 1u) {
+            value = uintBitsToFloat(src.words[byte >> 2u]) * p.scale;
+        } else if (p.src_bytes == 2u) {
+            uint pair = load_byte(byte) | (load_byte(byte + 1u) << 8u);
+            value = float(pair) * p.scale;
+        } else {
+            value = float(load_byte(byte)) * p.scale;
+        }
+        precise float code = value;
+        luma.values[y * p.luma_stride + x] = code;
         if (p.mode == 1u) {
-            estimate.values[y * p.estimate_stride + x] = value + p.pedestal;
+            estimate.values[y * p.estimate_stride + x] = code + p.pedestal;
         }
     }
 }
@@ -273,9 +311,7 @@ layout(push_constant) uniform Params {
     uint luma_stride;
     uint candidate_stride;
     uint mask_stride;
-    uint dst_stride_bytes;
-    float inverse;
-    float max_value;
+    uint dst_stride_words;
     float strength;
     float pedestal;
     uint mode;
@@ -284,7 +320,7 @@ layout(push_constant) uniform Params {
 layout(std430, set = 0, binding = 0) readonly buffer Luma { float values[]; } luma;
 layout(std430, set = 0, binding = 1) readonly buffer Candidate { float values[]; } candidate;
 layout(std430, set = 0, binding = 2) readonly buffer Mask { float values[]; } mask;
-layout(std430, set = 0, binding = 3) buffer Dst { uint words[]; } dst;
+layout(std430, set = 0, binding = 3) writeonly buffer Dst { float values[]; } dst;
 
 // The host's clamp: an unordered bound pair returns the low one, and a NaN
 // passes through because neither comparison fires.
@@ -306,8 +342,6 @@ void main() {
         uint group = unit % p.column_groups;
         uint y = unit / p.column_groups;
         uint x0 = group * 4u;
-        uint word_at = (y * p.dst_stride_bytes + x0) / 4u;
-        uint packed = dst.words[word_at];
         for (uint lane = 0u; lane < 4u; lane++) {
             uint x = x0 + lane;
             if (x >= p.width) {
@@ -348,11 +382,98 @@ void main() {
                 0.0,
                 255.0
             );
-            float rounded = clamp_host(roundEven(code * p.inverse), 0.0, p.max_value);
-            uint shift = 8u * lane;
-            packed = (packed & ~(0xFFu << shift)) | (uint(rounded) << shift);
+            // The output samples are the store pass's business; this plane is
+            // the restored luma in code values, 0 to 255.
+            dst.values[y * p.dst_stride_words + x] = code;
         }
-        dst.words[word_at] = packed;
+    }
+}
+"#;
+
+const STORE_BODY: &str = r#"
+layout(push_constant) uniform Params {
+    uint units;
+    uint stride;
+    uint column_groups;
+    uint width;
+    uint height;
+    uint src_stride_words;
+    uint dst_stride_bytes;
+    float inverse;
+    float max_value;
+    uint bytes;
+    uint is_float;
+} p;
+
+layout(std430, set = 0, binding = 0) readonly buffer Src { float values[]; } src;
+layout(std430, set = 0, binding = 1) buffer Dst { uint words[]; } dst;
+
+float clamp_host(float value, float low, float high) {
+    if (high < low) {
+        return low;
+    }
+    if (value < low) {
+        return low;
+    }
+    if (value > high) {
+        return high;
+    }
+    return value;
+}
+
+// One integer sample: the host rounds ties to even, clamps and truncates.
+uint sample_of(uint x, uint y) {
+    precise float code = src.values[y * p.src_stride_words + x];
+    precise float scaled = code * p.inverse;
+    precise float rounded = clamp_host(roundEven(scaled), 0.0, p.max_value);
+    return uint(rounded);
+}
+
+void main() {
+    uint words_per_row = p.dst_stride_bytes / 4u;
+    for (uint unit = gl_GlobalInvocationID.x; unit < p.units; unit += p.stride) {
+        uint group = unit % p.column_groups;
+        uint y = unit / p.column_groups;
+        uint x0 = group * 4u;
+        if (p.bytes == 1u) {
+            uint word = y * words_per_row + x0 / 4u;
+            uint packed = dst.words[word];
+            for (uint lane = 0u; lane < 4u; lane++) {
+                uint x = x0 + lane;
+                if (x >= p.width) {
+                    break;
+                }
+                uint shift = 8u * lane;
+                packed = (packed & ~(0xFFu << shift)) | (sample_of(x, y) << shift);
+            }
+            dst.words[word] = packed;
+        } else if (p.bytes == 2u) {
+            // Four samples are two words, two samples each.
+            uint base = y * words_per_row + x0 / 2u;
+            for (uint pair = 0u; pair < 2u; pair++) {
+                uint word = base + pair;
+                uint packed = dst.words[word];
+                for (uint lane = 0u; lane < 2u; lane++) {
+                    uint x = x0 + pair * 2u + lane;
+                    if (x >= p.width) {
+                        break;
+                    }
+                    uint shift = 16u * lane;
+                    packed = (packed & ~(0xFFFFu << shift)) | (sample_of(x, y) << shift);
+                }
+                dst.words[word] = packed;
+            }
+        } else {
+            // 32 bit float samples: no rounding and no clamp, the host's write.
+            for (uint lane = 0u; lane < 4u; lane++) {
+                uint x = x0 + lane;
+                if (x >= p.width) {
+                    break;
+                }
+                precise float code = src.values[y * p.src_stride_words + x];
+                dst.words[y * words_per_row + x] = floatBitsToUint(code * p.inverse);
+            }
+        }
     }
 }
 "#;
@@ -363,6 +484,7 @@ pub(crate) struct Engine {
     blur: Device,
     sobel: Device,
     blend: Device,
+    store: Device,
     barrier: BarrierFn,
     gaussian: VideoFrame,
     prefilter: VideoFrame,
@@ -376,14 +498,28 @@ impl Engine {
     /// Only 8 bit Gray is implemented; the refusal names what was asked for, so
     /// a caller learns the limit at creation.
     pub(crate) fn new(core: &CoreRef, plan: Plan, format: &VideoFormat) -> Result<Self> {
-        if format.color_family != ColorFamily::Gray
-            || format.sample_type != SampleType::Integer
-            || format.bits_per_sample != 8
-        {
+        if format.color_family != ColorFamily::Gray {
             return Err(NImagesError::new(format!(
-                "Deblur gpu=1: the device path takes 8 bit Gray, got {}",
+                "Deblur gpu=1: the device path takes Gray input, got {}",
                 describe(format)
             )));
+        }
+        let supported = match format.sample_type {
+            SampleType::Integer => (8..=16).contains(&format.bits_per_sample),
+            SampleType::Float => format.bits_per_sample == 32,
+        };
+        if !supported {
+            return Err(NImagesError::new(format!(
+                "Deblur gpu=1: the device path takes 8 to 16 bit integer or 32 bit float, got {}",
+                describe(format)
+            )));
+        }
+        // The 16 bit read and the 32 bit float read address words on the host's
+        // byte order; the sample pair is assembled little-endian.
+        if cfg!(target_endian = "big") {
+            return Err(NImagesError::new(
+                "Deblur gpu=1: the device path is little-endian only",
+            ));
         }
 
         let prepare = Device::new(
@@ -410,6 +546,12 @@ impl Engine {
             BLEND_BINDINGS,
             size_of::<BlendPush>() as u32,
         )?;
+        let store = Device::new(
+            core,
+            &shader(&[PREAMBLE, STORE_BODY])?,
+            STORE_BINDINGS,
+            size_of::<StorePush>() as u32,
+        )?;
 
         let barrier = barrier_fn(core)?;
         let gaussian = upload_floats(core, plan.gaussian.taps())?;
@@ -421,6 +563,7 @@ impl Engine {
             blur,
             sobel,
             blend,
+            store,
             barrier,
             gaussian,
             prefilter,
@@ -461,6 +604,11 @@ impl Engine {
         // holds the ratio until the mask pass overwrites it.
         let mut mask_raw = gray32_frame(core, width, height, None)?;
         let mut mask = gray32_frame(core, width, height, None)?;
+        // The blend writes code values; the store pass turns them into the frame's
+        // own samples, one output format per path.
+        let mut restored = gray32_frame(core, width, height, None)?;
+        let quantisation = self.plan.quantisation;
+        let barrier = self.barrier;
 
         let launch = shared::Launch::per_pixel(w, h);
         let blend_launch = shared::Launch::new(w.div_ceil(BLEND_LANES).saturating_mul(h));
@@ -478,10 +626,11 @@ impl Engine {
             temp_stride: words(&temp)?,
             mask_raw_stride: words(&mask_raw)?,
             mask_stride: words(&mask)?,
+            restored_stride: words(&restored)?,
             output_stride: u32::try_from(output_stride).unwrap_or(u32::MAX),
+            src_bytes: quantisation.bytes as u32,
+            is_float: u32::from(quantisation.float),
         };
-        let quantisation = self.plan.quantisation;
-        let barrier = self.barrier;
 
         let submit = match self.plan.method {
             Method::EdgeSharpen => {
@@ -498,6 +647,8 @@ impl Engine {
                     scale: quantisation.scale,
                     pedestal: self.plan.blend.pedestal,
                     mode: 0,
+                    src_bytes: geometry.src_bytes,
+                    is_float: geometry.is_float,
                 };
                 self.blur.record(|exec| {
                     self.record_prepare(
@@ -533,9 +684,11 @@ impl Engine {
                         &candidate,
                         candidate_stride,
                         &mask_raw,
-                        &mut output,
+                        &mut restored,
                         0,
-                    )
+                    )?;
+                    compute_barrier(exec, barrier);
+                    self.record_store(exec, &geometry, &restored, &mut output)
                 })
             }
             Method::Deconvolution => {
@@ -555,6 +708,8 @@ impl Engine {
                     scale: quantisation.scale,
                     pedestal: self.plan.blend.pedestal,
                     mode: 1,
+                    src_bytes: geometry.src_bytes,
+                    is_float: geometry.is_float,
                 };
                 self.blur.record(|exec| {
                     self.record_prepare(
@@ -625,9 +780,11 @@ impl Engine {
                         candidate,
                         candidate_stride,
                         &mask_raw,
-                        &mut output,
+                        &mut restored,
                         1,
-                    )
+                    )?;
+                    compute_barrier(exec, barrier);
+                    self.record_store(exec, &geometry, &restored, &mut output)
                 })
             }
         };
@@ -835,9 +992,7 @@ impl Engine {
             luma_stride: geometry.luma_stride,
             candidate_stride,
             mask_stride: geometry.mask_raw_stride,
-            dst_stride_bytes: geometry.output_stride,
-            inverse: self.plan.quantisation.inverse as f32,
-            max_value: self.plan.quantisation.max_value as f32,
+            dst_stride_words: geometry.restored_stride,
             strength: self.plan.strength,
             pedestal: self.plan.blend.pedestal,
             mode,
@@ -849,6 +1004,38 @@ impl Engine {
         exec.dispatch(
             self.blend.pipeline(),
             &[src, candidate_plane, mask_plane, dst],
+            bytes_of(&push),
+            geometry.blend_groups,
+        )
+    }
+
+    /// Writes the restored code values as the frame's own samples.
+    fn record_store(
+        &self,
+        exec: &mut ExecContext<'_>,
+        geometry: &Geometry,
+        restored: &VideoFrame,
+        output: &mut VideoFrame,
+    ) -> std::result::Result<(), VulkanError> {
+        let quantisation = self.plan.quantisation;
+        let push = StorePush {
+            units: geometry.blend_units,
+            stride: geometry.blend_stride,
+            column_groups: geometry.columns,
+            width: geometry.width,
+            height: geometry.height,
+            src_stride_words: geometry.restored_stride,
+            dst_stride_bytes: geometry.output_stride,
+            inverse: quantisation.inverse as f32,
+            max_value: quantisation.max_value as f32,
+            bytes: quantisation.bytes as u32,
+            is_float: u32::from(quantisation.float),
+        };
+        let src = exec.read_plane(restored, 0)?;
+        let dst = exec.write_plane(output, 0)?;
+        exec.dispatch(
+            self.store.pipeline(),
+            &[src, dst],
             bytes_of(&push),
             geometry.blend_groups,
         )
@@ -873,7 +1060,11 @@ struct Geometry {
     temp_stride: u32,
     mask_raw_stride: u32,
     mask_stride: u32,
+    restored_stride: u32,
     output_stride: u32,
+    /// The output format: bytes per sample, and whether it is a float.
+    src_bytes: u32,
+    is_float: u32,
 }
 
 /// A row stride in `f32` words, for a `GRAY32` plane.

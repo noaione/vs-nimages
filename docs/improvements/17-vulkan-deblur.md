@@ -1,8 +1,9 @@
 # Deblur on the device
 
-status: in progress. both methods on 8 bit Gray are in the tree and byte-identical to
-`gpu=0`; 16 bit, float and RGB/YUV are still M5. see
-[the outcome so far](#outcome-so-far) for the numbers and the one bug it cost.
+status: in progress. both methods on Gray 8 to 16 bit and 32 bit float are in the
+tree. 8 bit is byte-identical, the deeper integers are within one LSB and the
+float path within two ULP; RGB and YUV are open. see
+[the outcome so far](#outcome-so-far) for the numbers and the bugs it cost.
 
 ## current cost
 
@@ -84,15 +85,17 @@ one `pool.record` per frame, one command buffer, every dispatch in it:
 
 | method | dispatches | barriers in a serial recording |
 | --- | ---: | ---: |
-| `1` | 9 | 8 |
-| `0` | 31 | 30 |
+| `1` | 10 | 9 |
+| `0` | 32 | 31 |
 
 every gaussian is two dispatches: horizontal into a ping-pong plane, a
 `vkCmdPipelineBarrier2` from compute-write to compute-read, then vertical into the
 next plane. two gaussians in a row need a barrier between them as well, because
 they reuse those two planes. the consumer walks [14](14-deblur-blur-consumers.md)
 removed on the CPU become the vertical pass's output stage, which saves a
-dispatch and a full plane traversal per iteration.
+dispatch and a full plane traversal per iteration. the last dispatch is the
+store: the blend writes code values into a `GRAY32` plane, and one pass turns
+them into the frame's own samples for whichever format it is.
 
 the submission publishes the output plane's producer pair, so a later device
 filter in the same graph waits on the timeline rather than on a host fence.
@@ -108,8 +111,10 @@ rules that make it reachable:
    `precise`. a contracted `a * b + c` rounds once and changes the last bit.
 3. the tap order is ascending, the same order `blur_row` and `accumulate_avx2`
    use.
-4. the integer write uses `roundEven`, with the scale constant computed on the
-   host at the same precision.
+4. the store pass rounds ties to even (`roundEven`) with the scale constant
+   computed on the host, and clamps to the sample range. the multiply is `f32`:
+   at 16 bits the host multiplies in `f64`, so a sample can land one code value
+   away from the host's; 8 bit has an inverse of `1.0` and stays exact.
 5. the clamp keeps the CPU's NaN semantics. GLSL `min`/`max` do not promise
    them, so the kernel selects on `isnan` the way `blend` does.
 6. the Sobel divides by 8. the scalar loop divides and the AVX2 loop multiplies
@@ -132,19 +137,20 @@ widening it.
 
 ## memory
 
-five `GRAY32` planes, the source and the output:
+six `GRAY32` planes for `method=1` and seven for `method=0`, the source and the
+output:
 
-| page | one `f32` plane | the five working planes | total |
+| page | one `f32` plane | the working planes | total |
 | --- | ---: | ---: | ---: |
-| 2902x4128, 12.0 MP | 48 MB | 240 MB | about 264 MB with source and output |
-| 5806x4128, 24.0 MP | 96 MB | 480 MB | about 528 MB |
+| 2902x4128, 12.0 MP | 48 MB | 288 to 336 MB | about 312 to 360 MB with source and output |
+| 5806x4128, 24.0 MP | 96 MB | 576 to 672 MB | about 624 to 720 MB |
 
-the planes are `luma`, the horizontal scratch, the candidate, the raw mask and the
-blurred mask. the row ring has no device equivalent: a dispatch binds a whole
-plane, so the scratch granularity is a plane, and the mask needs its own input and
-output. the 2.35 GB limit on this host therefore holds about four 24 MP frames in
-flight, and the core's reservation throttles concurrency rather than failing an
-allocation.
+the planes are `luma`, the horizontal scratch, the mask pair, the restored plane,
+and the candidate (`method=1`) or two estimates plus the ratio (`method=0`). the
+row ring has no device equivalent: a dispatch binds a whole plane, so the
+scratch granularity is a plane. the 2.35 GB limit on this host therefore holds
+about three 24 MP `method=0` frames in flight, and the core's reservation
+throttles concurrency rather than failing an allocation.
 
 ## milestones
 
@@ -183,36 +189,42 @@ smaller than the latency win and is the first thing M6 measures.
 
 ## outcome so far
 
-written 2026-10-24. M1 to M4 are landed: both methods run on 8 bit Gray and are
-byte-identical to `gpu=0`. M5, the wider formats, is not.
+written 2026-10-24. M1 to M4 are landed, and M5 for Gray: both methods run on
+8 to 16 bit integer and 32 bit float Gray. RGB and YUV are still open.
 
 | piece | where |
 | --- | --- |
 | the device layer | `src/gpu/mod.rs`: gate, pipeline, pool, plane binding, dispatch, barrier, upload |
 | launch and push blocks | `src/gpu/shared.rs`, no binding type, unit tested |
-| the four kernels | `src/gpu/deblur.rs`: prepare, separable blur, Sobel, blend |
+| the five kernels | `src/gpu/deblur.rs`: prepare, separable blur, Sobel, blend, store |
 | the filter | `src/filters/deblur.rs`: `gpu:int:opt`, `clip:vnode:all`, `gpu_output()` |
 | the planning | `src/deblur.rs`: `Plan`, `Gaussian`, `Mask`, `Blend`, `Quantisation` |
 | the parity gate | `tools/deblur_hash.py --device` |
 | the device probe | `tools/gpu_probe.py` |
 
-`gpu=1` refuses 16 bit and float input, RGB/YUV, and a variable format, each with
-a message naming what it saw.
+`gpu=1` refuses RGB and YUV input and a variable format, each with a message
+naming what it saw.
 
 ### parity
 
-`tools/deblur_hash.py --device` runs 24 cases; all fifteen 8 bit Gray cases are
-byte-identical to `gpu=0`, eight of `method=0` and seven of `method=1`. the nine
-skips are Gray16, GrayS and the variable-format clip, each with its refusal
-printed:
+`tools/deblur_hash.py --device` runs 24 cases; 22 are implemented and all 22
+pass. 8 bit is byte-identical; 9 to 16 bit is within one LSB, and 32 bit float
+within two ULP of the code value, which is the `f32` quantisation the store pass
+was told to use:
+
+- 8 bit: 15 cases, 0 differing samples
+- 16 bit: 2 cases, at most 1 code value of 65535 (3 or 4 samples of 6144)
+- float: 4 cases, worst 2.4e-7 in the sample's own `[0, 1]` range
+- the 2 skips are the variable-format clip
 
 - defaults, an odd width (129x97), a 1 px frame, a frame whose row padding is `0xA5`
 - `radius=16` (the 129-tap kernel), a non-default `strength`, `threshold` and
   `overshoot`, and `threshold=0`
 - `method=0` additionally covers six refinement iterations, the division by
   `max(blur, 1e-7)` and the estimate scaling
-
 the CPU table is unchanged (`deblur_hash.py --check` matches all 24), the
+validator reports 2150 checks, and `cargo test`, `cargo clippy -- -D warnings`
+and `cargo fmt --check` are clean.
 validator reports 2150 checks, and `cargo test`, `cargo clippy -- -D warnings`
 and `cargo fmt --check` are clean.
 
@@ -223,17 +235,15 @@ one frame on a quiet machine, a fresh `Deblur` node per request, median of seven
 
 | page | method | CPU | device + download | bus round trip | speedup |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| 2902x4128, 12.0 MP | 1 | 206.4 ms | 21.5 ms | 10.9 ms | 9.6x |
-| 2902x4128, 12.0 MP | 0 | 599.2 ms | 48.8 ms | 10.9 ms | 12.3x |
-| 5806x4128, 24.0 MP | 1 | 498.9 ms | 38.0 ms | 17.8 ms | 13.1x |
-| 5806x4128, 24.0 MP | 0 | 1218.0 ms | 92.4 ms | 17.8 ms | 13.2x |
+| 2902x4128, 12.0 MP | 1 | 176.5 ms | 16.9 ms | 6.6 ms | 10.5x |
+| 2902x4128, 12.0 MP | 0 | 495.9 ms | 43.3 ms | 6.6 ms | 11.5x |
+| 5806x4128, 24.0 MP | 1 | 317.5 ms | 28.2 ms | 14.3 ms | 11.3x |
+| 5806x4128, 24.0 MP | 0 | 936.7 ms | 79.8 ms | 14.3 ms | 11.7x |
 
 the source is a `BlankClip`, so the frame costs nothing to make and both engines
 see the same input; these are filter numbers, not decode. the device work alone is
-the total minus the bus: about 11 ms for `method=1` and 38 ms for `method=0` at
-12 MP, against the 5.6 ms estimated for `method=1` above. the host was noisier in
-this run than in the first one (same build, `method=1` 12 MP was 156.4 ms there),
-so read the ratios, not the absolute milliseconds.
+the total minus the bus: about 10 ms for `method=1` and 37 ms for `method=0` at
+12 MP. the host was noisy between runs, so read the ratios.
 
 the aggregate number M6 asks for is still open: no fan-in has been run.
 

@@ -124,11 +124,12 @@ decode instead. read the plugin's `decode + resize` against the reference's
 
 ## the device path
 
-`Deblur(gpu=1)` runs both methods on 8 bit Gray on the Vulkan device; the rest of
-the filter surface is still on the host and `gpu=1` refuses it by name. the
-parity gate is `tools/deblur_hash.py --device`, which compares `gpu=1` through
-`std.GPUDownload` against `gpu=0` on the same 24 cases and reports all fifteen
-8 bit Gray cases byte-identical, both methods (2026-10-24).
+`Deblur(gpu=1)` runs both methods on Gray 8 to 16 bit integer and 32 bit float on
+the Vulkan device; RGB, YUV and a variable format are refused by name. the parity
+gate is `tools/deblur_hash.py --device`, which compares `gpu=1` through
+`std.GPUDownload` against `gpu=0` on the same 24 cases: 8 bit is byte-identical,
+9 to 16 bit is within one LSB, and the float path within two ULP, which is the
+`f32` quantisation the store pass uses (2026-10-24).
 
 the numbers below are one frame on a quiet machine, a fresh `Deblur` node per
 request, median of seven, on a `BlankClip` source so the frame costs nothing to
@@ -138,11 +139,10 @@ frame, measured the same way.
 
 | page | method | CPU | device + download | bus | speedup |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| --- | ---: | ---: | ---: | ---: |
-| 2902x4128, 12.0 MP | 1 | 206.4 ms | 21.5 ms | 10.9 ms | 9.6x |
-| 2902x4128, 12.0 MP | 0 | 599.2 ms | 48.8 ms | 10.9 ms | 12.3x |
-| 5806x4128, 24.0 MP | 1 | 498.9 ms | 38.0 ms | 17.8 ms | 13.1x |
-| 5806x4128, 24.0 MP | 0 | 1218.0 ms | 92.4 ms | 17.8 ms | 13.2x |
+| 2902x4128, 12.0 MP | 1 | 176.5 ms | 16.9 ms | 6.6 ms | 10.5x |
+| 2902x4128, 12.0 MP | 0 | 495.9 ms | 43.3 ms | 6.6 ms | 11.5x |
+| 5806x4128, 24.0 MP | 1 | 317.5 ms | 28.2 ms | 14.3 ms | 11.3x |
+| 5806x4128, 24.0 MP | 0 | 936.7 ms | 79.8 ms | 14.3 ms | 11.7x |
 
 this is latency, not throughput: the fan-in a volume encode sees has not been
 measured. [`docs/improvements/17-vulkan-deblur.md`](improvements/17-vulkan-deblur.md#measured)
