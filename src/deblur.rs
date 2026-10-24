@@ -19,6 +19,8 @@
 
 /// The sample range the kernels work in: the reference's `[0, 1]` times 255.
 const CODE_VALUES: f32 = 255.0;
+/// The luma weights the reference applies to the gamma-encoded channels.
+pub(crate) const LUMA_WEIGHTS: [f32; 3] = [0.2126, 0.7152, 0.0722];
 /// The pedestal the deconvolution adds, in code values (`1 / 255` of `[0, 1]`).
 ///
 /// It keeps the multiplicative update away from zero-locking at pure black.

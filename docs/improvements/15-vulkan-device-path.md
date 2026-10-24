@@ -2,8 +2,9 @@
 
 status: accepted, first kernel landed. research complete on 2026-10-24 against
 `vs-mangacolor` at `29da9fb` and the pinned binding rev `685c29d`.
-`Deblur(gpu=1)` runs `method=1` on 8 bit Gray and is byte-identical to `gpu=0`;
-[17](17-vulkan-deblur.md#outcome-so-far) records what it cost and measures.
+`Deblur(gpu=1)` runs both methods on Gray, RGB and YUV at every integer depth
+from 8 to 16 bits and on their 32 bit float formats; [17](17-vulkan-deblur.md#outcome-so-far)
+records the parity per format and measures what it costs.
 
 this plan is the entry point for [16](16-vulkan-validation.md) through
 [19](19-vulkan-histogram-analyzers.md). it records what the device path is on

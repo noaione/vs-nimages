@@ -22,12 +22,13 @@ outcomes.
 | --- | --- | --- |
 | [15 the device path](15-vulkan-device-path.md) | proposed, research complete | the binding surface, the gates, the bus budget, the per-filter verdict |
 | [16 validating a device kernel](16-vulkan-validation.md) | proposed | the device gate in `tests/check-nimages.py`, the Deblur hash harness, the bench protocol |
-| [17 Deblur on the device](17-vulkan-deblur.md) | in progress: both methods on Gray 8-16 bit and 32 bit float landed (8 bit exact, deeper within 1 LSB, float within 2 ULP), 10.5x and 11.5x at 12 MP; RGB/YUV pending |
+| [17 Deblur on the device](17-vulkan-deblur.md) | in progress: both methods on Gray, RGB and YUV, 8-16 bit and 32 bit float, landed (8 bit exact, deeper within 1 LSB, float within 2 ULP), 7.7x to 10.4x at 12 and 24 MP; the fan-in is open |
 | [18 pointwise maps](18-vulkan-pointwise-maps.md) | proposed | `Levels` and `Posterize` as chain members, standalone is a loss |
 | [19 histogram analyzers](19-vulkan-histogram-analyzers.md) | proposed | `PeakStats`/`PeakGrayShades` on the device, and `Posterize(method=1)` after them |
 
-none of the five is in the tree. the dependency on the Vulkan-capable binding
-revision is, uncommitted, and raises the floor to VapourSynth R80.
+the dependency on the Vulkan-capable binding is in the tree and raises the
+floor to VapourSynth R80. `Deblur`'s device path is the only one landed; the
+other four plans are still on paper.
 
 ## candidate status
 

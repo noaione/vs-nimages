@@ -1,7 +1,10 @@
 # validating and measuring a device kernel
 
-status: proposed. this plan is the gate for [17](17-vulkan-deblur.md),
-[18](18-vulkan-pointwise-maps.md) and [19](19-vulkan-histogram-analyzers.md).
+status: in part landed. `tools/deblur_hash.py` and its `--device` mode are in
+the tree, with 39 cases after M5 added RGB, YUV and the depth variants; the
+validator gate and the fan-in measurement are still open. the plan is the gate
+for [17](17-vulkan-deblur.md), [18](18-vulkan-pointwise-maps.md) and
+[19](19-vulkan-histogram-analyzers.md).
 
 ## problem
 

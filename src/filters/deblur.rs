@@ -20,7 +20,7 @@ use vapoursynth4_rs::map::MapRef;
 use vapoursynth4_rs::node::{Filter, Node, VideoNode};
 use vapoursynth4_rs::{ColorFamily, SampleType, core::CoreRef, ffi, key};
 
-use crate::deblur::{DeblurError, Method, Params, Plan, SampleFormat, Workspace};
+use crate::deblur::{DeblurError, LUMA_WEIGHTS, Method, Params, Plan, SampleFormat, Workspace};
 use crate::error::{NImagesError, Result};
 
 use super::{
@@ -54,9 +54,6 @@ const DEFAULT_ITERATIONS: i64 = 6;
 const DEFAULT_THRESHOLD: f64 = 2.0;
 /// Default excursion past the local extremes, in 8 bit steps.
 const DEFAULT_OVERSHOOT: f64 = 0.0;
-/// The luma weights the reference uses on the gamma-encoded values.
-const LUMA_WEIGHTS: [f32; 3] = [0.2126, 0.7152, 0.0722];
-
 /// Sharpens the luma plane of every frame.
 pub struct Deblur {
     source: VideoNode,

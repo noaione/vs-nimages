@@ -124,12 +124,13 @@ decode instead. read the plugin's `decode + resize` against the reference's
 
 ## the device path
 
-`Deblur(gpu=1)` runs both methods on Gray 8 to 16 bit integer and 32 bit float on
-the Vulkan device; RGB, YUV and a variable format are refused by name. the parity
-gate is `tools/deblur_hash.py --device`, which compares `gpu=1` through
-`std.GPUDownload` against `gpu=0` on the same 24 cases: 8 bit is byte-identical,
-9 to 16 bit is within one LSB, and the float path within two ULP, which is the
-`f32` quantisation the store pass uses (2026-10-24).
+`Deblur(gpu=1)` runs both methods on Gray, RGB and YUV at every integer depth
+from 8 to 16 bits and on their 32 bit float formats; a variable format is
+refused by name. the parity gate is `tools/deblur_hash.py --device`, which
+compares `gpu=1` through `std.GPUDownload` against `gpu=0` on the same 39 cases:
+37 are implemented and all 37 pass. 8 bit is byte-identical, 9 to 16 bit is
+within one LSB, and the float path within two ULP, which is the `f32`
+quantisation the store pass uses (2026-10-24).
 
 the numbers below are one frame on a quiet machine, a fresh `Deblur` node per
 request, median of seven, on a `BlankClip` source so the frame costs nothing to
@@ -137,16 +138,30 @@ make and both engines see the same input. `device + download` is what a caller
 pays; `bus` is a `std.GPUUpload` -> `std.GPUDownload` round trip of the same
 frame, measured the same way.
 
-| page | method | CPU | device + download | bus | speedup |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| 2902x4128, 12.0 MP | 1 | 176.5 ms | 16.9 ms | 6.6 ms | 10.5x |
-| 2902x4128, 12.0 MP | 0 | 495.9 ms | 43.3 ms | 6.6 ms | 11.5x |
-| 5806x4128, 24.0 MP | 1 | 317.5 ms | 28.2 ms | 14.3 ms | 11.3x |
-| 5806x4128, 24.0 MP | 0 | 936.7 ms | 79.8 ms | 14.3 ms | 11.7x |
+| page | family | method | CPU | device + download | bus | speedup |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 2902x4128, 12.0 MP | Gray8 | 1 | 125.8 ms | 13.7 ms | 5.1 ms | 9.2x |
+| 2902x4128, 12.0 MP | Gray8 | 0 | 350.1 ms | 37.7 ms | 5.1 ms | 9.3x |
+| 2902x4128, 12.0 MP | RGB24 | 1 | 239.2 ms | 27.4 ms | 14.2 ms | 8.7x |
+| 2902x4128, 12.0 MP | RGB24 | 0 | 453.8 ms | 48.0 ms | 14.2 ms | 9.5x |
+| 2902x4128, 12.0 MP | YUV420P8 | 1 | 124.9 ms | 14.9 ms | 6.9 ms | 8.4x |
+| 2902x4128, 12.0 MP | YUV420P8 | 0 | 351.6 ms | 40.4 ms | 6.9 ms | 8.7x |
+| 5806x4128, 24.0 MP | Gray8 | 1 | 239.8 ms | 27.7 ms | 9.1 ms | 8.7x |
+| 5806x4128, 24.0 MP | Gray8 | 0 | 701.0 ms | 74.1 ms | 9.1 ms | 9.5x |
+| 5806x4128, 24.0 MP | RGB24 | 1 | 468.3 ms | 44.9 ms | 28.8 ms | 10.4x |
+| 5806x4128, 24.0 MP | RGB24 | 0 | 915.0 ms | 91.8 ms | 28.8 ms | 10.0x |
+| 5806x4128, 24.0 MP | YUV420P8 | 1 | 242.3 ms | 31.3 ms | 15.2 ms | 7.7x |
+| 5806x4128, 24.0 MP | YUV420P8 | 0 | 700.5 ms | 78.5 ms | 15.2 ms | 8.9x |
 
 this is latency, not throughput: the fan-in a volume encode sees has not been
 measured. [`docs/improvements/17-vulkan-deblur.md`](improvements/17-vulkan-deblur.md#measured)
 has the method, the parity result and what the first kernel cost.
+
+every row is from one session. absolute milliseconds move by about a third
+between sessions on this laptop, so compare the ratio in a row. RGB24 pays three
+planes over the bus, 14.2 ms at 12 MP against Gray's 5.1, and still wins
+because its host path reads three planes too. YUV420P8 moves 1.5 samples per
+pixel and wins least because its host path only touches one.
 
 ## what a webp actually hands out
 
