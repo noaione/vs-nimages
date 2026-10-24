@@ -34,9 +34,9 @@ const PREPARE_BINDINGS: u32 = 5;
 const BLUR_BINDINGS: u32 = 4;
 /// Storage buffers one Sobel dispatch binds: the blurred luma and the mask.
 const SOBEL_BINDINGS: u32 = 2;
-/// Storage buffers one blend dispatch binds: luma, candidate, mask, the restored
-/// `GRAY32` plane it writes. the output samples are a separate pass.
-const BLEND_BINDINGS: u32 = 4;
+/// Storage buffers one blend dispatch binds: luma, the candidate it restores in
+/// place, and the mask. the output samples are a separate pass.
+const BLEND_BINDINGS: u32 = 3;
 /// Storage buffers one store dispatch binds: the restored plane and the frame's
 /// output plane.
 const STORE_BINDINGS: u32 = 2;
@@ -135,7 +135,6 @@ struct BlendPush {
     luma_stride: u32,
     candidate_stride: u32,
     mask_stride: u32,
-    dst_stride_words: u32,
     strength: f32,
     pedestal: f32,
     mode: u32,
@@ -159,7 +158,7 @@ struct StorePush {
 }
 
 const _: () = assert!(size_of::<StorePush>() == 11 * size_of::<u32>());
-const _: () = assert!(size_of::<BlendPush>() == 13 * size_of::<u32>());
+const _: () = assert!(size_of::<BlendPush>() == 12 * size_of::<u32>());
 
 /// What the RGB store kernel is told.
 ///
@@ -423,16 +422,14 @@ layout(push_constant) uniform Params {
     uint luma_stride;
     uint candidate_stride;
     uint mask_stride;
-    uint dst_stride_words;
     float strength;
     float pedestal;
     uint mode;
 } p;
 
 layout(std430, set = 0, binding = 0) readonly buffer Luma { float values[]; } luma;
-layout(std430, set = 0, binding = 1) readonly buffer Candidate { float values[]; } candidate;
+layout(std430, set = 0, binding = 1) buffer Candidate { float values[]; } candidate;
 layout(std430, set = 0, binding = 2) readonly buffer Mask { float values[]; } mask;
-layout(std430, set = 0, binding = 3) writeonly buffer Dst { float values[]; } dst;
 
 void main() {
     for (uint unit = gl_GlobalInvocationID.x; unit < p.units; unit += p.stride) {
@@ -481,7 +478,9 @@ void main() {
             );
             // The output samples are the store pass's business; this plane is
             // the restored luma in code values, 0 to 255.
-            dst.values[y * p.dst_stride_words + x] = code;
+            // The blend restores the candidate in place; the store pass turns
+            // those code values into the frame's own samples.
+            candidate.values[y * p.candidate_stride + x] = code;
         }
     }
 }
@@ -852,14 +851,12 @@ impl Engine {
 
         let mut luma = gray32_frame(core, width, height, None)?;
         let mut temp = gray32_frame(core, width, height, None)?;
-        // The Sobel writes `mask`, the mask's own blur writes `mask_raw`, and
-        // the blend reads `mask_raw`. On the deconvolution path `mask_raw` also
-        // holds the ratio until the mask pass overwrites it.
+        // Two scratch planes carry the mask: the Sobel writes into the
+        // horizontal scratch and the mask's own blur moves between them. On the
+        // deconvolution path `mask_raw` also holds the ratio until then.
         let mut mask_raw = gray32_frame(core, width, height, None)?;
-        let mut mask = gray32_frame(core, width, height, None)?;
-        // The blend writes code values; the store pass turns them into the frame's
-        // own samples, one output format per path.
-        let mut restored = gray32_frame(core, width, height, None)?;
+        // The blend restores the candidate in place, so there is no separate
+        // restored plane to allocate.
         let quantisation = self.plan.quantisation;
         let barrier = self.barrier;
         let family = self.family;
@@ -899,8 +896,6 @@ impl Engine {
             luma_stride: words(&luma)?,
             temp_stride: words(&temp)?,
             mask_raw_stride: words(&mask_raw)?,
-            mask_stride: words(&mask)?,
-            restored_stride: words(&restored)?,
             output_stride,
             dst_strides,
             src_bytes: quantisation.bytes as u32,
@@ -968,19 +963,26 @@ impl Engine {
                         geometry.luma_stride,
                     )?;
                     compute_barrier(exec, barrier);
-                    self.record_mask(exec, &geometry, &luma, &mut temp, &mut mask_raw, &mut mask)?;
+                    self.record_mask(exec, &geometry, &luma, &mut temp, &mut mask_raw)?;
                     self.record_blend(
                         exec,
                         &geometry,
                         &luma,
-                        &candidate,
+                        &mut candidate,
                         candidate_stride,
-                        &mask_raw,
-                        &mut restored,
+                        &temp,
                         0,
                     )?;
                     compute_barrier(exec, barrier);
-                    self.record_output(exec, &geometry, input, &luma, &restored, &mut output)
+                    self.record_output(
+                        exec,
+                        &geometry,
+                        input,
+                        &luma,
+                        &candidate,
+                        candidate_stride,
+                        &mut output,
+                    )
                 })
             }
             Method::Deconvolution => {
@@ -1066,23 +1068,32 @@ impl Engine {
                     }
 
                     let (candidate, candidate_stride) = if current_is_a {
-                        (&estimate_a, a_stride)
+                        (&mut estimate_a, a_stride)
                     } else {
-                        (&estimate_b, b_stride)
+                        (&mut estimate_b, b_stride)
                     };
-                    self.record_mask(exec, &geometry, &luma, &mut temp, &mut mask_raw, &mut mask)?;
+                    self.record_mask(exec, &geometry, &luma, &mut temp, &mut mask_raw)?;
+                    // The blend restores the final estimate in place, so the plane
+                    // the deconvolution ended on carries the output code values.
                     self.record_blend(
                         exec,
                         &geometry,
                         &luma,
-                        candidate,
+                        &mut *candidate,
                         candidate_stride,
-                        &mask_raw,
-                        &mut restored,
+                        &temp,
                         1,
                     )?;
                     compute_barrier(exec, barrier);
-                    self.record_output(exec, &geometry, input, &luma, &restored, &mut output)
+                    self.record_output(
+                        exec,
+                        &geometry,
+                        input,
+                        &luma,
+                        &*candidate,
+                        candidate_stride,
+                        &mut output,
+                    )
                 })
             }
         };
@@ -1149,7 +1160,42 @@ impl Engine {
         aux: &VideoFrame,
         aux_stride: u32,
     ) -> std::result::Result<(), VulkanError> {
-        let horizontal = BlurPush {
+        self.record_horizontal(exec, geometry, source, source_stride, kernel, taps, temp)?;
+        compute_barrier(exec, self.barrier);
+        self.record_vertical(
+            exec,
+            geometry,
+            &*temp,
+            destination,
+            destination_stride,
+            kernel,
+            taps,
+            mode,
+            aux,
+            aux_stride,
+        )
+    }
+
+    /// The horizontal half: `source` into the scratch plane.
+    ///
+    /// The aux binding is declared by the pipeline and never read here, so the
+    /// source stands in for it rather than making the caller name a plane this
+    /// pass has no use for.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the horizontal pass names its source, table and scratch"
+    )]
+    fn record_horizontal(
+        &self,
+        exec: &mut ExecContext<'_>,
+        geometry: &Geometry,
+        source: &VideoFrame,
+        source_stride: u32,
+        kernel: &Gaussian,
+        taps: &VideoFrame,
+        scratch: &mut VideoFrame,
+    ) -> std::result::Result<(), VulkanError> {
+        let push = BlurPush {
             units: geometry.units,
             stride: geometry.stride,
             width: geometry.width,
@@ -1163,32 +1209,59 @@ impl Engine {
             floor_value: self.plan.blend.division_floor,
             src_stride: source_stride,
             dst_stride: geometry.temp_stride,
-            aux_stride,
+            aux_stride: source_stride,
         };
-        let (src, tap, dst, aux_plane) = (
+        let (src, aux, tap, dst) = (
+            exec.read_plane(source, 0)?,
             exec.read_plane(source, 0)?,
             exec.read_plane(taps, 0)?,
-            exec.write_plane(temp, 0)?,
-            exec.read_plane(aux, 0)?,
+            exec.write_plane(scratch, 0)?,
         );
         exec.dispatch(
             self.blur.pipeline(),
-            &[src, tap, dst, aux_plane],
-            bytes_of(&horizontal),
+            &[src, tap, dst, aux],
+            bytes_of(&push),
             geometry.groups,
-        )?;
-        compute_barrier(exec, self.barrier);
+        )
+    }
 
-        let vertical = BlurPush {
+    /// The vertical half: the scratch plane into `destination`, with `mode`'s
+    /// consumer fused into its output.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the vertical pass names its scratch, destination, table and aux"
+    )]
+    fn record_vertical(
+        &self,
+        exec: &mut ExecContext<'_>,
+        geometry: &Geometry,
+        scratch: &VideoFrame,
+        destination: &mut VideoFrame,
+        destination_stride: u32,
+        kernel: &Gaussian,
+        taps: &VideoFrame,
+        mode: u32,
+        aux: &VideoFrame,
+        aux_stride: u32,
+    ) -> std::result::Result<(), VulkanError> {
+        let push = BlurPush {
+            units: geometry.units,
+            stride: geometry.stride,
+            width: geometry.width,
+            height: geometry.height,
+            radius: kernel.vertical_radius() as u32,
+            taps: kernel.count() as u32,
             mode,
             direction: 1,
-            radius: kernel.vertical_radius() as u32,
+            strength: self.plan.strength,
+            pedestal: self.plan.blend.pedestal,
+            floor_value: self.plan.blend.division_floor,
             src_stride: geometry.temp_stride,
             dst_stride: destination_stride,
-            ..horizontal
+            aux_stride,
         };
         let (src, tap, dst, aux_plane) = (
-            exec.read_plane(temp, 0)?,
+            exec.read_plane(scratch, 0)?,
             exec.read_plane(taps, 0)?,
             exec.write_plane(destination, 0)?,
             exec.read_plane(aux, 0)?,
@@ -1196,13 +1269,18 @@ impl Engine {
         exec.dispatch(
             self.blur.pipeline(),
             &[src, tap, dst, aux_plane],
-            bytes_of(&vertical),
+            bytes_of(&push),
             geometry.groups,
         )
     }
 
     /// The edge mask: the prefilter, the Sobel and smoothstep, then the mask's
     /// own blur.
+    ///
+    /// The Sobel writes into the horizontal scratch, so the mask needs the two
+    /// planes the blurs already have and no third one. After it, the prefiltered
+    /// luma is dead and the last vertical pass writes the final mask back over
+    /// the plane it read, which leaves the mask in `temp`.
     fn record_mask(
         &self,
         exec: &mut ExecContext<'_>,
@@ -1210,7 +1288,6 @@ impl Engine {
         luma: &VideoFrame,
         temp: &mut VideoFrame,
         mask_raw: &mut VideoFrame,
-        mask: &mut VideoFrame,
     ) -> std::result::Result<(), VulkanError> {
         self.record_blur_pair(
             exec,
@@ -1219,8 +1296,8 @@ impl Engine {
             geometry.luma_stride,
             &self.plan.prefilter,
             &self.prefilter,
-            temp,
-            mask_raw,
+            &mut *temp,
+            &mut *mask_raw,
             geometry.mask_raw_stride,
             0,
             luma,
@@ -1237,10 +1314,10 @@ impl Engine {
             ramp: self.plan.mask.ramp,
             span_inverse: 1.0 / self.plan.mask.sobel_span,
             src_stride: geometry.mask_raw_stride,
-            dst_stride: geometry.mask_stride,
+            dst_stride: geometry.temp_stride,
         };
         let src = exec.read_plane(mask_raw, 0)?;
-        let dst = exec.write_plane(mask, 0)?;
+        let dst = exec.write_plane(temp, 0)?;
         exec.dispatch(
             self.sobel.pipeline(),
             &[src, dst],
@@ -1249,16 +1326,27 @@ impl Engine {
         )?;
         compute_barrier(exec, self.barrier);
 
-        self.record_blur_pair(
+        // The mask's own blur, recorded as its two halves: the horizontal pass
+        // writes over the prefiltered luma and the vertical pass writes the
+        // mask back into the plane the Sobel left it in.
+        self.record_horizontal(
             exec,
             geometry,
-            mask,
-            geometry.mask_stride,
+            &*temp,
+            geometry.temp_stride,
             &self.plan.mask_blur,
             &self.mask,
+            &mut *mask_raw,
+        )?;
+        compute_barrier(exec, self.barrier);
+        self.record_vertical(
+            exec,
+            geometry,
+            &*mask_raw,
             temp,
-            mask_raw,
-            geometry.mask_raw_stride,
+            geometry.temp_stride,
+            &self.plan.mask_blur,
+            &self.mask,
             0,
             luma,
             geometry.luma_stride,
@@ -1269,20 +1357,20 @@ impl Engine {
         Ok(())
     }
 
-    /// Limits the candidate to the local extremes and blends it back.
+    /// Limits the candidate to the local extremes and blends it back into the
+    /// candidate's own plane, so the restored luma costs no plane of its own.
     #[expect(
         clippy::too_many_arguments,
-        reason = "the blend binds five frames and the candidate's row stride"
+        reason = "the blend names three frames and the candidate's row stride"
     )]
     fn record_blend(
         &self,
         exec: &mut ExecContext<'_>,
         geometry: &Geometry,
         luma: &VideoFrame,
-        candidate: &VideoFrame,
+        candidate: &mut VideoFrame,
         candidate_stride: u32,
         mask: &VideoFrame,
-        output: &mut VideoFrame,
         mode: u32,
     ) -> std::result::Result<(), VulkanError> {
         let push = BlendPush {
@@ -1294,19 +1382,20 @@ impl Engine {
             overshoot: self.plan.blend.overshoot,
             luma_stride: geometry.luma_stride,
             candidate_stride,
-            mask_stride: geometry.mask_raw_stride,
-            dst_stride_words: geometry.restored_stride,
+            mask_stride: geometry.temp_stride,
             strength: self.plan.strength,
             pedestal: self.plan.blend.pedestal,
             mode,
         };
         let src = exec.read_plane(luma, 0)?;
-        let candidate_plane = exec.read_plane(candidate, 0)?;
         let mask_plane = exec.read_plane(mask, 0)?;
-        let dst = exec.write_plane(output, 0)?;
+        // The candidate is read and written in place: it is declared both ways
+        // and bound once.
+        exec.read(candidate);
+        let candidate_plane = exec.write_plane(candidate, 0)?;
         exec.dispatch(
             self.blend.pipeline(),
-            &[src, candidate_plane, mask_plane, dst],
+            &[src, candidate_plane, mask_plane],
             bytes_of(&push),
             geometry.blend_groups,
         )
@@ -1319,6 +1408,7 @@ impl Engine {
         device: &Device,
         geometry: &Geometry,
         restored: &VideoFrame,
+        restored_stride: u32,
         output: &mut VideoFrame,
     ) -> std::result::Result<(), VulkanError> {
         let quantisation = self.plan.quantisation;
@@ -1328,7 +1418,7 @@ impl Engine {
             column_groups: geometry.columns,
             width: geometry.width,
             height: geometry.height,
-            src_stride_words: geometry.restored_stride,
+            src_stride_words: restored_stride,
             dst_stride_bytes: geometry.output_stride,
             inverse: quantisation.inverse as f32,
             max_value: quantisation.max_value as f32,
@@ -1359,6 +1449,7 @@ impl Engine {
         input: &VideoFrame,
         luma: &VideoFrame,
         restored: &VideoFrame,
+        restored_stride: u32,
         output: &mut VideoFrame,
     ) -> std::result::Result<(), VulkanError> {
         let quantisation = self.plan.quantisation;
@@ -1372,7 +1463,7 @@ impl Engine {
             src1_stride: geometry.src_strides[1],
             src2_stride: geometry.src_strides[2],
             luma_stride: geometry.luma_stride,
-            restored_stride: geometry.restored_stride,
+            restored_stride,
             dst0_stride: geometry.dst_strides[0],
             dst1_stride: geometry.dst_strides[1],
             dst2_stride: geometry.dst_strides[2],
@@ -1435,6 +1526,10 @@ impl Engine {
     }
 
     /// Writes the frame's planes from the restored code values.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the output pass names the input, the luma, the restored plane and the frame"
+    )]
     fn record_output(
         &self,
         exec: &mut ExecContext<'_>,
@@ -1442,15 +1537,25 @@ impl Engine {
         input: &VideoFrame,
         luma: &VideoFrame,
         restored: &VideoFrame,
+        restored_stride: u32,
         output: &mut VideoFrame,
     ) -> std::result::Result<(), VulkanError> {
         match &self.output {
-            Output::Gray(store) => self.record_store(exec, store, geometry, restored, output),
-            Output::Rgb(store) => {
-                self.record_store_rgb(exec, store, geometry, input, luma, restored, output)
+            Output::Gray(store) => {
+                self.record_store(exec, store, geometry, restored, restored_stride, output)
             }
+            Output::Rgb(store) => self.record_store_rgb(
+                exec,
+                store,
+                geometry,
+                input,
+                luma,
+                restored,
+                restored_stride,
+                output,
+            ),
             Output::Yuv(store, copy) => {
-                self.record_store(exec, store, geometry, restored, output)?;
+                self.record_store(exec, store, geometry, restored, restored_stride, output)?;
                 for (index, plan) in geometry.chroma.iter().enumerate() {
                     let Some(plan) = plan else { continue };
                     let plane = i32::try_from(index).unwrap_or(0) + 1;
@@ -1479,8 +1584,6 @@ struct Geometry {
     luma_stride: u32,
     temp_stride: u32,
     mask_raw_stride: u32,
-    mask_stride: u32,
-    restored_stride: u32,
     output_stride: u32,
     /// The output plane strides, which only the RGB store needs three of.
     dst_strides: [u32; 3],

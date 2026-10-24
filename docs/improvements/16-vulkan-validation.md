@@ -2,7 +2,9 @@
 
 status: in part landed. `tools/deblur_hash.py` and its `--device` mode are in
 the tree, with 39 cases after M5 added RGB, YUV and the depth variants; the
-validator gate and the fan-in measurement are still open. the plan is the gate
+validator gate is open. the fan-in protocol under [the
+measurements](#the-measurements) was run on 2026-10-24, and its numbers are in
+[17](17-vulkan-deblur.md#aggregate) and `docs/BENCH.md`. the plan is the gate
 for [17](17-vulkan-deblur.md), [18](18-vulkan-pointwise-maps.md) and
 [19](19-vulkan-histogram-analyzers.md).
 
@@ -102,6 +104,12 @@ through `std.AverageFrames`, one pull, each frame reporting its own stage line.
 that probe measured 9.48x reported work but 2.7x aggregate throughput on the CPU,
 so the CPU aggregate is the honest baseline and a device frame competes against
 that rate, not against 12 times one frame.
+
+`tools/deblur_fanin.py` runs that protocol for both engines: `--device` adds the
+Vulkan path, `--sweep` walks the frames in flight, and `--vram MB` bounds
+`core.max_vram_cache_size` so a 24 MP run degrades instead of aborting the host.
+the numbers are in [17](17-vulkan-deblur.md#aggregate) and
+[BENCH](../BENCH.md#the-device-path).
 
 each run records:
 
