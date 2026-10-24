@@ -87,7 +87,13 @@ def samples(codes: np.ndarray, format_: vs.VideoFormat) -> np.ndarray:
 
 
 def source(
-    width: int, height: int, format_: vs.VideoFormat, mode: str, length: int = FRAMES
+    width: int,
+    height: int,
+    format_: vs.VideoFormat,
+    mode: str,
+    length: int = FRAMES,
+    *,
+    planes_same: bool = False,
 ) -> vs.VideoNode:
     """A clip whose frames hold `page` in the given format."""
     blank = CORE.std.BlankClip(width=width, height=height, format=format_, length=length)
@@ -97,7 +103,12 @@ def source(
         for plane in range(out.format.num_planes):
             view = np.asarray(out[plane])
             height, width = view.shape
-            view[...] = samples(page(width, height, mode, n), out.format)
+            base = page(width, height, mode, n)
+            if not planes_same:
+                # Planes after the first carry a shifted page, so a filter that
+                # analysed one plane for another shows up as a difference.
+                base = np.mod(base + 53.0 * plane, 256.0)
+            view[...] = samples(base, out.format)
         return out
 
     return CORE.std.ModifyFrame(blank, blank, fill)
@@ -228,17 +239,98 @@ def cases() -> list[Case]:
             kind="shades",
         ),
         Case(
-            "stats/rgb24/refused",
-            lambda: source(96, 64, vs.RGB24, "ramp"),
+            "stats/rgb24/defaults",
+            lambda: source(97, 65, vs.RGB24, "ramp"),
             dict(stats["defaults"]),
-            refused="Gray 8 to 16 bit",
+        ),
+        Case(
+            "stats/rgb24/flat",
+            lambda: source(96, 64, vs.RGB24, "flat"),
+            dict(stats["defaults"]),
+        ),
+        Case(
+            "stats/rgb24/four",
+            lambda: source(96, 64, vs.RGB24, "four"),
+            dict(stats["defaults"]),
+        ),
+        Case(
+            "stats/rgb24/one-pixel",
+            lambda: source(1, 1, vs.RGB24, "ramp"),
+            dict(stats["defaults"]),
+        ),
+        Case(
+            "stats/rgb48/defaults",
+            lambda: source(129, 97, vs.RGB48, "ramp"),
+            dict(stats["skip-white"]),
+        ),
+        Case(
+            "stats/rgb48/flat",
+            lambda: source(96, 64, vs.RGB48, "flat"),
+            dict(stats["defaults"]),
+        ),
+        Case(
+            "shades/rgb24/defaults",
+            lambda: source(97, 65, vs.RGB24, "ramp"),
+            dict(shades["defaults"]),
+            kind="shades",
+        ),
+        Case(
+            "shades/rgb24/flat",
+            lambda: source(96, 64, vs.RGB24, "flat"),
+            dict(shades["threshold-5"]),
+            kind="shades",
+        ),
+        Case(
+            "shades/rgb24/sparse",
+            lambda: source(96, 64, vs.RGB24, "sparse"),
+            dict(shades["defaults"]),
+            kind="shades",
+        ),
+        Case(
+            "shades/rgb48/defaults",
+            lambda: source(129, 97, vs.RGB48, "ramp"),
+            dict(shades["defaults"]),
+            kind="shades",
+        ),
+        Case(
+            "stats/yuv420p8/defaults",
+            lambda: source(130, 66, vs.YUV420P8, "ramp"),
+            dict(stats["defaults"]),
+        ),
+        Case(
+            "stats/yuv420p8/flat",
+            lambda: source(96, 64, vs.YUV420P8, "flat"),
+            dict(stats["defaults"]),
+        ),
+        Case(
+            "stats/yuv444p16/defaults",
+            lambda: source(96, 64, vs.YUV444P16, "ramp"),
+            dict(stats["skip-white"]),
+        ),
+        Case(
+            "shades/yuv420p8/defaults",
+            lambda: source(130, 66, vs.YUV420P8, "ramp"),
+            dict(shades["defaults"]),
+            kind="shades",
+        ),
+        Case(
+            "shades/yuv444p16/defaults",
+            lambda: source(96, 64, vs.YUV444P16, "ramp"),
+            dict(shades["defaults"]),
+            kind="shades",
+        ),
+        Case(
+            "stats/rgbs/refused",
+            lambda: source(96, 64, vs.RGBS, "ramp"),
+            dict(stats["defaults"]),
+            refused="Gray, YUV or RGB 8 to 16 bit",
         ),
         Case(
             "shades/grayf/refused",
             lambda: source(96, 64, vs.GRAYS, "ramp"),
             dict(shades["defaults"]),
             kind="shades",
-            refused="Gray 8 to 16 bit",
+            refused="Gray, YUV or RGB 8 to 16 bit",
         ),
     ]
     return table
@@ -299,6 +391,64 @@ def compare_nodes(host: vs.VideoNode, device: vs.VideoNode, keys: tuple[str, ...
                     bad += 1
                     break
     return bad
+
+
+def properties(node: vs.VideoNode, keys: tuple[str, ...]) -> list[dict[str, Any]]:
+    """Every frame's analyzer properties, as plain values."""
+    out = []
+    for n in range(node.num_frames):
+        with node.get_frame(n) as frame:
+            out.append(property_values(frame, keys))
+    return out
+
+
+def compare_views() -> int:
+    """Checks the invariants the color conversion has to satisfy."""
+    failures = 0
+
+    def report(name: str, same: bool) -> None:
+        nonlocal failures
+        print(f"{name:<30} {'identical' if same else 'MISMATCH'}")
+        failures += not same
+
+    # A YUV clip is counted through plane 0, so its properties are that plane's.
+    yuv = source(96, 64, vs.YUV420P8, "ramp")
+    extracted = CORE.std.ShufflePlanes(yuv, 0, vs.GRAY)
+    report(
+        "view/yuv-plane-0",
+        properties(CORE.nimages.PeakStats(yuv), STATS_KEYS)
+        == properties(CORE.nimages.PeakStats(extracted), STATS_KEYS)
+        and properties(CORE.nimages.PeakGrayShades(yuv), SHADES_KEYS)
+        == properties(CORE.nimages.PeakGrayShades(extracted), SHADES_KEYS),
+    )
+
+    # An RGB page with equal planes is the gray page, level for level.
+    gray = source(97, 65, vs.GRAY8, "ramp")
+    rgb = source(97, 65, vs.RGB24, "ramp", planes_same=True)
+    report(
+        "view/rgb-equals-gray",
+        properties(CORE.nimages.PeakStats(rgb), STATS_KEYS)
+        == properties(CORE.nimages.PeakStats(gray), STATS_KEYS)
+        and properties(CORE.nimages.PeakGrayShades(rgb), SHADES_KEYS)
+        == properties(CORE.nimages.PeakGrayShades(gray), SHADES_KEYS),
+    )
+
+    # The reference's luma, on flat pages whose shade list has one entry.
+    for color, want in (
+        ((255, 0, 0), 76),
+        ((0, 255, 0), 150),
+        ((0, 0, 255), 29),
+        ((10, 200, 30), 124),
+    ):
+        flat = CORE.std.BlankClip(
+            width=8, height=8, format=vs.RGB24, length=1, color=list(color)
+        )
+        shades = properties(CORE.nimages.PeakGrayShades(flat), SHADES_KEYS)[0]
+        report(
+            f"view/luma-{color[0]}-{color[1]}-{color[2]}",
+            shades["NImagesGrayShades"] == [want],
+        )
+    return 1 if failures else 0
 
 
 def describe_device(device: dict[str, Any]) -> str:
@@ -599,7 +749,7 @@ def main(argv: list[str] | None = None) -> int:
 
     table = sorted(cases(), key=lambda case: case.name)
     if args.device:
-        return compare_device(table) | compare_chain()
+        return compare_device(table) | compare_chain() | compare_views()
 
     results = []
     for case in table:

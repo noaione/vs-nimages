@@ -110,6 +110,10 @@ posterized.set_output()
 ### `PeakStats`
 
 finds the black and white levels of each frame. pixels pass through untouched.
+it takes an integer `Gray`, `YUV` or `RGB` clip from 8 to 16 bits: a `YUV` clip
+is analysed through plane 0, which is luma, and an `RGB` clip through the
+fixed-point luma of its three planes, the same numbers
+`Image.convert("L")` produces.
 
 ```python
 stats = core.nimages.PeakStats(clip, upper_limit=60, peak_percentage=0.25)
@@ -134,12 +138,14 @@ with stats.get_frame(n) as frame:
 | `NImagesBlackPeakFound` | int bool | whether a black peak was found rather than defaulting |
 | `NImagesWhitePeakFound` | int bool | whether a white peak was found rather than defaulting |
 
-`gpu=1` counts plane 0 on the Vulkan device, reads 1 KB back and runs the same
+`gpu=1` counts on the Vulkan device, reads the table back and runs the same
 analysis on it, so the properties and the pixels are identical to `gpu=0`. it
 pays after a device producer, where counting costs 0.5 ms instead of 7.7 ms at
-12 MP. a lone analyzer is transfer bound because the frame has to cross the bus;
-[19](docs/improvements/19-vulkan-histogram-analyzers.md#outcome-so-far) has both
-numbers.
+12 MP `GRAY8`. a lone analyzer is transfer bound because the frame has to cross
+the bus;
+[19](docs/improvements/19-vulkan-histogram-analyzers.md#outcome-so-far) and
+[20](docs/improvements/20-analyzer-color-inputs.md#outcome-so-far) have the
+numbers for every family.
 
 both percentages are percentages, not fractions: `0.25` means 0.25 percent of all
 pixels, and the required count is `ceil(total_pixels * percentage / 100)`.
@@ -153,7 +159,8 @@ the detail.
 ### `PeakGrayShades`
 
 reports every shade whose share of the frame exceeds `threshold` percent, sorted
-by descending share. pixels pass through untouched.
+by descending share, for an integer `Gray`, `YUV` or `RGB` clip from 8 to 16
+bits. pixels pass through untouched.
 
 ```python
 shades = core.nimages.PeakGrayShades(clip, threshold=0.01)
@@ -283,10 +290,10 @@ values, and pillow's quantized output is byte-identical to its input.
 solver over the frame's own histogram: 40 passes move each interior level to
 the mean of its bucket, both endpoints stay pinned to `0` and the sample maximum,
 and a bucket holding no sample keeps its even level. the histogram comes from
-plane 0, which is the gray plane of a Gray clip and the luma plane of a YUV one,
-and the solved table then applies to every plane. the levels are solved per
-frame, so a clip whose frames differ gets a level set each, which a page-per-frame
-caller wants and a moving clip would show as flicker.
+plane 0 for a Gray or YUV clip and from the fixed-point luma for an RGB one, and
+the solved table then applies to every plane. the levels are solved per frame, so
+a clip whose frames differ gets a level set each, which a page-per-frame caller
+wants and a moving clip would show as flicker.
 
 `gpu=1` maps the table on the device, byte-identical to `gpu=0`, and like
 `Levels` it pays only inside a device chain. `method=1` works there too: plane

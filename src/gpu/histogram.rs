@@ -18,10 +18,10 @@
 
 use std::mem::size_of;
 
-use vapoursynth4_rs::SampleType;
 use vapoursynth4_rs::core::CoreRef;
 use vapoursynth4_rs::ffi;
 use vapoursynth4_rs::frame::VideoFrame;
+use vapoursynth4_rs::{ColorFamily, SampleType};
 
 use crate::error::{NImagesError, Result};
 use crate::histogram::{BINS, Histogram};
@@ -31,8 +31,9 @@ use super::{
     BarrierFn, Device, barrier_fn, fill_barrier, gpu_error, gray32_frame, transfer_barrier,
 };
 
-/// Storage buffers one count dispatch binds: the source plane and the counters.
-const HISTOGRAM_BINDINGS: u32 = 2;
+/// Storage buffers one count dispatch binds: three source planes and the
+/// counters, in that order.
+const HISTOGRAM_BINDINGS: u32 = 4;
 
 /// Samples one invocation counts, packed into whole rows of four.
 const HISTOGRAM_LANES: u32 = 4;
@@ -56,9 +57,12 @@ struct HistogramPush {
     src_stride_bytes: u32,
     bins: u32,
     bytes: u32,
+    /// `1` counts the reference's luma of the three source planes, `0` counts
+    /// plane 0 alone.
+    luma: u32,
 }
 
-const _: () = assert!(size_of::<HistogramPush>() / size_of::<u32>() == 7);
+const _: () = assert!(size_of::<HistogramPush>() / size_of::<u32>() == 8);
 
 const HISTOGRAM_BODY: &str = r#"
 #define LOCAL_BINS 256u
@@ -72,30 +76,65 @@ layout(push_constant) uniform Params {
     uint src_stride_bytes;
     uint bins;
     uint bytes;
+    uint luma;
 } p;
 
-layout(std430, set = 0, binding = 0) readonly buffer Src { uint words[]; } src;
+layout(std430, set = 0, binding = 0) readonly buffer Src0 { uint words[]; } src0;
 layout(std430, set = 0, binding = 1) buffer Table { uint words[]; } table;
+layout(std430, set = 0, binding = 2) readonly buffer Src1 { uint words[]; } src1;
+layout(std430, set = 0, binding = 3) readonly buffer Src2 { uint words[]; } src2;
 
 // One workgroup's own counters, drained once so the global table sees one
 // atomic per bin per workgroup instead of one per sample.
 shared uint local[LOCAL_BINS];
 
-uint load_byte(uint offset) {
-    uint word = src.words[offset >> 2u];
+uint byte0(uint offset) {
+    uint word = src0.words[offset >> 2u];
     return (word >> (8u * (offset & 3u))) & 0xFFu;
 }
 
-uint read_sample(uint x, uint y) {
+uint byte1(uint offset) {
+    uint word = src1.words[offset >> 2u];
+    return (word >> (8u * (offset & 3u))) & 0xFFu;
+}
+
+uint byte2(uint offset) {
+    uint word = src2.words[offset >> 2u];
+    return (word >> (8u * (offset & 3u))) & 0xFFu;
+}
+
+uint sample0(uint x, uint y) {
     uint offset = y * p.src_stride_bytes + x * p.bytes;
     if (p.bytes == 2u) {
-        return load_byte(offset) | (load_byte(offset + 1u) << 8u);
+        return byte0(offset) | (byte0(offset + 1u) << 8u);
     }
-    return load_byte(offset);
+    return byte0(offset);
+}
+
+uint sample1(uint x, uint y) {
+    uint offset = y * p.src_stride_bytes + x * p.bytes;
+    if (p.bytes == 2u) {
+        return byte1(offset) | (byte1(offset + 1u) << 8u);
+    }
+    return byte1(offset);
+}
+
+uint sample2(uint x, uint y) {
+    uint offset = y * p.src_stride_bytes + x * p.bytes;
+    if (p.bytes == 2u) {
+        return byte2(offset) | (byte2(offset + 1u) << 8u);
+    }
+    return byte2(offset);
 }
 
 uint bin_of(uint x, uint y) {
-    return min(read_sample(x, y), p.bins - 1u);
+    uint value = sample0(x, y);
+    if (p.luma == 1u) {
+        // The reference's `convert("L")`: BT.601 luma at 16 bit fixed point
+        // with rounding, so a gray triple comes back as itself.
+        value = (value * 19595u + sample1(x, y) * 38470u + sample2(x, y) * 7471u + 32768u) >> 16u;
+    }
+    return min(value, p.bins - 1u);
 }
 
 void main() {
@@ -175,9 +214,17 @@ impl Engine {
     pub(crate) fn count(&self, core: &CoreRef, frame: &VideoFrame) -> Result<Histogram> {
         let format = frame.get_video_format();
         let bits = format.bits_per_sample;
-        if format.sample_type != SampleType::Integer || !(8..=16).contains(&bits) {
+        let family = format.color_family;
+        let luma = family == ColorFamily::RGB;
+        if format.sample_type != SampleType::Integer
+            || !(8..=16).contains(&bits)
+            || !matches!(
+                family,
+                ColorFamily::Gray | ColorFamily::YUV | ColorFamily::RGB
+            )
+        {
             return Err(NImagesError::new(
-                "gpu: the histogram takes a Gray 8 to 16 bit integer frame",
+                "gpu: the histogram takes a Gray, YUV or RGB 8 to 16 bit integer frame",
             ));
         }
 
@@ -207,6 +254,15 @@ impl Engine {
             return Err(NImagesError::new(
                 "gpu: plane 0 reports a stride shorter than its row",
             ));
+        }
+        if luma {
+            for plane in 1..3 {
+                if frame.stride(plane) != stride {
+                    return Err(NImagesError::new(format!(
+                        "gpu: RGB plane {plane} reports a different row stride"
+                    )));
+                }
+            }
         }
 
         let columns = width.div_ceil(HISTOGRAM_LANES);
@@ -259,6 +315,7 @@ impl Engine {
             src_stride_bytes,
             bins,
             bytes,
+            luma: u32::from(luma),
         };
 
         let value = self
@@ -272,9 +329,16 @@ impl Engine {
                 fill_barrier(exec, self.barrier);
 
                 let source = exec.read_plane(frame, 0)?;
+                let (green, blue) = if luma {
+                    (exec.read_plane(frame, 1)?, exec.read_plane(frame, 2)?)
+                } else {
+                    // The Gray and YUV paths count plane 0 alone, so the two luma
+                    // bindings carry that plane and the kernel never reads them.
+                    (source, source)
+                };
                 exec.dispatch(
                     self.pipeline.pipeline(),
-                    &[source, counters],
+                    &[source, counters, green, blue],
                     bytes_of(&push),
                     launch.grid(),
                 )?;

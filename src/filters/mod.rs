@@ -54,9 +54,10 @@ const TRACE_STAGES: usize = 4;
 /// What a filter accepts as input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Accept {
-    /// Gray, 8 to 16 bit integer, one plane. what the analyzers take, because a
-    /// histogram of one plane only means something for a gray clip.
-    GrayInteger8To16,
+    /// Gray, YUV or RGB, 8 to 16 bit integer. what the analyzers take: a Gray
+    /// clip counts its one plane, a YUV clip counts plane 0, which is luma, and
+    /// an RGB clip counts the reference's fixed-point luma of its three planes.
+    Analyzer,
     /// Any color family, 8 to 16 bit integer, every plane. what the lookup-table
     /// filters take, because a curve applies per sample whatever the family.
     Integer8To16,
@@ -72,7 +73,7 @@ impl Accept {
     /// Wording for an error message.
     fn describe(self) -> &'static str {
         match self {
-            Self::GrayInteger8To16 => "a constant Gray 8 to 16 bit integer clip",
+            Self::Analyzer => "a constant Gray, YUV or RGB 8 to 16 bit integer clip",
             Self::Integer8To16 => "an 8 to 16 bit integer clip",
             Self::Levels => "an 8 to 16 bit integer clip or a Gray/RGB 32 bit float clip",
             Self::Deblur => {
@@ -111,12 +112,13 @@ impl Accept {
                     && (MIN_INTEGER_BITS..=MAX_INTEGER_BITS).contains(&format.bits_per_sample))
                     || (format.sample_type == SampleType::Float && format.bits_per_sample == 32))
             }
-            Self::GrayInteger8To16 => {
+            Self::Analyzer => {
                 format.sample_type == SampleType::Integer
                     && (MIN_INTEGER_BITS..=MAX_INTEGER_BITS).contains(&format.bits_per_sample)
-                    && format.color_family == ColorFamily::Gray
-                    && format.sub_sampling_w == 0
-                    && format.sub_sampling_h == 0
+                    && matches!(
+                        format.color_family,
+                        ColorFamily::Gray | ColorFamily::YUV | ColorFamily::RGB
+                    )
             }
         }
     }
@@ -280,6 +282,67 @@ pub(super) fn plane_histogram(frame: &VideoFrame) -> Result<Histogram> {
     histogram.ok_or_else(|| {
         NImagesError::new(
             "plane 0 is smaller than its reported stride or its histogram could not be allocated",
+        )
+    })
+}
+
+/// Builds the histogram the analyses read, whatever family the frame is.
+///
+/// A Gray plane and a YUV clip's plane 0 are both luma at full resolution, so
+/// they count directly. An RGB clip has no luma plane: the reference pipeline
+/// runs `Image.convert("L")` on it, and that conversion is computed here so an
+/// RGB page and the same page as gray report the same properties.
+pub(super) fn analyzer_histogram(frame: &VideoFrame) -> Result<Histogram> {
+    if frame.get_video_format().color_family == ColorFamily::RGB {
+        return rgb_histogram(frame);
+    }
+    plane_histogram(frame)
+}
+
+/// Builds an RGB frame's histogram through the reference's fixed-point luma.
+fn rgb_histogram(frame: &VideoFrame) -> Result<Histogram> {
+    let format = frame.get_video_format();
+    let width = usize::try_from(frame.frame_width(0))
+        .map_err(|_| NImagesError::new("plane 0 has a negative width"))?;
+    let height = usize::try_from(frame.frame_height(0))
+        .map_err(|_| NImagesError::new("plane 0 has a negative height"))?;
+    let max_value = max_sample_value(format.bits_per_sample)?;
+    if width == 0 || height == 0 {
+        let empty = if format.bits_per_sample == 8 {
+            Histogram::from_rgb_planes([&[], &[], &[]], [0; 3], 0, 0)
+        } else {
+            Histogram::from_rgb_u16_planes([&[], &[], &[]], [0; 3], 0, 0, max_value)
+        };
+        return empty.ok_or_else(|| NImagesError::new("could not allocate the empty histogram"));
+    }
+
+    let mut planes: [&[u8]; 3] = [&[], &[], &[]];
+    let mut strides = [0usize; 3];
+    for plane in 0..planes.len() {
+        let plane = i32::try_from(plane).unwrap_or(0);
+        let (stride, plane_height) = plane_shape(frame, plane)?;
+        let length = stride.checked_mul(plane_height).ok_or_else(|| {
+            NImagesError::new(format!("plane {plane} is larger than the address space"))
+        })?;
+        let pointer = frame.plane(plane);
+        if pointer.is_null() {
+            return Err(NImagesError::new(format!("plane {plane} is not readable")));
+        }
+        // SAFETY: VapourSynth guarantees a readable plane buffer of `stride *
+        // height` bytes for as long as the frame is alive, and the caller holds
+        // the frame.
+        planes[plane as usize] = unsafe { std::slice::from_raw_parts(pointer, length) };
+        strides[plane as usize] = stride;
+    }
+
+    let histogram = if format.bits_per_sample == 8 {
+        Histogram::from_rgb_planes(planes, strides, width, height)
+    } else {
+        Histogram::from_rgb_u16_planes(planes, strides, width, height, max_value)
+    };
+    histogram.ok_or_else(|| {
+        NImagesError::new(
+            "an RGB plane is smaller than its reported stride or its histogram could not be allocated",
         )
     })
 }

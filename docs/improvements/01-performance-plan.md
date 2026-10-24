@@ -31,6 +31,10 @@ floor to VapourSynth R80. all five device plans are landed;
 [17](17-vulkan-deblur.md#aggregate) is the one whose envelope is still bounded by
 the card's memory rather than by the kernel.
 
+the analyzer input surface landed as [20](20-analyzer-color-inputs.md): `YUV`
+plane 0 for free, the reference's fixed-point luma for `RGB`, and the same
+definition in `Posterize(method=1)`.
+
 ## candidate status
 
 checked against the code as it stands:
