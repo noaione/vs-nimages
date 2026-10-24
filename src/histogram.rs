@@ -3,6 +3,8 @@
 //! `GRAY8` keeps its fixed 256-bin array. Wider formats allocate one bin for
 //! every native code value, and all plane readers visit active samples only.
 
+use crate::luma;
+
 /// Number of shades in an 8-bit sample.
 pub const BINS: usize = 256;
 
@@ -165,28 +167,6 @@ pub struct Histogram {
     max_value: u16,
 }
 
-/// Luma of one 8-bit triple, as `Image.convert("L")` computes it.
-///
-/// The reference pipeline forces every non-gray image to `L` before it counts a
-/// histogram, and Pillow's conversion is BT.601 luma at 16 bit fixed point with
-/// rounding. The weights sum to 65536, so a gray triple comes back as itself.
-fn luma_u8(red: u8, green: u8, blue: u8) -> u8 {
-    let sum =
-        u32::from(red) * 19_595 + u32::from(green) * 38_470 + u32::from(blue) * 7_471 + 32_768;
-    u8::try_from(sum >> 16).unwrap_or(u8::MAX)
-}
-
-/// The same luma over native 16-bit code values.
-///
-/// Three 16 bit samples peak at 4 294 901 760 before the rounding term, and
-/// adding it still fits a `u32`; the shift brings the result back under 65536.
-/// sum needs 33 bits and the shift brings it back under 65536.
-fn luma_u16(red: u16, green: u16, blue: u16) -> u16 {
-    let sum =
-        u64::from(red) * 19_595 + u64::from(green) * 38_470 + u64::from(blue) * 7_471 + 32_768;
-    u16::try_from(sum >> 16).unwrap_or(u16::MAX)
-}
-
 impl Histogram {
     /// An empty 8-bit histogram.
     #[must_use]
@@ -268,7 +248,11 @@ impl Histogram {
     /// Gray and YUV slices are counted by [`Histogram::from_plane`], which reads
     /// one plane. An RGB clip has no luma plane, so the reference pipeline's
     /// `convert("L")` is computed here instead, which is what makes an RGB page
-    /// and the same page decoded as gray report the same properties.
+    /// and the same page decoded as gray report the same properties. The
+    /// expression lives in `src/luma.rs`, which vectorises it.
+    ///
+    /// The counters are striped when the page's own luma repeats, the way the
+    /// 8-bit gray reader decides; see [`rgb_striping_pays`].
     ///
     /// Returns [`None`] when a plane's rows do not fit in its slice.
     #[must_use]
@@ -286,20 +270,11 @@ impl Histogram {
             validate_plane_length(planes[plane].len(), stride, width, height)?;
         }
 
-        let mut counts = [0u64; BINS];
-        for row in 0..height {
-            let start = [row * strides[0], row * strides[1], row * strides[2]];
-            let red = planes[0].get(start[0]..start[0] + width)?;
-            let green = planes[1].get(start[1]..start[1] + width)?;
-            let blue = planes[2].get(start[2]..start[2] + width)?;
-            for ((&red, &green), &blue) in red.iter().zip(green).zip(blue) {
-                let value = usize::from(luma_u8(red, green, blue));
-                if let Some(count) = counts.get_mut(value) {
-                    *count = count.saturating_add(1);
-                }
-            }
-        }
-
+        let counts = if rgb_striping_pays(planes, strides, width, height) {
+            rgb_counts::<U8_STRIPES>(planes, strides, width, height)?
+        } else {
+            rgb_counts::<1>(planes, strides, width, height)?
+        };
         Some(Self {
             counts: Counts::U8(counts),
             total_pixels: pixel_count(width, height),
@@ -311,6 +286,10 @@ impl Histogram {
     ///
     /// Values above `max_value` are clamped to it, the way the single-plane
     /// reader clamps them, so a 10 bit plane lands in its own 1024 bins.
+    ///
+    /// The reader is always direct: four 512 KiB tables per depth exceed the
+    /// cache striping depends on, which is why the gray 16-bit reader does not
+    /// stripe either.
     ///
     /// Returns [`None`] when a plane's rows do not fit or the bounded table
     /// cannot be allocated.
@@ -336,27 +315,31 @@ impl Histogram {
         counts.try_reserve_exact(length).ok()?;
         counts.resize(length, 0u64);
 
+        let mut samples = [0u16; LUMA_CHUNK];
         for row in 0..height {
-            let start = [row * strides[0], row * strides[1], row * strides[2]];
-            let red = planes[0].get(start[0]..start[0] + row_bytes)?;
-            let green = planes[1].get(start[1]..start[1] + row_bytes)?;
-            let blue = planes[2].get(start[2]..start[2] + row_bytes)?;
-            let samples = red
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .zip(green.as_chunks::<2>().0)
-                .zip(blue.as_chunks::<2>().0);
-            for ((red, green), blue) in samples {
-                let value = luma_u16(
-                    u16::from_ne_bytes(*red),
-                    u16::from_ne_bytes(*green),
-                    u16::from_ne_bytes(*blue),
-                )
-                .min(max_value);
-                if let Some(count) = counts.get_mut(usize::from(value)) {
-                    *count = count.saturating_add(1);
+            let starts = [row * strides[0], row * strides[1], row * strides[2]];
+            let red = planes[0].get(starts[0]..starts[0] + row_bytes)?;
+            let green = planes[1].get(starts[1]..starts[1] + row_bytes)?;
+            let blue = planes[2].get(starts[2]..starts[2] + row_bytes)?;
+
+            let mut column = 0;
+            while column < width {
+                let count = LUMA_CHUNK.min(width - column);
+                let start = column * 2;
+                let end = start + count * 2;
+                luma::rows_u16(
+                    &red[start..end],
+                    &green[start..end],
+                    &blue[start..end],
+                    &mut samples[..count],
+                );
+                for &value in &samples[..count] {
+                    let value = value.min(max_value);
+                    if let Some(counter) = counts.get_mut(usize::from(value)) {
+                        *counter = counter.saturating_add(1);
+                    }
                 }
+                column += count;
             }
         }
 
@@ -429,6 +412,122 @@ impl Histogram {
     }
 }
 
+/// Luma samples computed per chunk before they are counted.
+///
+/// A chunk fits in the stack and in the first level cache, so the arithmetic
+/// and the counter updates that follow it interleave over one row instead of
+/// splitting a plane into two passes over memory.
+const LUMA_CHUNK: usize = 1024;
+
+/// Counts the luma of three 8-bit planes into one table, or four when the page
+/// repeats its shades.
+///
+/// Returns [`None`] when a row does not fit in its slice.
+fn rgb_counts<const STRIPES: usize>(
+    planes: [&[u8]; 3],
+    strides: [usize; 3],
+    width: usize,
+    height: usize,
+) -> Option<[u64; BINS]> {
+    // The stripe count is a constant here, so the mask folds and the table
+    // index is provably in range; a runtime mask costs a bounds check per
+    // sample, which is most of the scatter's cost.
+    let mut tables = [[0u64; BINS]; STRIPES];
+    let mut samples = [0u8; LUMA_CHUNK];
+
+    for row in 0..height {
+        let starts = [row * strides[0], row * strides[1], row * strides[2]];
+        let red = planes[0].get(starts[0]..starts[0] + width)?;
+        let green = planes[1].get(starts[1]..starts[1] + width)?;
+        let blue = planes[2].get(starts[2]..starts[2] + width)?;
+
+        let mut column = 0;
+        while column < width {
+            let count = LUMA_CHUNK.min(width - column);
+            let end = column + count;
+            luma::rows_u8(
+                &red[column..end],
+                &green[column..end],
+                &blue[column..end],
+                &mut samples[..count],
+            );
+            for (offset, &value) in samples[..count].iter().enumerate() {
+                let Some(table) = tables.get_mut(offset % STRIPES) else {
+                    continue;
+                };
+                if let Some(counter) = table.get_mut(usize::from(value)) {
+                    *counter = counter.saturating_add(1);
+                }
+            }
+            column = end;
+        }
+    }
+
+    let mut counts = [0u64; BINS];
+    for table in &tables {
+        for (bin, &count) in table.iter().enumerate() {
+            if let Some(total) = counts.get_mut(bin) {
+                *total = total.saturating_add(count);
+            }
+        }
+    }
+    Some(counts)
+}
+
+/// Whether striping pays for this colour page.
+///
+/// [`striping_pays`] samples 256 neighbour pairs of one plane; this samples the
+/// same grid and compares their luma, because flat artwork repeats its luma
+/// exactly the way it repeats its samples.
+fn rgb_striping_pays(planes: [&[u8]; 3], strides: [usize; 3], width: usize, height: usize) -> bool {
+    if width < 2 || pixel_count(width, height) < STRIPE_MIN_PIXELS {
+        return false;
+    }
+
+    let rows = PROBE_ROWS.min(height);
+    let pairs = PROBE_PAIRS_PER_WINDOW.min(width - 1);
+    let windows = PROBE_WINDOWS.min((width - 1) / pairs);
+    let step = if windows > 1 {
+        (width - pairs - 1) / (windows - 1)
+    } else {
+        0
+    };
+    let mut samples = [0u8; PROBE_PAIRS_PER_WINDOW + 1];
+    let mut equal = 0u64;
+    let mut total = 0u64;
+    for index in 0..rows {
+        let row = index * height / rows;
+        let starts = [row * strides[0], row * strides[1], row * strides[2]];
+        let (Some(red), Some(green), Some(blue)) = (
+            planes[0].get(starts[0]..starts[0] + width),
+            planes[1].get(starts[1]..starts[1] + width),
+            planes[2].get(starts[2]..starts[2] + width),
+        ) else {
+            return false;
+        };
+        for window in 0..windows {
+            let column = window * step;
+            let span = column..column + pairs + 1;
+            let (Some(red), Some(green), Some(blue)) = (
+                red.get(span.clone()),
+                green.get(span.clone()),
+                blue.get(span),
+            ) else {
+                return false;
+            };
+            luma::rows_u8(red, green, blue, &mut samples[..pairs + 1]);
+            for pair in samples[..=pairs].windows(2) {
+                if pair[0] == pair[1] {
+                    equal += 1;
+                }
+                total += 1;
+            }
+        }
+    }
+
+    total > 0 && equal * 100 >= total * STRIPE_MIN_REPEAT_PERCENT
+}
+
 impl Default for Histogram {
     fn default() -> Self {
         Self::new()
@@ -461,6 +560,7 @@ fn validate_plane_length(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::luma::{luma, luma_u16};
 
     /// The plain reader written out again, for differential checks.
     fn reference_counts(data: &[u8], stride: usize, width: usize, height: usize) -> [u64; BINS] {
@@ -742,29 +842,6 @@ mod tests {
         assert_eq!(histogram.max_value(), 1023);
     }
 
-    #[test]
-    fn luma_matches_the_reference_conversion() {
-        // `Image.convert("L")` on an RGB image is BT.601 luma at 16 bit fixed
-        // point with rounding, measured against Pillow on 4096 colours with no
-        // difference at all.
-        assert_eq!(luma_u8(255, 0, 0), 76);
-        assert_eq!(luma_u8(0, 255, 0), 150);
-        assert_eq!(luma_u8(0, 0, 255), 29);
-        assert_eq!(luma_u8(10, 200, 30), 124);
-
-        // A gray triple is its own luma, which is what makes an RGB page and the
-        // same page decoded as gray report the same properties.
-        for value in 0..=255u8 {
-            assert_eq!(luma_u8(value, value, value), value);
-        }
-        assert_eq!(luma_u16(0, 0, 0), 0);
-        assert_eq!(luma_u16(65_535, 65_535, 65_535), 65_535);
-        assert_eq!(luma_u16(65_535, 0, 0), 19_595);
-        for value in [0u16, 1, 1023, 4095, 65_535] {
-            assert_eq!(luma_u16(value, value, value), value);
-        }
-    }
-
     /// Fills three planes whose strides differ, with a padding byte no active
     /// sample produces, and returns them with their strides.
     fn rgb_planes(width: usize, height: usize) -> ([Vec<u8>; 3], [usize; 3]) {
@@ -809,7 +886,7 @@ mod tests {
                 let red = planes[0][row * strides[0] + column];
                 let green = planes[1][row * strides[1] + column];
                 let blue = planes[2][row * strides[2] + column];
-                want[usize::from(luma_u8(red, green, blue))] += 1;
+                want[usize::from(luma(red, green, blue))] += 1;
             }
         }
         assert_eq!(histogram.counts(), want);

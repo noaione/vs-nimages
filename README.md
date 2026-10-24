@@ -140,11 +140,12 @@ with stats.get_frame(n) as frame:
 
 `gpu=1` counts on the Vulkan device, reads the table back and runs the same
 analysis on it, so the properties and the pixels are identical to `gpu=0`. it
-pays after a device producer, where counting costs 0.5 ms instead of 7.7 ms at
+pays after a device producer, where counting costs 1.6 ms instead of 9.5 ms at
 12 MP `GRAY8`. a lone analyzer is transfer bound because the frame has to cross
 the bus;
-[19](docs/improvements/19-vulkan-histogram-analyzers.md#outcome-so-far) and
-[20](docs/improvements/20-analyzer-color-inputs.md#outcome-so-far) have the
+[19](docs/improvements/19-vulkan-histogram-analyzers.md#outcome-so-far),
+[20](docs/improvements/20-analyzer-color-inputs.md#outcome-so-far) and
+[21](docs/improvements/21-vector-rgb-luma.md#outcome-so-far) have the
 numbers for every family.
 
 both percentages are percentages, not fractions: `0.25` means 0.25 percent of all

@@ -17,6 +17,7 @@
 mod error;
 mod filters;
 mod gpu;
+mod luma;
 
 pub mod deblur;
 pub mod gray_shades;

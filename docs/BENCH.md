@@ -239,25 +239,28 @@ plane 0, and an `RGB` one through the reference's fixed-point luma, which is wha
 
 | format | counting, device chain | counting, roundtrip | host counting |
 | --- | ---: | ---: | ---: |
-| `GRAY8` | 0.5 ms | 5.3 ms | 7.7 to 8.0 ms |
-| `GRAY16` | 1.3 to 2.4 ms | 12.7 to 13.9 ms | 19.7 to 23.4 ms |
-| `YUV420P8` | under 1 ms | 10.8 ms | 8.7 to 9.1 ms |
-| `RGB24` | under 1 ms | 24.1 ms | 23.1 to 24.5 ms |
+| `GRAY8` | 1.6 ms | 7.0 ms | 9.5 ms |
+| `GRAY16` | 1.1 ms | 15.6 ms | 23.4 ms |
+| `YUV420P8` | 1.3 ms | 8.3 ms | 9.6 ms |
+| `RGB24` | 1.6 to 3.9 ms | 22.8 to 27.6 ms | 10.4 to 14.1 ms |
 
-a lone analyzer is transfer bound: 12 MB up and 12 or 24 MB back is more than the
-7.7 or 20 ms of counting it removes, so the gain is 1.6x to 1.9x. after a device
-producer it is 10x to 18x cheaper than the host's counting, which is what makes
-`Posterize(method=1)` a device chain member:
+a lone analyzer is transfer bound: 12 MB up and 12 or 24 MB back is more than
+the 9.5 or 12 ms of counting it removes, so on its own it loses to the host.
+behind a device producer it is 5x to 20x cheaper than the host's counting, which
+is what makes `Posterize(method=1)` a device chain member:
 
 | chain, 12 MP | host | device | saved |
 | --- | ---: | ---: | ---: |
-| `PeakGrayShades` into `Posterize(use_props=True, method=1)`, `GRAY8` | 20.0 to 21.1 ms | 6.2 to 6.4 ms | 3.2x |
-| the same, `GRAY16` | 49.1 to 51.8 ms | 14.0 to 14.2 ms | 3.6x |
-| the same, `YUV420P8` | 26.4 to 27.1 ms | 12.1 to 12.4 ms | 2.2x |
-| the same, `RGB24` | 70.8 to 71.0 ms | 25.7 to 26.3 ms | 2.7x |
+| `PeakGrayShades` into `Posterize(use_props=True, method=1)`, `GRAY8` | 23.9 ms | 7.2 ms | 3.3x |
+| the same, `GRAY16` | 55.5 ms | 18.2 ms | 3.0x |
+| the same, `YUV420P8` | 24.3 ms | 8.9 ms | 2.7x |
+| the same, `RGB24` | 40.2 to 43.1 ms | 21.6 to 27.8 ms | 1.6x to 1.9x |
 
-`RGB24` counting costs three times the gray pass on the host, which is the two
-extra plane reads and the luma arithmetic, and is still 20x cheaper on the device.
+`RGB24` counting costs 1.1 to 1.5 times the gray pass on the host since
+[21](improvements/21-vector-rgb-luma.md) vectorised the luma, which leaves the
+two extra plane reads; the arithmetic that used to make it three times the gray
+pass is gone. the device path is still much cheaper in a chain, but the margin
+it wins against the host has narrowed from 2.7x to 1.6x to 1.9x for `RGB24`.
 the roundtrip row is what a lone analyzer pays, so the device path is only a
 chain member for colour too. every family writes the same four properties and the
 same two shade arrays as `gpu=0` and hands back the input's pixels:

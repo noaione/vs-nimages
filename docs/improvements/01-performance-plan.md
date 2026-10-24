@@ -35,6 +35,13 @@ the analyzer input surface landed as [20](20-analyzer-color-inputs.md): `YUV`
 plane 0 for free, the reference's fixed-point luma for `RGB`, and the same
 definition in `Posterize(method=1)`.
 
+the RGB side of that reader then got its own plan. [21](21-vector-rgb-luma.md)
+computes the luma with `std::arch` kernels (a scalar fallback everywhere else)
+and gives the RGB reader the four-table variant the gray reader already chose
+from a probe, which halves the host cost: 23.1 to 24.5 ms becomes 10.4 to
+14.1 ms at 12 MP `RGB24`, and the 16-bit reader does not move because three
+planes of native words are memory bound before the arithmetic matters.
+
 ## candidate status
 
 checked against the code as it stands:
