@@ -2,6 +2,13 @@
 
 ### unreleased
 
+nothing yet!
+
+### [0.2.0] (2026-10-25)
+
+Adds the Vulkan device path to every filter and color inputs to the peak
+filters.
+
 **Added**:
 - `gpu` argument on every filter, which runs that filter on the Vulkan
   device. `1` needs VapourSynth R80 and a Vulkan 1.4 device, `0` (the default)
