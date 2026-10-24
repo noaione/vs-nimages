@@ -16,7 +16,7 @@ use vapoursynth4_rs::core::CoreRef;
 use vapoursynth4_rs::frame::{VideoFormat, VideoFrame};
 use vapoursynth4_rs::vulkan::{ExecContext, VulkanError};
 
-use crate::deblur::{Gaussian, Method, Plan};
+use crate::deblur::{Gaussian, LUMA_WEIGHTS, Method, Plan};
 use crate::error::{NImagesError, Result};
 
 use super::shared::{self, PREAMBLE, bytes_of, shader};
@@ -24,9 +24,12 @@ use super::{
     BarrierFn, Device, barrier_fn, compute_barrier, gpu_error, gray32_frame, upload_floats,
 };
 
-/// Storage buffers one prepare dispatch binds: the input plane, the `GRAY32`
-/// luma it writes, and the estimate either writes or stands in for.
-const PREPARE_BINDINGS: u32 = 3;
+/// Storage buffers one prepare dispatch binds: the three source planes, the
+/// `GRAY32` luma it writes, and the estimate either writes or stands in for.
+///
+/// A one-plane family binds its only plane in all three source slots and reads
+/// only the first, so the kernel is one shader for Gray, YUV and RGB.
+const PREPARE_BINDINGS: u32 = 5;
 /// Storage buffers one blur dispatch binds: source, taps, destination, aux.
 const BLUR_BINDINGS: u32 = 4;
 /// Storage buffers one Sobel dispatch binds: the blurred luma and the mask.
@@ -37,11 +40,21 @@ const BLEND_BINDINGS: u32 = 4;
 /// Storage buffers one store dispatch binds: the restored plane and the frame's
 /// output plane.
 const STORE_BINDINGS: u32 = 2;
+/// Storage buffers one RGB store dispatch binds: the three source planes, the
+/// luma and restored planes the delta is taken from, and the three output
+/// planes.
+const STORE_RGB_BINDINGS: u32 = 8;
+/// Storage buffers one copy dispatch binds: the plane read and the plane
+/// written.
+const COPY_BINDINGS: u32 = 2;
 
 /// Columns one blend invocation packs into one output word.
 const BLEND_LANES: u32 = 4;
 
 /// What the prepare kernel is told.
+///
+/// `channels` is three for RGB, where the luma is the weighted sum of the three
+/// planes, and one otherwise, where plane 0 is the luma on its own.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct PreparePush {
@@ -49,18 +62,23 @@ struct PreparePush {
     stride: u32,
     width: u32,
     height: u32,
-    src_stride_bytes: u32,
+    src0_stride: u32,
+    src1_stride: u32,
+    src2_stride: u32,
     luma_stride: u32,
     estimate_stride: u32,
     src_bytes: u32,
-    scale: f32,
-    pedestal: f32,
+    channels: u32,
     mode: u32,
     is_float: u32,
+    scale: f32,
+    pedestal: f32,
+    weight0: f32,
+    weight1: f32,
+    weight2: f32,
 }
 
-const _: () = assert!(size_of::<PreparePush>() == 12 * size_of::<u32>());
-
+const _: () = assert!(size_of::<PreparePush>() == 18 * size_of::<u32>());
 /// What the separable blur is told.
 ///
 /// `mode` picks what the vertical pass leaves behind: `0` the blurred plane,
@@ -143,51 +161,145 @@ struct StorePush {
 const _: () = assert!(size_of::<StorePush>() == 11 * size_of::<u32>());
 const _: () = assert!(size_of::<BlendPush>() == 13 * size_of::<u32>());
 
+/// What the RGB store kernel is told.
+///
+/// The host applies one delta to all three channels, limited to the gamut the
+/// pixel has left, so this store reads the three source planes as well as the
+/// luma and restored planes the delta comes from.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct StoreRgbPush {
+    units: u32,
+    stride: u32,
+    column_groups: u32,
+    width: u32,
+    height: u32,
+    src0_stride: u32,
+    src1_stride: u32,
+    src2_stride: u32,
+    luma_stride: u32,
+    restored_stride: u32,
+    dst0_stride: u32,
+    dst1_stride: u32,
+    dst2_stride: u32,
+    scale: f32,
+    inverse: f32,
+    max_value: f32,
+    src_bytes: u32,
+    is_float: u32,
+}
+
+const _: () = assert!(size_of::<StoreRgbPush>() == 18 * size_of::<u32>());
+
+/// What the chroma copy is told.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CopyPush {
+    units: u32,
+    stride: u32,
+    columns: u32,
+    src_stride: u32,
+    dst_stride: u32,
+}
+
+const _: () = assert!(size_of::<CopyPush>() == 5 * size_of::<u32>());
+
+/// The host's clamp, which the blend and both stores share.
+///
+/// An unordered bound pair returns the low one, and a NaN passes through
+/// because neither comparison fires.
+const HOST_HELPERS: &str = r#"
+float clamp_host(float value, float low, float high) {
+    if (high < low) {
+        return low;
+    }
+    if (value < low) {
+        return low;
+    }
+    if (value > high) {
+        return high;
+    }
+    return value;
+}
+"#;
+
+/// The sample readers a kernel that binds source planes declares.
+///
+/// A GLSL function cannot take a buffer, so the reader is a macro expanded once
+/// per binding. The byte offset comes from the plane's own row stride, so row
+/// padding is addressable, and a two byte sample is assembled little-endian,
+/// which is the order `Convert` reads it in. `p.src_bytes` and `p.is_float` are
+/// the same for every lane of a dispatch, so the branch is uniform.
+const SAMPLE_READERS: &str = r#"
+#define READ_SAMPLE(NAME, BYTE, SRC) \
+uint BYTE(uint offset) { \
+    uint word = SRC.words[offset >> 2u]; \
+    return (word >> (8u * (offset & 3u))) & 0xFFu; \
+} \
+float NAME(uint offset) { \
+    if (p.is_float == 1u) { \
+        return uintBitsToFloat(SRC.words[offset >> 2u]); \
+    } \
+    if (p.src_bytes == 2u) { \
+        return float(BYTE(offset) | (BYTE(offset + 1u) << 8u)); \
+    } \
+    return float(BYTE(offset)); \
+}
+"#;
+
 const PREPARE_BODY: &str = r#"
 layout(push_constant) uniform Params {
     uint units;
     uint stride;
     uint width;
     uint height;
-    uint src_stride_bytes;
+    uint src0_stride;
+    uint src1_stride;
+    uint src2_stride;
     uint luma_stride;
     uint estimate_stride;
     uint src_bytes;
-    float scale;
-    float pedestal;
+    uint channels;
     uint mode;
     uint is_float;
+    float scale;
+    float pedestal;
+    float weight0;
+    float weight1;
+    float weight2;
 } p;
 
-layout(std430, set = 0, binding = 0) readonly buffer Src { uint words[]; } src;
-layout(std430, set = 0, binding = 1) writeonly buffer Luma { float values[]; } luma;
-layout(std430, set = 0, binding = 2) writeonly buffer Estimate { float values[]; } estimate;
+layout(std430, set = 0, binding = 0) readonly buffer Src0 { uint words[]; } src0;
+layout(std430, set = 0, binding = 1) readonly buffer Src1 { uint words[]; } src1;
+layout(std430, set = 0, binding = 2) readonly buffer Src2 { uint words[]; } src2;
+layout(std430, set = 0, binding = 3) writeonly buffer Luma { float values[]; } luma;
+layout(std430, set = 0, binding = 4) writeonly buffer Estimate { float values[]; } estimate;
 
-// One byte of the source plane. A byte offset is derived from the plane, not
-// from a sample, so any row stride is addressable.
-uint load_byte(uint offset) {
-    uint word = src.words[offset >> 2u];
-    return (word >> (8u * (offset & 3u))) & 0xFFu;
-}
+READ_SAMPLE(read0, read0Byte, src0)
+READ_SAMPLE(read1, read1Byte, src1)
+READ_SAMPLE(read2, read2Byte, src2)
 
 void main() {
     for (uint unit = gl_GlobalInvocationID.x; unit < p.units; unit += p.stride) {
         uint x = unit % p.width;
         uint y = unit / p.width;
-        uint byte = y * p.src_stride_bytes + x * p.src_bytes;
-        float value;
-        if (p.is_float == 1u) {
-            value = uintBitsToFloat(src.words[byte >> 2u]) * p.scale;
-        } else if (p.src_bytes == 2u) {
-            uint pair = load_byte(byte) | (load_byte(byte + 1u) << 8u);
-            value = float(pair) * p.scale;
-        } else {
-            value = float(load_byte(byte)) * p.scale;
+        uint column = x * p.src_bytes;
+        precise float value = read0(y * p.src0_stride + column) * p.scale;
+        if (p.channels == 3u) {
+            // The host reads the three planes in this order, one multiply and
+            // one add at a time, so the weighted sum is reproduced rather than
+            // left to whatever association the driver picks.
+            precise float green = read1(y * p.src1_stride + column) * p.scale;
+            precise float blue = read2(y * p.src2_stride + column) * p.scale;
+            precise float weighted0 = value * p.weight0;
+            precise float weighted1 = green * p.weight1;
+            precise float weighted2 = blue * p.weight2;
+            precise float sum = weighted0 + weighted1;
+            value = sum + weighted2;
         }
-        precise float code = value;
-        luma.values[y * p.luma_stride + x] = code;
+        luma.values[y * p.luma_stride + x] = value;
         if (p.mode == 1u) {
-            estimate.values[y * p.estimate_stride + x] = code + p.pedestal;
+            estimate.values[y * p.estimate_stride + x] = value + p.pedestal;
         }
     }
 }
@@ -322,21 +434,6 @@ layout(std430, set = 0, binding = 1) readonly buffer Candidate { float values[];
 layout(std430, set = 0, binding = 2) readonly buffer Mask { float values[]; } mask;
 layout(std430, set = 0, binding = 3) writeonly buffer Dst { float values[]; } dst;
 
-// The host's clamp: an unordered bound pair returns the low one, and a NaN
-// passes through because neither comparison fires.
-float clamp_host(float value, float low, float high) {
-    if (high < low) {
-        return low;
-    }
-    if (value < low) {
-        return low;
-    }
-    if (value > high) {
-        return high;
-    }
-    return value;
-}
-
 void main() {
     for (uint unit = gl_GlobalInvocationID.x; unit < p.units; unit += p.stride) {
         uint group = unit % p.column_groups;
@@ -408,19 +505,6 @@ layout(push_constant) uniform Params {
 layout(std430, set = 0, binding = 0) readonly buffer Src { float values[]; } src;
 layout(std430, set = 0, binding = 1) buffer Dst { uint words[]; } dst;
 
-float clamp_host(float value, float low, float high) {
-    if (high < low) {
-        return low;
-    }
-    if (value < low) {
-        return low;
-    }
-    if (value > high) {
-        return high;
-    }
-    return value;
-}
-
 // One integer sample: the host rounds ties to even, clamps and truncates.
 uint sample_of(uint x, uint y) {
     precise float code = src.values[y * p.src_stride_words + x];
@@ -478,32 +562,181 @@ void main() {
 }
 "#;
 
+const STORE_RGB_BODY: &str = r#"
+layout(push_constant) uniform Params {
+    uint units;
+    uint stride;
+    uint column_groups;
+    uint width;
+    uint height;
+    uint src0_stride;
+    uint src1_stride;
+    uint src2_stride;
+    uint luma_stride;
+    uint restored_stride;
+    uint dst0_stride;
+    uint dst1_stride;
+    uint dst2_stride;
+    float scale;
+    float inverse;
+    float max_value;
+    uint src_bytes;
+    uint is_float;
+} p;
+
+layout(std430, set = 0, binding = 0) readonly buffer Src0 { uint words[]; } src0;
+layout(std430, set = 0, binding = 1) readonly buffer Src1 { uint words[]; } src1;
+layout(std430, set = 0, binding = 2) readonly buffer Src2 { uint words[]; } src2;
+layout(std430, set = 0, binding = 3) readonly buffer Luma { float values[]; } luma;
+layout(std430, set = 0, binding = 4) readonly buffer Restored { float values[]; } restored;
+layout(std430, set = 0, binding = 5) buffer Dst0 { uint words[]; } dst0;
+layout(std430, set = 0, binding = 6) buffer Dst1 { uint words[]; } dst1;
+layout(std430, set = 0, binding = 7) buffer Dst2 { uint words[]; } dst2;
+
+READ_SAMPLE(read0, read0Byte, src0)
+READ_SAMPLE(read1, read1Byte, src1)
+READ_SAMPLE(read2, read2Byte, src2)
+
+// One sample written into a plane. A lane touches only its own sample's bytes,
+// so the two lanes that share a word never race.
+#define STORE_SAMPLE(NAME, DST, STRIDE) \
+void NAME(uint x, uint y, float code) { \
+    if (p.is_float == 1u) { \
+        uint at = (y * STRIDE + x * 4u) >> 2u; \
+        DST.words[at] = floatBitsToUint(code * p.inverse); \
+        return; \
+    } \
+    precise float scaled = code * p.inverse; \
+    precise float rounded = clamp_host(roundEven(scaled), 0.0, p.max_value); \
+    uint value = uint(rounded); \
+    uint offset = y * STRIDE + x * p.src_bytes; \
+    uint word = offset >> 2u; \
+    uint shift = 8u * (offset & 3u); \
+    uint mask = p.src_bytes == 1u ? 0xFFu : 0xFFFFu; \
+    uint packed = DST.words[word]; \
+    DST.words[word] = (packed & ~(mask << shift)) | (value << shift); \
+}
+
+STORE_SAMPLE(write0, dst0, p.dst0_stride)
+STORE_SAMPLE(write1, dst1, p.dst1_stride)
+STORE_SAMPLE(write2, dst2, p.dst2_stride)
+
+void main() {
+    for (uint unit = gl_GlobalInvocationID.x; unit < p.units; unit += p.stride) {
+        uint group = unit % p.column_groups;
+        uint y = unit / p.column_groups;
+        uint x0 = group * 4u;
+        for (uint lane = 0u; lane < 4u; lane++) {
+            uint x = x0 + lane;
+            if (x >= p.width) {
+                break;
+            }
+            uint column = x * p.src_bytes;
+            precise float red = read0(y * p.src0_stride + column) * p.scale;
+            precise float green = read1(y * p.src1_stride + column) * p.scale;
+            precise float blue = read2(y * p.src2_stride + column) * p.scale;
+            precise float low = min(min(red, green), blue);
+            precise float high = max(max(red, green), blue);
+            // The host's delta: one offset for the three channels, limited to
+            // the gamut the pixel has left, which is what keeps the channel
+            // differences instead of clamping each channel on its own.
+            precise float delta = clamp_host(
+                restored.values[y * p.restored_stride + x]
+                    - luma.values[y * p.luma_stride + x],
+                -low,
+                255.0 - high
+            );
+            precise float restored0 = red + delta;
+            precise float restored1 = green + delta;
+            precise float restored2 = blue + delta;
+            write0(x, y, restored0);
+            write1(x, y, restored1);
+            write2(x, y, restored2);
+        }
+    }
+}
+"#;
+
+const COPY_BODY: &str = r#"
+layout(push_constant) uniform Params {
+    uint units;
+    uint stride;
+    uint columns;
+    uint src_stride;
+    uint dst_stride;
+} p;
+
+layout(std430, set = 0, binding = 0) readonly buffer Src { uint words[]; } src;
+layout(std430, set = 0, binding = 1) writeonly buffer Dst { uint words[]; } dst;
+
+// Copies one four byte group of one row. Both strides are multiples of four
+// and at least the row's width, so a row starts and ends on a word and the
+// bytes the last group carries past the pixels are padding on both sides.
+void main() {
+    for (uint unit = gl_GlobalInvocationID.x; unit < p.units; unit += p.stride) {
+        uint column = unit % p.columns;
+        uint y = unit / p.columns;
+        uint source = (y * p.src_stride + column * 4u) >> 2u;
+        uint destination = (y * p.dst_stride + column * 4u) >> 2u;
+        dst.words[destination] = src.words[source];
+    }
+}
+"#;
+
+/// Which pass turns the restored code values into the frame's own samples.
+///
+/// Gray stores one plane, RGB stores three from one delta limited to the gamut
+/// each pixel has left, and YUV stores the luma plane and copies the chroma
+/// planes through untouched.
+enum Output {
+    Gray(Device),
+    Rgb(Device),
+    /// The chroma copy is boxed so one instance carries both pipelines without
+    /// the enum taking the larger of the two shapes.
+    Yuv(Device, Box<Device>),
+}
+
+/// One chroma plane carried through from the input to the output.
+#[derive(Clone, Copy)]
+struct PlaneCopy {
+    /// Four byte groups per row.
+    columns: u32,
+    src_stride: u32,
+    dst_stride: u32,
+    launch: shared::Launch,
+}
+
 /// The device half of `Deblur`.
 pub(crate) struct Engine {
     prepare: Device,
     blur: Device,
     sobel: Device,
     blend: Device,
-    store: Device,
+    output: Output,
     barrier: BarrierFn,
     gaussian: VideoFrame,
     prefilter: VideoFrame,
     mask: VideoFrame,
     plan: Plan,
+    family: ColorFamily,
 }
 
 impl Engine {
-    /// Builds the four pipelines and uploads the three tap tables.
+    /// Builds the pipelines this format needs and uploads the three tap tables.
     ///
-    /// Only 8 bit Gray is implemented; the refusal names what was asked for, so
-    /// a caller learns the limit at creation.
+    /// Gray, RGB and YUV 8 to 16 bit integers and their 32 bit float formats are
+    /// implemented; the refusal names what was asked for, so a caller learns the
+    /// limit at creation.
     pub(crate) fn new(core: &CoreRef, plan: Plan, format: &VideoFormat) -> Result<Self> {
-        if format.color_family != ColorFamily::Gray {
-            return Err(NImagesError::new(format!(
-                "Deblur gpu=1: the device path takes Gray input, got {}",
-                describe(format)
-            )));
-        }
+        let family = match format.color_family {
+            ColorFamily::Gray | ColorFamily::RGB | ColorFamily::YUV => format.color_family,
+            _ => {
+                return Err(NImagesError::new(format!(
+                    "Deblur gpu=1: the device path takes Gray, RGB or YUV input, got {}",
+                    describe(format)
+                )));
+            }
+        };
         let supported = match format.sample_type {
             SampleType::Integer => (8..=16).contains(&format.bits_per_sample),
             SampleType::Float => format.bits_per_sample == 32,
@@ -524,7 +757,7 @@ impl Engine {
 
         let prepare = Device::new(
             core,
-            &shader(&[PREAMBLE, PREPARE_BODY])?,
+            &shader(&[PREAMBLE, SAMPLE_READERS, PREPARE_BODY])?,
             PREPARE_BINDINGS,
             size_of::<PreparePush>() as u32,
         )?;
@@ -542,16 +775,40 @@ impl Engine {
         )?;
         let blend = Device::new(
             core,
-            &shader(&[PREAMBLE, BLEND_BODY])?,
+            &shader(&[PREAMBLE, HOST_HELPERS, BLEND_BODY])?,
             BLEND_BINDINGS,
             size_of::<BlendPush>() as u32,
         )?;
-        let store = Device::new(
-            core,
-            &shader(&[PREAMBLE, STORE_BODY])?,
-            STORE_BINDINGS,
-            size_of::<StorePush>() as u32,
-        )?;
+        // The store is the one pass that differs by family: one plane, three
+        // planes from one delta, or a luma plane and two copied chroma planes.
+        let output = match family {
+            ColorFamily::RGB => Output::Rgb(Device::new(
+                core,
+                &shader(&[PREAMBLE, HOST_HELPERS, SAMPLE_READERS, STORE_RGB_BODY])?,
+                STORE_RGB_BINDINGS,
+                size_of::<StoreRgbPush>() as u32,
+            )?),
+            ColorFamily::YUV => Output::Yuv(
+                Device::new(
+                    core,
+                    &shader(&[PREAMBLE, HOST_HELPERS, STORE_BODY])?,
+                    STORE_BINDINGS,
+                    size_of::<StorePush>() as u32,
+                )?,
+                Box::new(Device::new(
+                    core,
+                    &shader(&[PREAMBLE, COPY_BODY])?,
+                    COPY_BINDINGS,
+                    size_of::<CopyPush>() as u32,
+                )?),
+            ),
+            _ => Output::Gray(Device::new(
+                core,
+                &shader(&[PREAMBLE, HOST_HELPERS, STORE_BODY])?,
+                STORE_BINDINGS,
+                size_of::<StorePush>() as u32,
+            )?),
+        };
 
         let barrier = barrier_fn(core)?;
         let gaussian = upload_floats(core, plan.gaussian.taps())?;
@@ -563,12 +820,13 @@ impl Engine {
             blur,
             sobel,
             blend,
-            store,
+            output,
             barrier,
             gaussian,
             prefilter,
             mask,
             plan,
+            family,
         })
     }
 
@@ -590,12 +848,7 @@ impl Engine {
             .ok_or_else(|| {
                 NImagesError::new("Deblur gpu=1: the core could not allocate a device frame")
             })?;
-        let output_stride = output.stride(0);
-        if output_stride < 0 || output_stride % 4 != 0 {
-            return Err(NImagesError::new(
-                "Deblur gpu=1: the output row stride is not a multiple of four bytes",
-            ));
-        }
+        let output_stride = output_plane_stride(&output, 0)?;
 
         let mut luma = gray32_frame(core, width, height, None)?;
         let mut temp = gray32_frame(core, width, height, None)?;
@@ -609,27 +862,60 @@ impl Engine {
         let mut restored = gray32_frame(core, width, height, None)?;
         let quantisation = self.plan.quantisation;
         let barrier = self.barrier;
+        let family = self.family;
+        // RGB synthesises the luma from three weighted planes; every other
+        // family reads plane 0 on its own and leaves the weights at one.
+        let (channels, weights) = if family == ColorFamily::RGB {
+            (3, LUMA_WEIGHTS)
+        } else {
+            (1, [1.0; 3])
+        };
 
         let launch = shared::Launch::per_pixel(w, h);
         let blend_launch = shared::Launch::new(w.div_ceil(BLEND_LANES).saturating_mul(h));
+        let dst_strides = match family {
+            ColorFamily::RGB => [
+                output_stride,
+                output_plane_stride(&output, 1)?,
+                output_plane_stride(&output, 2)?,
+            ],
+            _ => [output_stride; 3],
+        };
+        let src_stride = plane_stride(input, 0)?;
+        let src_strides = match family {
+            ColorFamily::RGB => [src_stride, plane_stride(input, 1)?, plane_stride(input, 2)?],
+            _ => [src_stride; 3],
+        };
         let geometry = Geometry {
             width: w,
             height: h,
             units: launch.units,
             stride: launch.stride(),
-            groups: [launch.groups, 1, 1],
+            groups: launch.grid(),
             columns: w.div_ceil(BLEND_LANES),
             blend_units: blend_launch.units,
             blend_stride: blend_launch.stride(),
-            blend_groups: [blend_launch.groups, 1, 1],
+            blend_groups: blend_launch.grid(),
             luma_stride: words(&luma)?,
             temp_stride: words(&temp)?,
             mask_raw_stride: words(&mask_raw)?,
             mask_stride: words(&mask)?,
             restored_stride: words(&restored)?,
-            output_stride: u32::try_from(output_stride).unwrap_or(u32::MAX),
+            output_stride,
+            dst_strides,
             src_bytes: quantisation.bytes as u32,
             is_float: u32::from(quantisation.float),
+            channels,
+            weights,
+            src_strides,
+            chroma: if family == ColorFamily::YUV {
+                [
+                    copy_of(input, &output, 1, quantisation.bytes)?,
+                    copy_of(input, &output, 2, quantisation.bytes)?,
+                ]
+            } else {
+                [None, None]
+            },
         };
 
         let submit = match self.plan.method {
@@ -641,14 +927,20 @@ impl Engine {
                     stride: geometry.stride,
                     width: w,
                     height: h,
-                    src_stride_bytes: u32::try_from(input.stride(0)).unwrap_or(u32::MAX),
+                    src0_stride: geometry.src_strides[0],
+                    src1_stride: geometry.src_strides[1],
+                    src2_stride: geometry.src_strides[2],
                     luma_stride: geometry.luma_stride,
                     estimate_stride: geometry.temp_stride,
+                    src_bytes: geometry.src_bytes,
+                    channels: geometry.channels,
+                    mode: 0,
+                    is_float: geometry.is_float,
                     scale: quantisation.scale,
                     pedestal: self.plan.blend.pedestal,
-                    mode: 0,
-                    src_bytes: geometry.src_bytes,
-                    is_float: geometry.is_float,
+                    weight0: geometry.weights[0],
+                    weight1: geometry.weights[1],
+                    weight2: geometry.weights[2],
                 };
                 self.blur.record(|exec| {
                     self.record_prepare(
@@ -688,7 +980,7 @@ impl Engine {
                         0,
                     )?;
                     compute_barrier(exec, barrier);
-                    self.record_store(exec, &geometry, &restored, &mut output)
+                    self.record_output(exec, &geometry, input, &luma, &restored, &mut output)
                 })
             }
             Method::Deconvolution => {
@@ -702,14 +994,20 @@ impl Engine {
                     stride: geometry.stride,
                     width: w,
                     height: h,
-                    src_stride_bytes: u32::try_from(input.stride(0)).unwrap_or(u32::MAX),
+                    src0_stride: geometry.src_strides[0],
+                    src1_stride: geometry.src_strides[1],
+                    src2_stride: geometry.src_strides[2],
                     luma_stride: geometry.luma_stride,
                     estimate_stride: a_stride,
+                    src_bytes: geometry.src_bytes,
+                    channels: geometry.channels,
+                    mode: 1,
+                    is_float: geometry.is_float,
                     scale: quantisation.scale,
                     pedestal: self.plan.blend.pedestal,
-                    mode: 1,
-                    src_bytes: geometry.src_bytes,
-                    is_float: geometry.is_float,
+                    weight0: geometry.weights[0],
+                    weight1: geometry.weights[1],
+                    weight2: geometry.weights[2],
                 };
                 self.blur.record(|exec| {
                     self.record_prepare(
@@ -784,7 +1082,7 @@ impl Engine {
                         1,
                     )?;
                     compute_barrier(exec, barrier);
-                    self.record_store(exec, &geometry, &restored, &mut output)
+                    self.record_output(exec, &geometry, input, &luma, &restored, &mut output)
                 })
             }
         };
@@ -809,7 +1107,12 @@ impl Engine {
         push: &PreparePush,
         groups: [u32; 3],
     ) -> std::result::Result<(), VulkanError> {
-        let src = exec.read_plane(input, 0)?;
+        let src0 = exec.read_plane(input, 0)?;
+        // A one-plane family binds its only plane in every source slot; the
+        // kernel reads the extra two only when `channels` is three.
+        let (second, third) = if push.channels == 3 { (1, 2) } else { (0, 0) };
+        let src1 = exec.read_plane(input, second)?;
+        let src2 = exec.read_plane(input, third)?;
         let dst = exec.write_plane(luma, 0)?;
         // The third binding must exist even when nothing writes it, and it must
         // not be the frame this dispatch writes.
@@ -819,7 +1122,7 @@ impl Engine {
         };
         exec.dispatch(
             self.prepare.pipeline(),
-            &[src, dst, seed],
+            &[src0, src1, src2, dst, seed],
             bytes_of(push),
             groups,
         )
@@ -1013,6 +1316,7 @@ impl Engine {
     fn record_store(
         &self,
         exec: &mut ExecContext<'_>,
+        device: &Device,
         geometry: &Geometry,
         restored: &VideoFrame,
         output: &mut VideoFrame,
@@ -1034,11 +1338,127 @@ impl Engine {
         let src = exec.read_plane(restored, 0)?;
         let dst = exec.write_plane(output, 0)?;
         exec.dispatch(
-            self.store.pipeline(),
+            device.pipeline(),
             &[src, dst],
             bytes_of(&push),
             geometry.blend_groups,
         )
+    }
+
+    /// Writes the restored RGB code values as one offset applied to all three
+    /// channels, limited to the gamut the pixel has left.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the RGB store binds the input, the luma, the restored plane and the frame"
+    )]
+    fn record_store_rgb(
+        &self,
+        exec: &mut ExecContext<'_>,
+        device: &Device,
+        geometry: &Geometry,
+        input: &VideoFrame,
+        luma: &VideoFrame,
+        restored: &VideoFrame,
+        output: &mut VideoFrame,
+    ) -> std::result::Result<(), VulkanError> {
+        let quantisation = self.plan.quantisation;
+        let push = StoreRgbPush {
+            units: geometry.blend_units,
+            stride: geometry.blend_stride,
+            column_groups: geometry.columns,
+            width: geometry.width,
+            height: geometry.height,
+            src0_stride: geometry.src_strides[0],
+            src1_stride: geometry.src_strides[1],
+            src2_stride: geometry.src_strides[2],
+            luma_stride: geometry.luma_stride,
+            restored_stride: geometry.restored_stride,
+            dst0_stride: geometry.dst_strides[0],
+            dst1_stride: geometry.dst_strides[1],
+            dst2_stride: geometry.dst_strides[2],
+            scale: quantisation.scale,
+            inverse: quantisation.inverse as f32,
+            max_value: quantisation.max_value as f32,
+            src_bytes: quantisation.bytes as u32,
+            is_float: u32::from(quantisation.float),
+        };
+        let src0 = exec.read_plane(input, 0)?;
+        let src1 = exec.read_plane(input, 1)?;
+        let src2 = exec.read_plane(input, 2)?;
+        let luma_plane = exec.read_plane(luma, 0)?;
+        let restored_plane = exec.read_plane(restored, 0)?;
+        let dst0 = exec.write_plane(output, 0)?;
+        let dst1 = exec.write_plane(output, 1)?;
+        let dst2 = exec.write_plane(output, 2)?;
+        exec.dispatch(
+            device.pipeline(),
+            &[
+                src0,
+                src1,
+                src2,
+                luma_plane,
+                restored_plane,
+                dst0,
+                dst1,
+                dst2,
+            ],
+            bytes_of(&push),
+            geometry.blend_groups,
+        )
+    }
+
+    /// Copies one chroma plane through to the output.
+    fn record_copy(
+        &self,
+        exec: &mut ExecContext<'_>,
+        device: &Device,
+        plan: &PlaneCopy,
+        input: &VideoFrame,
+        output: &mut VideoFrame,
+        plane: i32,
+    ) -> std::result::Result<(), VulkanError> {
+        let push = CopyPush {
+            units: plan.launch.units,
+            stride: plan.launch.stride(),
+            columns: plan.columns,
+            src_stride: plan.src_stride,
+            dst_stride: plan.dst_stride,
+        };
+        let src = exec.read_plane(input, plane)?;
+        let dst = exec.write_plane(output, plane)?;
+        exec.dispatch(
+            device.pipeline(),
+            &[src, dst],
+            bytes_of(&push),
+            plan.launch.grid(),
+        )
+    }
+
+    /// Writes the frame's planes from the restored code values.
+    fn record_output(
+        &self,
+        exec: &mut ExecContext<'_>,
+        geometry: &Geometry,
+        input: &VideoFrame,
+        luma: &VideoFrame,
+        restored: &VideoFrame,
+        output: &mut VideoFrame,
+    ) -> std::result::Result<(), VulkanError> {
+        match &self.output {
+            Output::Gray(store) => self.record_store(exec, store, geometry, restored, output),
+            Output::Rgb(store) => {
+                self.record_store_rgb(exec, store, geometry, input, luma, restored, output)
+            }
+            Output::Yuv(store, copy) => {
+                self.record_store(exec, store, geometry, restored, output)?;
+                for (index, plan) in geometry.chroma.iter().enumerate() {
+                    let Some(plan) = plan else { continue };
+                    let plane = i32::try_from(index).unwrap_or(0) + 1;
+                    self.record_copy(exec, copy, plan, input, output, plane)?;
+                }
+                Ok(())
+            }
+        }
     }
 }
 
@@ -1062,9 +1482,18 @@ struct Geometry {
     mask_stride: u32,
     restored_stride: u32,
     output_stride: u32,
+    /// The output plane strides, which only the RGB store needs three of.
+    dst_strides: [u32; 3],
+    /// The input plane strides the luma reads.
+    src_strides: [u32; 3],
     /// The output format: bytes per sample, and whether it is a float.
     src_bytes: u32,
     is_float: u32,
+    /// How many planes the luma reads, and the weight of each.
+    channels: u32,
+    weights: [f32; 3],
+    /// The chroma planes a YUV frame carries through, plane 1 first.
+    chroma: [Option<PlaneCopy>; 2],
 }
 
 /// A row stride in `f32` words, for a `GRAY32` plane.
@@ -1076,6 +1505,70 @@ fn words(frame: &VideoFrame) -> Result<u32> {
         ));
     }
     Ok(u32::try_from(stride / 4).unwrap_or(u32::MAX))
+}
+
+/// The byte stride of one output plane, whose words the store writes into.
+fn output_plane_stride(frame: &VideoFrame, plane: i32) -> Result<u32> {
+    let stride = frame.stride(plane);
+    if stride < 0 || stride % 4 != 0 {
+        return Err(NImagesError::new(format!(
+            "Deblur gpu=1: output plane {plane} rows are not a multiple of four bytes"
+        )));
+    }
+    Ok(u32::try_from(stride).unwrap_or(u32::MAX))
+}
+
+/// The byte stride of one plane, which the shaders address rows by.
+fn plane_stride(frame: &VideoFrame, plane: i32) -> Result<u32> {
+    let stride = frame.stride(plane);
+    if stride < 0 {
+        return Err(NImagesError::new(format!(
+            "Deblur gpu=1: plane {plane} reports a negative row stride"
+        )));
+    }
+    Ok(u32::try_from(stride).unwrap_or(u32::MAX))
+}
+
+/// Plans a chroma plane's copy, or `None` when the plane has no pixels.
+///
+/// The copy moves whole words, so a row has to start and end on one. A stride
+/// that is not a multiple of four is refused by name rather than read across
+/// whatever sits beside it.
+fn copy_of(
+    input: &VideoFrame,
+    output: &VideoFrame,
+    plane: i32,
+    bytes: usize,
+) -> Result<Option<PlaneCopy>> {
+    let width = u32::try_from(input.frame_width(plane)).unwrap_or(u32::MAX);
+    let height = u32::try_from(input.frame_height(plane)).unwrap_or(u32::MAX);
+    if width == 0 || height == 0 {
+        return Ok(None);
+    }
+    let row_bytes = u32::try_from(bytes)
+        .ok()
+        .and_then(|bytes| width.checked_mul(bytes))
+        .ok_or_else(|| NImagesError::new("Deblur gpu=1: a chroma row is too wide"))?;
+    let src_stride = plane_stride(input, plane)?;
+    let dst_stride = plane_stride(output, plane)?;
+    if src_stride % 4 != 0 || dst_stride % 4 != 0 {
+        return Err(NImagesError::new(format!(
+            "Deblur gpu=1: plane {plane} rows are not a whole number of words, so the \
+             chroma copy cannot move them"
+        )));
+    }
+    if src_stride < row_bytes || dst_stride < row_bytes {
+        return Err(NImagesError::new(format!(
+            "Deblur gpu=1: plane {plane} reports a stride shorter than its row"
+        )));
+    }
+    let columns = row_bytes.div_ceil(4);
+    Ok(Some(PlaneCopy {
+        columns,
+        src_stride,
+        dst_stride,
+        launch: shared::Launch::new(columns.saturating_mul(height)),
+    }))
 }
 
 /// Names a format from its fields, because the core's own name carries padding.

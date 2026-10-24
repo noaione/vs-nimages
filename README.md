@@ -2,7 +2,7 @@
 
 [![uv powered](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
 [![License](https://img.shields.io/github/license/noaione/vs-nimages)](https://github.com/noaione/vs-nimages/blob/master/LICENSE)
-![VapourSynth Version](https://img.shields.io/badge/vapoursynth-%3E%3DR79-blue) [![build](https://github.com/noaione/vs-nimages/actions/workflows/build.yml/badge.svg)](https://github.com/noaione/vs-nimages/actions/workflows/build.yml)
+![VapourSynth Version](https://img.shields.io/badge/vapoursynth-%3E%3DR80-blue) [![build](https://github.com/noaione/vs-nimages/actions/workflows/build.yml/badge.svg)](https://github.com/noaione/vs-nimages/actions/workflows/build.yml)
 
 a rust vapoursynth plugin that analyzes and manipulates images.
 
@@ -25,7 +25,7 @@ a rust vapoursynth plugin that analyzes and manipulates images.
 
 ## requirements
 
-- VapourSynth R79 or newer
+- VapourSynth R80 or newer
 - Python 3.12 or newer when installing the wheel
 - Rust 1.88 or newer when building from source
 - `PeakStats` and `PeakGrayShades` need a Gray integer clip from 8 to 16 bits;
@@ -289,12 +289,23 @@ fine texture come back untouched.
 | `iterations` | `6` | refinement passes, `0` through `64`, `method=0` only |
 | `threshold` | `2` | edge threshold in 8-bit levels, from `0` |
 | `overshoot` | `0` | extra excursion allowed past the local extremes, in 8-bit steps |
+| `gpu` | `0` | `1` runs the same arithmetic on the Vulkan device, which needs VapourSynth R80 and a Vulkan 1.4 device |
 | `debug` | `false` | log the resolved parameters and each frame's stage timings |
 
 the defaults follow the method in effect, so `Deblur(clip, method=1)` is the
 unsharp mask at `0.85`, and an explicit `strength` overrides either default.
 `method=1` has no refinement loop, so it ignores `iterations` entirely,
 including a value outside the range the deconvolution accepts.
+
+`gpu=1` is the same filter on the Vulkan device, both methods and every format
+the host path takes. the output is a device frame, and a clip that is not
+already there is uploaded with `std.GPUUpload`, so a `gpu=1` node inside a
+device graph pays no transfer. 8 bit is byte-identical to `gpu=0`, the deeper
+integers are within one code value and the float formats within two ULP;
+`tools/deblur_hash.py --device` is the gate, and
+[17](docs/improvements/17-vulkan-deblur.md#outcome-so-far) has the per-format
+parity and the measured speedup, 7.7x to 10.4x on this laptop. a clip whose
+format is not constant is refused, because the plan is built once at creation.
 
 only luma moves. on RGB the delta is added to the three planes as one equal
 offset per pixel, limited to the gamut the pixel has left, which keeps the

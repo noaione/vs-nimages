@@ -1,8 +1,8 @@
 # Deblur on the device
 
-status: in progress. both methods on Gray 8 to 16 bit and 32 bit float are in the
-tree. 8 bit is byte-identical, the deeper integers are within one LSB and the
-float path within two ULP; RGB and YUV are open. see
+status: in progress. both methods on Gray, RGB and YUV, 8 to 16 bit integer and
+32 bit float, are in the tree. 8 bit is byte-identical, the deeper integers are
+within one LSB and the float path within two ULP; the fan-in is open. see
 [the outcome so far](#outcome-so-far) for the numbers and the bugs it cost.
 
 ## current cost
@@ -83,10 +83,12 @@ algorithm module owns the numbers. no kernel lands in `src/filters/`.
 
 one `pool.record` per frame, one command buffer, every dispatch in it:
 
-| method | dispatches | barriers in a serial recording |
-| --- | ---: | ---: |
-| `1` | 10 | 9 |
-| `0` | 32 | 31 |
+| method | family | dispatches | barriers in a serial recording |
+| --- | --- | ---: | ---: |
+| `1` | Gray, RGB | 10 | 9 |
+| `0` | Gray, RGB | 32 | 31 |
+| `1` | YUV | 12 | 9 |
+| `0` | YUV | 34 | 31 |
 
 every gaussian is two dispatches: horizontal into a ping-pong plane, a
 `vkCmdPipelineBarrier2` from compute-write to compute-read, then vertical into the
@@ -95,7 +97,13 @@ they reuse those two planes. the consumer walks [14](14-deblur-blur-consumers.md
 removed on the CPU become the vertical pass's output stage, which saves a
 dispatch and a full plane traversal per iteration. the last dispatch is the
 store: the blend writes code values into a `GRAY32` plane, and one pass turns
-them into the frame's own samples for whichever format it is.
+them into the frame's own samples. that pass is the only piece that differs by
+family. Gray writes `code * inverse` into one plane. RGB reads the three source
+planes back, takes one delta against the restored and luma planes, limits it to
+`[-low, 255 - high]` and writes `channel + delta`, which is the host's
+equal-offset rule and what keeps the channel differences. YUV stores plane 0 the
+way Gray does and copies planes 1 and 2 word for word, because the chroma is
+carried through untouched and a copy is the only form that keeps it byte-exact.
 
 the submission publishes the output plane's producer pair, so a later device
 filter in the same graph waits on the timeline rather than on a host fence.
@@ -189,32 +197,42 @@ smaller than the latency win and is the first thing M6 measures.
 
 ## outcome so far
 
-written 2026-10-24. M1 to M4 are landed, and M5 for Gray: both methods run on
-8 to 16 bit integer and 32 bit float Gray. RGB and YUV are still open.
+written 2026-10-24. M1 to M5 are landed: both methods run on Gray, RGB and
+YUV, 8 to 16 bit integer and 32 bit float. M6, the aggregate measurement, is
+open.
 
 | piece | where |
 | --- | --- |
 | the device layer | `src/gpu/mod.rs`: gate, pipeline, pool, plane binding, dispatch, barrier, upload |
 | launch and push blocks | `src/gpu/shared.rs`, no binding type, unit tested |
-| the five kernels | `src/gpu/deblur.rs`: prepare, separable blur, Sobel, blend, store |
+| the kernels | `src/gpu/deblur.rs`: prepare, separable blur, Sobel, blend, store, RGB store, chroma copy |
 | the filter | `src/filters/deblur.rs`: `gpu:int:opt`, `clip:vnode:all`, `gpu_output()` |
 | the planning | `src/deblur.rs`: `Plan`, `Gaussian`, `Mask`, `Blend`, `Quantisation` |
 | the parity gate | `tools/deblur_hash.py --device` |
 | the device probe | `tools/gpu_probe.py` |
 
-`gpu=1` refuses RGB and YUV input and a variable format, each with a message
-naming what it saw.
+`gpu=1` refuses a format outside those three families, a sample type outside
+8 to 16 bit integer and 32 bit float, and a variable format, each with a
+message naming what it saw.
 
 ### parity
 
-`tools/deblur_hash.py --device` runs 24 cases; 22 are implemented and all 22
+`tools/deblur_hash.py --device` runs 39 cases; 37 are implemented and all 37
 pass. 8 bit is byte-identical; 9 to 16 bit is within one LSB, and 32 bit float
 within two ULP of the code value, which is the `f32` quantisation the store pass
 was told to use:
 
-- 8 bit: 15 cases, 0 differing samples
-- 16 bit: 2 cases, at most 1 code value of 65535 (3 or 4 samples of 6144)
-- float: 4 cases, worst 2.4e-7 in the sample's own `[0, 1]` range
+- Gray 8 bit: 15 cases, 0 differing samples
+- Gray 16 bit: 3 cases, at most 1 code value of 65535
+- Gray float: 4 cases, worst 2.4e-7 in the sample's own `[0, 1]` range
+- RGB24: 4 cases, 0 differing samples, including the odd 129 px width and a 1 px
+  frame
+- RGB48: 1 case, at most 1 code value
+- RGB float: 2 cases, worst 3.0e-7
+- YUV420P8: 5 cases, 0 differing samples, including 130x66 with a 65 byte chroma
+  row in a 128 byte stride, and a 2x2 frame whose chroma planes hold one sample
+- YUV 10 and 16 bit: 2 cases, at most 1 code value
+- YUV float: 1 case, worst 1.2e-7
 - the 2 skips are the variable-format clip
 
 - defaults, an odd width (129x97), a 1 px frame, a frame whose row padding is `0xA5`
@@ -222,28 +240,44 @@ was told to use:
   `overshoot`, and `threshold=0`
 - `method=0` additionally covers six refinement iterations, the division by
   `max(blur, 1e-7)` and the estimate scaling
-the CPU table is unchanged (`deblur_hash.py --check` matches all 24), the
-validator reports 2150 checks, and `cargo test`, `cargo clippy -- -D warnings`
-and `cargo fmt --check` are clean.
-validator reports 2150 checks, and `cargo test`, `cargo clippy -- -D warnings`
-and `cargo fmt --check` are clean.
+- every format repeats `method=0` at least once, so the RGB store and the chroma
+  copy are on both paths
+
+planes after the first carry a different page, so an RGB gamut clamp that read
+the wrong channel, or a chroma plane rewritten from the luma, would show up as
+a difference rather than as a pass.
+
+the CPU table is unchanged for the 24 cases it had (`deblur_hash.py --check`
+matches all 39), the validator reports 2150 checks, and `cargo test`,
+`cargo clippy -- -D warnings` and `cargo fmt --check` are clean.
 
 ### measured
 
 one frame on a quiet machine, a fresh `Deblur` node per request, median of seven.
 `gpu=1` is measured through `std.GPUDownload`, which is what a caller pays:
 
-| page | method | CPU | device + download | bus round trip | speedup |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| 2902x4128, 12.0 MP | 1 | 176.5 ms | 16.9 ms | 6.6 ms | 10.5x |
-| 2902x4128, 12.0 MP | 0 | 495.9 ms | 43.3 ms | 6.6 ms | 11.5x |
-| 5806x4128, 24.0 MP | 1 | 317.5 ms | 28.2 ms | 14.3 ms | 11.3x |
-| 5806x4128, 24.0 MP | 0 | 936.7 ms | 79.8 ms | 14.3 ms | 11.7x |
+| page | family | method | CPU | device + download | bus round trip | speedup |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 2902x4128, 12.0 MP | Gray8 | 1 | 125.8 ms | 13.7 ms | 5.1 ms | 9.2x |
+| 2902x4128, 12.0 MP | Gray8 | 0 | 350.1 ms | 37.7 ms | 5.1 ms | 9.3x |
+| 2902x4128, 12.0 MP | RGB24 | 1 | 239.2 ms | 27.4 ms | 14.2 ms | 8.7x |
+| 2902x4128, 12.0 MP | RGB24 | 0 | 453.8 ms | 48.0 ms | 14.2 ms | 9.5x |
+| 2902x4128, 12.0 MP | YUV420P8 | 1 | 124.9 ms | 14.9 ms | 6.9 ms | 8.4x |
+| 2902x4128, 12.0 MP | YUV420P8 | 0 | 351.6 ms | 40.4 ms | 6.9 ms | 8.7x |
+| 5806x4128, 24.0 MP | Gray8 | 1 | 239.8 ms | 27.7 ms | 9.1 ms | 8.7x |
+| 5806x4128, 24.0 MP | Gray8 | 0 | 701.0 ms | 74.1 ms | 9.1 ms | 9.5x |
+| 5806x4128, 24.0 MP | RGB24 | 1 | 468.3 ms | 44.9 ms | 28.8 ms | 10.4x |
+| 5806x4128, 24.0 MP | RGB24 | 0 | 915.0 ms | 91.8 ms | 28.8 ms | 10.0x |
+| 5806x4128, 24.0 MP | YUV420P8 | 1 | 242.3 ms | 31.3 ms | 15.2 ms | 7.7x |
+| 5806x4128, 24.0 MP | YUV420P8 | 0 | 700.5 ms | 78.5 ms | 15.2 ms | 8.9x |
 
 the source is a `BlankClip`, so the frame costs nothing to make and both engines
-see the same input; these are filter numbers, not decode. the device work alone is
-the total minus the bus: about 10 ms for `method=1` and 37 ms for `method=0` at
-12 MP. the host was noisy between runs, so read the ratios.
+see the same input; these are filter numbers, not decode. the transfer is three
+planes for RGB24 (14.2 ms at 12 MP against Gray's 5.1) and 1.5 samples per pixel
+for YUV420P8, so RGB keeps its win over a host path that also reads three
+planes, while YUV wins least because its host path only touches one. every row
+was measured in one session: absolute milliseconds move by about a third
+between sessions on this laptop, so compare the ratio in a row.
 
 the aggregate number M6 asks for is still open: no fan-in has been run.
 
@@ -269,6 +303,28 @@ framework does not order two dispatches inside one recording. the blend read a
 mask that had not been made visible: 3509 of 6144 samples on the numpy page, and
 only 3 per case in the hash harness, because the two sources put different
 pressure on the queue. `record_mask` now ends with the barrier its output needs.
+
+the format surface cost nothing to find and two things to get right. the first
+is that the luma read needs one shader for three families: a multi-plane read
+cannot be written generically in GLSL, so the prepare pass binds five buffers
+and a one-plane family binds its only plane in all three source slots, which is
+legal because every extra descriptor is read-only and unread. two source strides
+and three weights are zero for that case and the branch is uniform, so the
+Gray path is the same instructions it was.
+
+the second is the chroma copy. it moves whole `u32` words, which means a row
+has to start and end on a word, and the last group of a row carries up to three
+bytes past the pixels: those are padding on both sides, so the round trip stays
+byte-exact. the 130x66 case exists for exactly that, 65 bytes of chroma in a 128
+byte stride. a stride that is not a multiple of four is refused by name rather
+than read across, which no VapourSynth allocation on this host does.
+
+the RGB store reads the three source planes again rather than keeping them from
+the prepare pass, because the delta needs `low` and `high` per pixel and the
+code value is per channel. every lane masks its own sample into the destination
+word, so two lanes of one invocation never race, and the three planes cost about
+5 ms at 12 MP on top of Gray's store. that is the one place a packed-word write
+would still pay, and it is not the bottleneck at 9x.
 
 ## risks
 

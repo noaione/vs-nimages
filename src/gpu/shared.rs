@@ -50,6 +50,11 @@ impl Launch {
         self.groups * WORKGROUP
     }
 
+    /// This launch's grid, for [`ExecContext::dispatch`].
+    pub(super) fn grid(self) -> [u32; 3] {
+        [self.groups, 1, 1]
+    }
+
     /// Work units for `width * height` pixels.
     pub(super) fn per_pixel(width: u32, height: u32) -> Self {
         Self::new(width.saturating_mul(height))

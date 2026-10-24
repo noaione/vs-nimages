@@ -8,11 +8,14 @@ prints one line per case, which makes two builds diffable with `diff`. It is the
 harness for the device port: once `Deblur` gains `gpu:int:opt`, `--device`
 compares `gpu=1` through `std.GPUDownload` against `gpu=0` on the same source.
 
-The table covers both methods, `GRAY8`/`GRAY16`/`GRAYS`, an odd width, a 1 px
-frame, a frame whose row padding is not zero, a variable-dimension clip, and one
-non-default value of every argument. Pixels come from a numpy page written into
-`std.ModifyFrame`, so no image file or writer is needed, and every case is
-deterministic.
+The table covers both methods, `GRAY8`/`GRAY16`/`GRAYS`, `RGB24`/`RGB48`/`RGBS`,
+`YUV420P8`/`YUV422P10`/`YUV444P16`/`YUV420PS`, an odd width, a 1 px frame, a
+frame whose row padding is not zero, a variable-dimension clip, and one
+non-default value of every argument. Pixels come from a numpy page written
+into `std.ModifyFrame`, so no image file or writer is needed, and every case is
+deterministic. Planes after the first carry a different page, so an RGB gamut
+clamp that reads the wrong channel and a YUV chroma plane that is rewritten
+both show up.
 
 Run it with the development interpreter after the plugin is installed::
 
@@ -100,6 +103,18 @@ def page(width: int, height: int, frame: int) -> np.ndarray:
     return codes
 
 
+def plane_page(width: int, height: int, plane: int, frame: int) -> np.ndarray:
+    """The page one plane is filled with.
+
+    A plane after the first carries a different page, so a kernel that writes
+    one plane from another shows up: the RGB gamut clamp then has channels that
+    disagree, and YUV has chroma that has to come back byte for byte.
+    """
+    codes = page(width, height, frame)
+    if plane == 0:
+        return codes
+    return np.mod(codes * (1.0 + 0.17 * plane) + 53.0 * plane, 256.0)
+
 def samples(codes: np.ndarray, format_: vs.VideoFormat) -> np.ndarray:
     """The page as one plane's samples."""
     if format_.sample_type == vs.SampleType.FLOAT:
@@ -118,7 +133,9 @@ def source(width: int, height: int, format_: vs.VideoFormat, length: int = FRAME
     def fill(n: int, f: vs.VideoFrame) -> vs.VideoFrame:
         out = f.copy()
         for plane in range(out.format.num_planes):
-            np.asarray(out[plane])[...] = samples(page(out.width, out.height, n), out.format)
+            view = np.asarray(out[plane])
+            height, width = view.shape
+            view[...] = samples(plane_page(width, height, plane, n), out.format)
         return out
 
     return CORE.std.ModifyFrame(blank, blank, fill)
@@ -241,6 +258,36 @@ def cases() -> list[Case]:
             {"method": 1, "radius": 2.5, "strength": 0.7, "threshold": 5.0, "overshoot": 2.0},
             lambda: source(96, 64, vs.GRAYS),
         ),
+        # RGB: the luma is a weighted sum of three planes and the delta is one
+        # offset for all of them, so the planes have to differ for the gamut
+        # clamp to do anything.
+        Case("method1/rgb24/defaults", {"method": 1}, lambda: source(96, 64, vs.RGB24)),
+        Case("method0/rgb24/defaults", {"method": 0}, lambda: source(96, 64, vs.RGB24)),
+        Case("method1/rgb24/odd-129x97", {"method": 1}, lambda: source(129, 97, vs.RGB24)),
+        Case("method1/rgb48/defaults", {"method": 1}, lambda: source(96, 64, vs.RGB48)),
+        Case("method1/rgbs/defaults", {"method": 1}, lambda: source(96, 64, vs.RGBS)),
+        Case("method0/rgbs/defaults", {"method": 0}, lambda: source(96, 64, vs.RGBS)),
+        # YUV: only the luma plane moves, and the chroma planes are carried
+        # through by the copy pass.
+        Case("method1/yuv420p8/defaults", {"method": 1}, lambda: source(96, 64, vs.YUV420P8)),
+        Case("method0/yuv420p8/defaults", {"method": 0}, lambda: source(96, 64, vs.YUV420P8)),
+        Case(
+            "method1/yuv420p8/odd-130x66",
+            {"method": 1},
+            lambda: source(130, 66, vs.YUV420P8),
+        ),
+        Case(
+            "method0/yuv420p8/odd-130x66",
+            {"method": 0},
+            lambda: source(130, 66, vs.YUV420P8),
+        ),
+        Case("method1/yuv422p10/defaults", {"method": 1}, lambda: source(96, 64, vs.YUV422P10)),
+        Case("method1/yuv444p16/defaults", {"method": 1}, lambda: source(96, 64, vs.YUV444P16)),
+        Case("method1/yuv420ps/defaults", {"method": 1}, lambda: source(96, 64, vs.YUV420PS)),
+        # The smallest geometry each new pass sees: one RGB pixel, and a 2x2
+        # 4:2:0 frame whose chroma plane is a single sample.
+        Case("method1/rgb24/one-pixel", {"method": 1}, lambda: source(1, 1, vs.RGB24)),
+        Case("method1/yuv420p8/2x2", {"method": 1}, lambda: source(2, 2, vs.YUV420P8)),
     ]
 
 

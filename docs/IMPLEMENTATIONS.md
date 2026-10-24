@@ -318,6 +318,7 @@ clipping each channel on its own.
 | `iterations` | `6` | refinement passes, `0` through `64`, `method=0` only |
 | `threshold` | `2` | edge threshold in 8-bit levels, from `0` |
 | `overshoot` | `0` | extra excursion past the local 3x3 extremes, in 8-bit steps |
+| `gpu` | `0` | `1` runs the same arithmetic on the Vulkan device, R80 and Vulkan 1.4 required |
 | `debug` | `false` | log the resolved parameters and each frame's stage timings |
 
 The stages are the ones `nmanga/deblur.py` defines: an edge mask from the
@@ -326,6 +327,15 @@ unsharp mask, a clamp against the 3x3 local extremes of that luma plus
 `overshoot`, and a blend through the mask. `threshold` and `overshoot` stay in
 8-bit units at every sample depth, and a float clip is read as the reference's
 `[0, 1]` range.
+
+`gpu=1` runs the same kernels on the Vulkan device, on every format the host
+path accepts. The output is a device frame, and a clip that is not already
+resident is uploaded with `std.GPUUpload`, which is what a `gpu:int:opt`
+argument would otherwise get inserted for. The parity the port holds is 8 bit
+byte-identical, the deeper integers within one code value and the float
+formats within two ULP, gated by `tools/deblur_hash.py --device`; a clip whose
+format is not constant is refused, because the plan is resolved once at
+creation.
 
 The defaults follow the method in effect, and `method=1` has no refinement loop,
 so it ignores `iterations` entirely, including a value outside the range
