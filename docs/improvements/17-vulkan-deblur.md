@@ -1,9 +1,11 @@
 # Deblur on the device
 
-status: in progress. both methods on Gray, RGB and YUV, 8 to 16 bit integer and
-32 bit float, are in the tree. 8 bit is byte-identical, the deeper integers are
-within one LSB and the float path within two ULP; the fan-in is open. see
-[the outcome so far](#outcome-so-far) for the numbers and the bugs it cost.
+status: landed for now, M1 to M7. both methods on Gray, RGB and YUV, 8 to 16 bit
+integer and 32 bit float, on four and five scratch planes. 8 bit is
+byte-identical, the deeper integers are within one LSB and the float path within
+two ULP, and the aggregate is measured at 5.6x to 7.8x. tiling is the one open
+item and it is a plan of its own. see [the outcome so far](#outcome-so-far) for
+the numbers and the bugs it cost.
 
 ## current cost
 
@@ -95,15 +97,19 @@ every gaussian is two dispatches: horizontal into a ping-pong plane, a
 next plane. two gaussians in a row need a barrier between them as well, because
 they reuse those two planes. the consumer walks [14](14-deblur-blur-consumers.md)
 removed on the CPU become the vertical pass's output stage, which saves a
-dispatch and a full plane traversal per iteration. the last dispatch is the
-store: the blend writes code values into a `GRAY32` plane, and one pass turns
-them into the frame's own samples. that pass is the only piece that differs by
-family. Gray writes `code * inverse` into one plane. RGB reads the three source
-planes back, takes one delta against the restored and luma planes, limits it to
-`[-low, 255 - high]` and writes `channel + delta`, which is the host's
-equal-offset rule and what keeps the channel differences. YUV stores plane 0 the
-way Gray does and copies planes 1 and 2 word for word, because the chroma is
-carried through untouched and a copy is the only form that keeps it byte-exact.
+dispatch and a full plane traversal per iteration. the mask is five dispatches
+over two planes: the prefilter pair, the Sobel into the horizontal scratch, and
+the mask's own blur, whose vertical pass writes the result back into the plane
+the Sobel left it in. the blend restores the candidate in place, so no plane
+carries the restored values alone, and the last dispatch is the store: one pass
+turns those code values into the frame's own samples. that pass is the only
+piece that differs by family. Gray writes `code * inverse` into one plane. RGB
+reads the three source planes back, takes one delta against the restored and
+luma planes, limits it to `[-low, 255 - high]` and writes `channel + delta`,
+which is the host's equal-offset rule and what keeps the channel differences.
+YUV stores plane 0 the way Gray does and copies planes 1 and 2 word for word,
+because the chroma is carried through untouched and a copy is the only form
+that keeps it byte-exact.
 
 the submission publishes the output plane's producer pair, so a later device
 filter in the same graph waits on the timeline rather than on a host fence.
@@ -145,20 +151,24 @@ widening it.
 
 ## memory
 
-six `GRAY32` planes for `method=1` and seven for `method=0`, the source and the
+four `GRAY32` planes for `method=1` and five for `method=0`, the source and the
 output:
 
 | page | one `f32` plane | the working planes | total |
 | --- | ---: | ---: | ---: |
-| 2902x4128, 12.0 MP | 48 MB | 288 to 336 MB | about 312 to 360 MB with source and output |
-| 5806x4128, 24.0 MP | 96 MB | 576 to 672 MB | about 624 to 720 MB |
+| 2902x4128, 12.0 MP | 48 MB | 192 to 240 MB | about 216 to 264 MB with source and output |
+| 5806x4128, 24.0 MP | 96 MB | 384 to 480 MB | about 432 to 528 MB |
 
-the planes are `luma`, the horizontal scratch, the mask pair, the restored plane,
-and the candidate (`method=1`) or two estimates plus the ratio (`method=0`). the
-row ring has no device equivalent: a dispatch binds a whole plane, so the
-scratch granularity is a plane. the 2.35 GB limit on this host therefore holds
-about three 24 MP `method=0` frames in flight, and the core's reservation
-throttles concurrency rather than failing an allocation.
+the planes are `luma`, the horizontal scratch, the mask's raw plane, and the
+candidate, which the blend restores in place (`method=1`), or two estimates in
+place of the candidate (`method=0`). the row ring has no device equivalent: a
+dispatch binds a whole plane, so the scratch granularity is a plane.
+
+measured, not modelled, a single 24 MP frame peaks at 768 MB of device memory
+and thirteen 12 MP frames in flight at 1538 MB, against the 2.35 GB budget on
+this host. the 24 MP page therefore holds four or five frames in flight, which
+is what [the aggregate](#aggregate) table shows: the device runs at 31 to 69
+frames/s up to five and falls over beyond that.
 
 ## milestones
 
@@ -169,7 +179,8 @@ throttles concurrency rather than failing an allocation.
 | M3 | `method=1` end to end, mask and blend included | hash matches for `u8`, `u16` and `f32` |
 | M4 | `method=0`, twelve blurs with the folded consumers | hash matches, 31 dispatches, one recording |
 | M5 | format surface: RGB and YUV, 8 to 16 bit, `f32` | the validator's colour-family checks pass on both engines |
-| M6 | measurement | latency and aggregate per [16](16-vulkan-validation.md) |
+| M6 | measurement | latency and aggregate per [16](16-vulkan-validation.md), the 24 MP ceiling found and the VRAM knob identified |
+| M7 | plane count: the Sobel writes into the horizontal scratch and the blend restores the candidate in place | the hash table is byte-identical, four and five planes, and the 24 MP ceiling moves from five frames in flight to seven |
 
 M1 is worth its own milestone: `AGENTS.md` requires the algorithms to be testable
 without a core, and a device kernel's host side is exactly the part that can be.
@@ -189,17 +200,19 @@ that is about 11 to 12x on `method=0` and about 7x on `method=1` in latency. the
 estimate is a prediction, not a measurement, and the 120 GB/s assumption is the
 part most likely to be wrong on a laptop part under load.
 
-aggregate is the number that decides adoption. the CPU reaches 2.7x its sequential
-rate under 12 worker threads, so its aggregate cost for `method=0` is about
-133 ms per frame, not 360. the device submits one frame per recording and can
-overlap independent frames only as far as VRAM allows, so the aggregate win is
-smaller than the latency win and is the first thing M6 measures.
+aggregate is the number that decides adoption, and the prediction held at 12 MP:
+the CPU reaches 2.7x its sequential rate under 12 worker threads and the device
+2.5x, so the aggregate gap (5.6x to 7.8x) tracks the latency gap (8.4x to
+10.4x) instead of collapsing, which is a win at the page size this repository
+targets. at 24 MP the prediction was too kind: one frame's scratch was 900 MB
+before [M7](#milestones), so the win there is 7x to 8x up to five frames in
+flight and none beyond it. see [the aggregate](#aggregate).
 
 ## outcome so far
 
-written 2026-10-24. M1 to M5 are landed: both methods run on Gray, RGB and
-YUV, 8 to 16 bit integer and 32 bit float. M6, the aggregate measurement, is
-open.
+written 2026-10-24. M1 to M7 are landed: both methods run on Gray, RGB and YUV,
+8 to 16 bit integer and 32 bit float, on four and five scratch planes. the
+aggregate is measured and the 24 MP ceiling is known; tiling is the open item.
 
 | piece | where |
 | --- | --- |
@@ -242,6 +255,9 @@ was told to use:
   `max(blur, 1e-7)` and the estimate scaling
 - every format repeats `method=0` at least once, so the RGB store and the chroma
   copy are on both paths
+- the same 8 bit case runs once more with the source already on the device,
+  through `std.GPUUpload`, so the residency branch that skips the upload is
+  covered and comes back byte-identical
 
 planes after the first carry a different page, so an RGB gamut clamp that read
 the wrong channel, or a chroma plane rewritten from the luma, would show up as
@@ -279,7 +295,75 @@ planes, while YUV wins least because its host path only touches one. every row
 was measured in one session: absolute milliseconds move by about a third
 between sessions on this laptop, so compare the ratio in a row.
 
-the aggregate number M6 asks for is still open: no fan-in has been run.
+### aggregate
+
+the protocol is [16](16-vulkan-validation.md#the-measurements)'s, and
+`tools/deblur_fanin.py` is the command: 13 frames through `std.AverageFrames`,
+one pull, a fresh node per repeat so the frame cache cannot answer for the
+filter, a 512 MB cache, median of three, and peak VRAM from NVML above the idle
+baseline. one pull is 13 frames of the same node outstanding at once, which is
+the shape a temporal consumer gives a filter.
+
+at 12 MP the device wins:
+
+| format | method | CPU, frames/s | device, frames/s | ratio | peak VRAM |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Gray8 | 1 | 21.0 | 150.0 | 7.1x | 1538 MB |
+| Gray8 | 0 | 6.6 | 51.3 | 7.8x | 1922 MB |
+| RGB24 | 1 | 14.9 | 83.3 | 5.6x | 1794 MB |
+| RGB24 | 0 | 5.9 | 39.5 | 6.7x | 2050 MB |
+| YUV420P8 | 1 | 20.6 | 126.1 | 6.1x | 1538 MB |
+
+the ratio lands close to the latency ratio because both engines gain from a
+fan-in: 2.7x for the CPU on `Gray8 method=1` at 12 MP, 2.5x for the device.
+where each one saturates, also `Gray8 method=1` at 12 MP:
+
+| frames in flight | 1 | 3 | 5 | 7 | 9 | 11 | 13 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| device, frames/s | 58.9 | 104.6 | 114.3 | 139.5 | 139.7 | 138.8 | 150.0 |
+| CPU, frames/s | 7.7 | 15.2 | 17.9 | 21.1 | 20.6 | 19.4 | 21.0 |
+
+the device is on its plateau by five frames in flight and the CPU by seven, so
+most of the aggregate gap is decided by one frame's cost; the rest is the
+fan-in each engine can absorb. peak VRAM on the same run: 384, 640, 1024,
+1280, 1280, 1536 and 1538 MB.
+
+at 24 MP the page barely fits. one frame's scratch is four 96 MB planes, which
+the allocator rounds up to 128 MB blocks, about 700 MB per frame against
+roughly 2.1 GB free on this 4 GB card:
+
+| frames in flight | device, frames/s | CPU, frames/s | peak VRAM |
+| --- | ---: | ---: | ---: |
+| 1 | 31.1 | 3.9 | 768 MB |
+| 3 | 61.9 | 8.9 | 1278 MB |
+| 5 | 68.8 | 9.0 | 1790 MB |
+
+those three are stable and 7x to 8x the CPU. `method=0` on five planes holds a
+narrower envelope, 19.3 frames/s at three and 14.2 at five, and RGB24 on four
+planes the same as Gray. past five frames the number stops describing the filter
+and starts describing the allocator's free list: the same page measured 6.7
+frames/s at seven and 10.4 at thirteen, against 31 to 69 for the three points
+above, and the CPU sat at 9. in one sweep, before the plane count came down, the
+process did not survive it:
+
+```text
+Failed to allocate a GPU plane: vkAllocateMemory failed for a 128 MB allocator
+block (VkResult -2); allocator held 29 blocks totalling 3712 MB, of which 3043 MB
+was live in 3 free regions, and trimming reclaimed 0 MB
+VapourSynth encountered a fatal error
+```
+
+which aborts the host rather than failing a frame, so the filter cannot catch it.
+`core.max_vram_cache_size` bounds what the core admits, and every sweep with it
+set completed: at 1024 MB and 2048 MB the 24 MP `method=0` case ran 2.0 and 3.8
+frames/s against the CPU's 2.6 and 3.0. it keeps the host alive without making
+the high-fan-in numbers predictable. that is the knob a caller has; the plane
+count under [memory](#memory) is what moved the ceiling from five frames in
+flight to seven.
+
+the device path moves the memory rather than removing it: peak resident set at
+12 MP with 13 frames in flight is 328 MB against the CPU's 1475, and 411 against
+1266 at 24 MP with five.
 
 ### what the first kernel cost
 
@@ -292,10 +376,11 @@ columns, so the blur read a neighbouring row: 16 of 6144 samples differed by up 
 arithmetic, not `sqrt`, was the first thing to break.
 
 the plan's memory table was also optimistic: the mask needs a raw and a blurred
-plane, so `method=1` runs on five planes, not two, and `method=0` on six. the
+plane, so `method=1` landed on six planes, not two, and `method=0` on seven. the
 deconvolution also needed a second estimate plane, because the estimate is read
 and written in the same pass, and the read/write alias of one plane is not
-something to rely on a frame binding for.
+something to rely on a frame binding for. [M7](#milestones) took those counts to
+four and five by reusing the planes the passes already have.
 
 the second bug was a missing barrier. after the refactor that moved the mask into
 a helper, the blend recorded directly after the mask's vertical pass, and the
@@ -326,6 +411,15 @@ word, so two lanes of one invocation never race, and the three planes cost about
 5 ms at 12 MP on top of Gray's store. that is the one place a packed-word write
 would still pay, and it is not the bottleneck at 9x.
 
+the plane count came down twice without touching a shader's arithmetic. the Sobel
+writes into the horizontal scratch, because the prefiltered luma it reads is dead
+by then, and the blend restores the candidate in place, because it reads and
+writes the same index. that is four planes for `method=1` and five for `method=0`
+against six and seven, and the hash table did not move: 37 of 37 device cases
+still match with the same deviations. what moved is the stable envelope at 24 MP,
+from three frames in flight to five, and the peak device use of one frame, from
+1030 MB to 768 MB.
+
 ## risks
 
 - **the Sobel `sqrt`.** the only non-portable operation, and the reason the
@@ -347,9 +441,12 @@ would still pay, and it is not the bottleneck at 9x.
    endianness, and big-endian is refused, because `storageBuffer16BitAccess` is
    optional and the pipeline builder does not expose it. the `f32` planes start
    from an output the plugin allocates.
-- **VRAM under concurrency.** four frames at 24 MP on a 2.35 GB budget leaves
-  room for a second device consumer. the fan-in measurement reports what happens
-  when the budget is reached.
+- **VRAM under concurrency.** measured, and it is the binding constraint at
+  24 MP: four planes per frame, four 128 MB blocks, about 700 MB, against 2.1 GB
+  free. a caller who runs many frames in flight at that page size can still push
+  the allocator into a fatal error, and `core.max_vram_cache_size` is the knob
+  that keeps it honest. the plane count brought the ceiling from three frames in
+  flight to five; tiling is what would remove it.
 
 ## adoption criteria
 
@@ -361,7 +458,10 @@ the same bar as [01](01-performance-plan.md#adoption-criteria):
   deviation from the Sobel `sqrt` recorded as a count and inside the frozen
   fixture tolerance.
 - latency improves by at least 15% in the targeted stages, and aggregate
-  throughput through the fan-in does not regress by more than 5%.
+  throughput through the fan-in does not regress by more than 5%. at 12 MP both
+  hold, 5.6x to 7.8x aggregate. at 24 MP the second one holds up to five frames
+  in flight and does not beyond that: see [the aggregate](#aggregate) and
+  [next](#next).
 - the CPU path stays in the tree and stays the default.
 
 ## done when
@@ -369,3 +469,20 @@ the same bar as [01](01-performance-plan.md#adoption-criteria):
 `Deblur(gpu=1)` runs both methods on the format surface, the hash harness and the
 validator compare it against `gpu=0`, and `docs/BENCH.md` carries the latency,
 aggregate and transfer numbers from [16](16-vulkan-validation.md).
+
+## next
+
+[M7](#milestones) is in the tree: four planes for `method=1` and five for
+`method=0`, the hash table unchanged, and the 24 MP envelope at five frames in
+flight instead of three. what it did not do is remove the ceiling. four
+full-resolution `f32` planes are still about 700 MB at 24 MP, and a twelve frame
+fan-in needs roughly 175 MB per frame.
+
+the structural fix is tiling: every pass here is a bounded stencil, the largest
+radius being the 16 px gaussian, so a band with a halo of a few rows makes the
+working set a function of band height rather than page height. a 512 row band at
+24 MP is 12 MB per plane, which is under 60 MB per frame for four of them, and
+the question of how many frames fit stops existing. the cost is a rewrite: every
+kernel takes a band origin and height, the scratch planes become band sized, and
+the deconvolution's six iterations each run band-wise. that belongs in its own
+plan if 24 MP pages become a target, not in this one.

@@ -304,7 +304,10 @@ device graph pays no transfer. 8 bit is byte-identical to `gpu=0`, the deeper
 integers are within one code value and the float formats within two ULP;
 `tools/deblur_hash.py --device` is the gate, and
 [17](docs/improvements/17-vulkan-deblur.md#outcome-so-far) has the per-format
-parity and the measured speedup, 7.7x to 10.4x on this laptop. a clip whose
+parity, the latency ratio (7.7x to 10.4x) and the aggregate one: 5.6x to 7.8x
+at 12 MP with 13 frames in flight. at 24 MP four full-resolution planes per
+frame hold five frames in flight on a 4 GB card, so a wider fan-in wants
+`core.max_vram_cache_size` (2048 MB is enough here). a clip whose
 format is not constant is refused, because the plan is built once at creation.
 
 only luma moves. on RGB the delta is added to the three planes as one equal

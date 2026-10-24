@@ -40,7 +40,11 @@ on Gray, RGB and YUV at every integer depth from 8 to 16 bits and on their 32 bi
 float formats; 8 bit is byte-identical to `gpu=0`, the deeper integers within
 one LSB and the float path within two ULP, and a variable format is refused;
 [17](docs/improvements/17-vulkan-deblur.md#outcome-so-far) has the per-format
-parity and the measured ratios.
+parity, and [the aggregate](docs/improvements/17-vulkan-deblur.md#aggregate) the
+fan-in numbers. aggregate is 5.6x to 7.8x the CPU at 12 MP; at 24 MP the four
+96 MB planes per frame hold five frames in flight, and a caller bounding
+`core.max_vram_cache_size` is what keeps the allocator from aborting the host
+past that.
 `docs/improvements/15-vulkan-device-path.md` records what the pinned binding
 offers, what the host/device bus costs, and which filters pay for it: the device
 `Deblur` is a win, the pointwise maps and the histogram analyzers are chain
@@ -113,6 +117,10 @@ carries a `parity` of `nmanga`, `diverges` or `reference-only` plus the
   repeated and out-of-order and concurrent requests, property preservation,
   determinism and the error messages.
 - `tools/golden.py`: the golden-vector generator. see below.
+- `tools/deblur_hash.py`: the Deblur hash harness. `--check` is the CPU gate and
+  `--device` compares `gpu=1` against `gpu=0` on the same cases.
+- `tools/deblur_fanin.py`: aggregate throughput through a 13 frame
+  `std.AverageFrames` fan-in, for `gpu=0` and `gpu=1`.
 - `tools/bench.py`: times the python reference against the plugin on the same
   pages. see below.
 - `docs/BENCH.md`: the method and the measured results.
@@ -277,6 +285,16 @@ core's default; `--cache MB` moves it. run it before changing anything that
 affects per-page cost, and keep the prose around the block honest about what is
 and is not comparable: decoding differs by library, and the plugin side does not
 write files because no VapourSynth writer is installed.
+
+`tools/deblur_fanin.py` is the aggregate measurement: 13 frames through
+`std.AverageFrames`, one pull, a fresh node per repeat. `--device` adds the
+Vulkan engine, `--sweep` walks the frames in flight, and `--vram MB` bounds
+`core.max_vram_cache_size`, which is what keeps a 24 MP run from exhausting the
+card:
+
+```powershell
+.venv\Scripts\python.exe tools\deblur_fanin.py --device --sweep
+```
 
 ## writing style
 

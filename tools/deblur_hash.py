@@ -5,8 +5,9 @@
 change that keeps the algorithm can still move one byte. This script runs a
 fixed case table through the installed plugin, hashes the output plane bytes and
 prints one line per case, which makes two builds diffable with `diff`. It is the
-harness for the device port: once `Deblur` gains `gpu:int:opt`, `--device`
-compares `gpu=1` through `std.GPUDownload` against `gpu=0` on the same source.
+harness for the device port: `--device` compares `gpu=1` through
+`std.GPUDownload` against `gpu=0` on the same source, and once more with the
+source already on the device, which is the other branch of the residency check.
 
 The table covers both methods, `GRAY8`/`GRAY16`/`GRAYS`, `RGB24`/`RGB48`/`RGBS`,
 `YUV420P8`/`YUV422P10`/`YUV444P16`/`YUV420PS`, an odd width, a 1 px frame, a
@@ -579,6 +580,29 @@ def compare_device(table: list[Case]) -> int:
         else:
             verdict = "ok"
         print(f"{case.name:<36} {verdict}")
+        failures += bool(differences)
+
+    # A clip that is already on the device takes the other branch of the
+    # filter's residency check: it must not be uploaded again, and the frame
+    # must still come back the same.
+    # The 8 bit case is the one whose host output is byte-exact, so a
+    # residency mistake shows up as a difference rather than as one code value.
+    case = next(
+        (entry for entry in table if entry.name == "method1/gray8/defaults"),
+        table[0],
+    )
+    clip = case.build()
+    try:
+        host = CORE.nimages.Deblur(clip, gpu=0, **case.arguments)
+        device = CORE.std.GPUDownload(
+            CORE.nimages.Deblur(CORE.std.GPUUpload(clip), gpu=1, **case.arguments)
+        )
+    except Exception as error:
+        print(f"{'device-source':<36} skip ({error})")
+    else:
+        differences, worst = compare_nodes(host, device)
+        verdict = "MISMATCH" if differences else (f"ok (max {worst:g})" if worst else "ok")
+        print(f"{'device-source ' + case.name:<36} {verdict}")
         failures += bool(differences)
     if failures:
         print(f"{failures} case(s) differ between gpu=0 and gpu=1", file=sys.stderr)

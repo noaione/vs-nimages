@@ -153,9 +153,39 @@ frame, measured the same way.
 | 5806x4128, 24.0 MP | YUV420P8 | 1 | 242.3 ms | 31.3 ms | 15.2 ms | 7.7x |
 | 5806x4128, 24.0 MP | YUV420P8 | 0 | 700.5 ms | 78.5 ms | 15.2 ms | 8.9x |
 
-this is latency, not throughput: the fan-in a volume encode sees has not been
-measured. [`docs/improvements/17-vulkan-deblur.md`](improvements/17-vulkan-deblur.md#measured)
-has the method, the parity result and what the first kernel cost.
+latency is one frame's cost. a volume encode asks for frame after frame, so the
+number that decides adoption is the aggregate: 13 frames through
+`std.AverageFrames`, one pull, a fresh node per repeat, a 512 MB cache, median of
+three. `tools/deblur_fanin.py` runs it. peak VRAM is NVML above the idle baseline,
+and peak RSS is the process high-water mark.
+
+| page | format | method | CPU, frames/s | device, frames/s | ratio | peak VRAM |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 12.0 MP | Gray8 | 1 | 21.0 | 150.0 | 7.1x | 1538 MB |
+| 12.0 MP | Gray8 | 0 | 6.6 | 51.3 | 7.8x | 1922 MB |
+| 12.0 MP | RGB24 | 1 | 14.9 | 83.3 | 5.6x | 1794 MB |
+| 12.0 MP | RGB24 | 0 | 5.9 | 39.5 | 6.7x | 2050 MB |
+| 12.0 MP | YUV420P8 | 1 | 20.6 | 126.1 | 6.1x | 1538 MB |
+
+the CPU gains 2.7x from the same fan-in and the device 2.5x, which is why the
+aggregate ratio lands close to the latency one. the device is on its plateau by
+five frames in flight and the CPU by seven. peak resident memory moves the other
+way: 328 MB against 1475 at 12 MP, because the scratch planes are on the device.
+
+the 24 MP page barely fits. one frame's scratch is four 96 MB planes, which the
+allocator rounds to 128 MB blocks, about 700 MB against roughly 2.1 GB free on
+this 4 GB card. one frame in flight is stable at 31 frames/s, three at 62 and
+five at 69, 7x to 8x the CPU; `method=0` on five planes holds a narrower
+envelope. past five frames the number describes the allocator's free list rather
+than the filter: 6.7 frames/s at seven and 10.4 at thirteen. a sweep that mixed
+geometries in one process exhausted the allocator outright, before the plane
+count came down, and took the host down, so a caller running 24 MP pages should
+set `core.max_vram_cache_size`: every sweep with it set completed. removing the
+ceiling rather than moving it means
+[tiling](improvements/17-vulkan-deblur.md#next).
+
+[`docs/improvements/17-vulkan-deblur.md`](improvements/17-vulkan-deblur.md#measured)
+has the fan-in curve, the parity result and what the kernels cost.
 
 every row is from one session. absolute milliseconds move by about a third
 between sessions on this laptop, so compare the ratio in a row. RGB24 pays three
