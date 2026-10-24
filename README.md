@@ -1,482 +1,157 @@
 # vapoursynth-nimages
 
+a rust-based vapoursynth plugin for analyzing and manipulating images.
+
 [![uv powered](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
 [![License](https://img.shields.io/github/license/noaione/vs-nimages)](https://github.com/noaione/vs-nimages/blob/master/LICENSE)
 ![VapourSynth Version](https://img.shields.io/badge/vapoursynth-%3E%3DR80-blue) [![build](https://github.com/noaione/vs-nimages/actions/workflows/build.yml/badge.svg)](https://github.com/noaione/vs-nimages/actions/workflows/build.yml)
 
-a rust vapoursynth plugin that analyzes and manipulates images.
-
-## features
-
-- peak detection that matches `scipy.signal.find_peaks` without depending on
-  scipy, including plateau-aware maxima and prominence
-- peak statistics attached to frames as properties, so analysis stays observable
-  and `Levels` can consume it
-- significant gray shades as parallel property arrays, binned over the full
-  integer sample range
-- levels matching the ImageMagick `-level` curve for integer samples through
-  16 bits, with per-sample float support for `GRAYS` and `RGBS`
-- posterization to any depth from 1 through the input sample depth, without
-  dithering
-- edge-masked sharpening in one `Deblur` node, with a Richardson-Lucy style
-  deconvolution or an unsharp mask, on Gray, RGB and YUV integer and float
-  clips
-- automatic gamma derived from the detected black point
-
-## requirements
-
-- VapourSynth R80 or newer
-- Python 3.12 or newer when installing the wheel
-- Rust 1.88 or newer when building from source
-- `PeakStats` and `PeakGrayShades` need a Gray integer clip from 8 to 16 bits;
-  `Levels` and `Posterize` take Gray, RGB or YUV integer samples from 8 to 16
-  bits; `Levels` also accepts `GRAYS` and `RGBS`; `Deblur` takes Gray, RGB and
-  YUV at any integer depth from 8 to 16 bits and their 32 bit float formats
-- a clip whose dimensions are not known until a frame is asked for, such as
-  `imgseqs.Read(..., mismatch=True)` over pages of different sizes
-- normalize an image sequence as in [use](#use) below
-
 ## install
 
-the python wheel is plugin-only. it installs a `vapoursynth/plugins/nimages/`
-directory holding a `manifest.vs` and the native library, and adds no python
-module.
+you need vapoursynth R80 or newer and python 3.12 or newer. install the wheel
+with the python environment used by your vapoursynth host:
 
-```console
-python -m pip install vapoursynth-nimages --index-url https://pypi.serik.at/simple
-```
+    python -m pip install vapoursynth-nimages --index-url https://pypi.serik.at/simple
 
-the x86-64 wheels carry two builds of the same plugin. `manifest.vs` names the
-plugin's stem, `vs_nimages` on windows and `libvs_nimages` on linux and macos,
-and vapoursynth picks the `.<variant>` file that matches the host CPU, falling
-back to the plain one:
+the wheel installs the plugin under vapoursynth's plugin directory. restart your
+host, then use the filters through core.nimages.
 
-| variant | windows | linux | needs |
-| --- | --- | --- | --- |
-| baseline | `vs_nimages.dll` | `libvs_nimages.so` | SSE4.2 (Nehalem, 2008) |
-| avx2 | `vs_nimages.avx2.dll` | `libvs_nimages.avx2.so` | AVX2 (Haswell, 2013) |
-a macOS wheel is arm64 only, so it ships one file, `libvs_nimages.dylib`.
+## quick start
 
-you can also take the matching file from a release and copy it into your
-vapoursynth plugin directory:
-if vapoursynth does not find it, load it explicitly:
+replace the sample clip with a node from your source filter. PeakStats finds
+per-frame black and white levels without changing the pixels. Levels can read
+those values from the frame properties.
 
-```python
-core.std.LoadPlugin(r"path/to/vs_nimages.dll")
-```
+    import vapoursynth as vs
 
-## use
+    core = vs.core
+    clip = core.std.BlankClip(width=1920, height=1080, format=vs.GRAY8)
 
-normalize the source to `GRAY8` first. `PeakStats` and `Levels` are separate
-filters on purpose: compose them when automatic per-frame levels are wanted, and
-inspect or override the detected levels in between.
+    stats = core.nimages.PeakStats(clip)
+    with stats.get_frame(0) as frame:
+        print(frame.props["NImagesBlackLevel"])
+        print(frame.props["NImagesWhiteLevel"])
 
-```python
-import vapoursynth as vs
+    leveled = core.nimages.Levels(stats, use_props=True)
+    posterized = core.nimages.Posterize(leveled, bits=4)
+    posterized.set_output()
 
-core = vs.core
+## filters
 
-source = core.imgseqs.Read(files=files, mismatch=True)
-gray = core.resize.Bicubic(
-    source,
-    format=vs.GRAY8,
-    matrix_s="470bg",
-    range_s="full",
-)
+| filter | accepted formats | what it does |
+| --- | --- | --- |
+| PeakStats | integer Gray, YUV, or RGB, 8–16 bit | finds black and white levels; leaves pixels unchanged |
+| PeakGrayShades | integer Gray, YUV, or RGB, 8–16 bit | reports significant shades; leaves pixels unchanged |
+| Levels | integer Gray, YUV, or RGB, 8–16 bit; GRAYS and RGBS | adjusts every plane |
+| Posterize | integer Gray, YUV, or RGB, 8–16 bit | reduces every plane to a chosen number of levels |
+| Deblur | Gray, YUV, or RGB, integer 8–16 bit or 32-bit float | sharpens luma |
 
-# inspect statistics independently
-stats = core.nimages.PeakStats(
-    gray,
-    upper_limit=60,
-    peak_percentage=0.25,
-    peak_prominence=0.1,
-)
+frames are processed independently. clips may have different dimensions from
+frame to frame.
 
-# report significant shades independently
-shades = core.nimages.PeakGrayShades(gray, threshold=0.01)
+PeakStats and PeakGrayShades analyze plane 0 for YUV and the fixed-point luma
+of the three planes for RGB. Levels and Posterize map each plane independently.
+Deblur changes Gray's only plane, YUV's luma plane, or RGB with an equal
+per-pixel channel offset; it leaves YUV chroma unchanged.
 
-# apply the per-frame levels PeakStats found
-leveled = core.nimages.Levels(
-    stats,
-    use_props=True,
-    peak_offset=0,
-    auto_gamma=True,
-)
+### PeakStats
 
-posterized = core.nimages.Posterize(leveled, bits=4)
-posterized.set_output()
-```
-
-### `PeakStats`
-
-finds the black and white levels of each frame. pixels pass through untouched.
-it takes an integer `Gray`, `YUV` or `RGB` clip from 8 to 16 bits: a `YUV` clip
-is analysed through plane 0, which is luma, and an `RGB` clip through the
-fixed-point luma of its three planes, the same numbers
-`Image.convert("L")` produces.
-
-```python
-stats = core.nimages.PeakStats(clip, upper_limit=60, peak_percentage=0.25)
-with stats.get_frame(n) as frame:
-    black = frame.props["NImagesBlackLevel"]
-    white = frame.props["NImagesWhiteLevel"]
-```
+    stats = core.nimages.PeakStats(
+        clip,
+        upper_limit=60,
+        peak_percentage=0.25,
+        peak_prominence=0.1,
+        skip_white=False,
+    )
 
 | argument | default | meaning |
 | --- | --- | --- |
-| `upper_limit` | `60` | highest 8-bit-equivalent shade searched for the black peak, scaled to the sample range and mirrored for the white peak |
-| `peak_percentage` | `0.25` | minimum share of the frame a peak covers, in percent |
-| `peak_prominence` | none | minimum prominence of a peak, in percent; unset disables it |
-| `skip_white` | `false` | skip the white analysis and report the sample maximum |
-| `gpu` | `0` | `1` counts the histogram on the Vulkan device, which needs VapourSynth R80 and a Vulkan 1.4 device |
-| `debug` | `false` | log the resolved arguments and each frame's stage timings |
+| upper_limit | 60 | search limit in 8-bit-equivalent values, from 1 to 255 |
+| peak_percentage | 0.25 | minimum peak height as a percent of the frame |
+| peak_prominence | unset | minimum peak prominence as a percent of the frame |
+| skip_white | false | skip white detection and use the sample maximum |
 
-| property | type | meaning |
-| --- | --- | --- |
-| `NImagesBlackLevel` | int | selected black level, in source sample units |
-| `NImagesWhiteLevel` | int | selected white level, in source sample units |
-| `NImagesBlackPeakFound` | int bool | whether a black peak was found rather than defaulting |
-| `NImagesWhitePeakFound` | int bool | whether a white peak was found rather than defaulting |
+0.25 means 0.25 percent. peak_percentage alone does not change the selected
+peak; use peak_prominence to exclude peaks. results are attached to each frame
+as NImagesBlackLevel, NImagesWhiteLevel, NImagesBlackPeakFound, and
+NImagesWhitePeakFound. peak levels use the input's native sample range.
 
-`gpu=1` counts on the Vulkan device, reads the table back and runs the same
-analysis on it, so the properties and the pixels are identical to `gpu=0`. it
-pays after a device producer, where counting costs 1.6 ms instead of 9.5 ms at
-12 MP `GRAY8`. a lone analyzer is transfer bound because the frame has to cross
-the bus;
-[19](docs/improvements/19-vulkan-histogram-analyzers.md#outcome-so-far),
-[20](docs/improvements/20-analyzer-color-inputs.md#outcome-so-far) and
-[21](docs/improvements/21-vector-rgb-luma.md#outcome-so-far) have the
-numbers for every family.
+### PeakGrayShades
 
-both percentages are percentages, not fractions: `0.25` means 0.25 percent of all
-pixels, and the required count is `ceil(total_pixels * percentage / 100)`.
+    shades = core.nimages.PeakGrayShades(clip, threshold=0.01)
+    with shades.get_frame(0) as frame:
+        values = list(frame.props["NImagesGrayShades"])
+        percentages = list(frame.props["NImagesGrayShadePercentages"])
 
-`peak_percentage` cannot change the result on its own. the search falls back to
-the tallest peak with both thresholds removed, and the height test is monotone,
-so a height threshold that rejects the tallest peak rejects every peak. set
-`peak_prominence` for a threshold that has an effect. `docs/FINDINGS.md` §3.7 has
-the detail.
+threshold is a percent of the frame. the two properties contain matching arrays:
+shade values and their percentages. Both arrays are present when no shades pass
+the threshold.
 
-### `PeakGrayShades`
+### Levels
 
-reports every shade whose share of the frame exceeds `threshold` percent, sorted
-by descending share, for an integer `Gray`, `YUV` or `RGB` clip from 8 to 16
-bits. pixels pass through untouched.
-
-```python
-shades = core.nimages.PeakGrayShades(clip, threshold=0.01)
-with shades.get_frame(n) as frame:
-    values = list(frame.props.get("NImagesGrayShades", []))
-    percentages = list(frame.props.get("NImagesGrayShadePercentages", []))
-```
+    leveled = core.nimages.Levels(clip, black=12, white=245, gamma=1.18)
 
 | argument | default | meaning |
 | --- | --- | --- |
-| `threshold` | `0.01` | minimum share of the frame a shade needs, in percent |
-| `debug` | `false` | log the resolved arguments and each frame's stage timings |
-| `gpu` | `0` | `1` counts the histogram on the Vulkan device, which needs VapourSynth R80 and a Vulkan 1.4 device |
+| black | 0 | input black point |
+| white | sample maximum | input white point |
+| gamma | 1.0 | curve gamma |
+| use_props | false | read black and white from PeakStats frame properties |
+| peak_offset | 0 | add this value to the detected black point |
+| auto_gamma | false | derive gamma from the detected black point |
 
-| property | type | meaning |
-| --- | --- | --- |
-| `NImagesGrayShades` | int array | significant shade values, sorted by descending share |
-| `NImagesGrayShadePercentages` | float array | share of the frame for each shade |
+integer endpoints use native code values. GRAYS and RGBS endpoints use 8-bit
+code values, converted to the 0–1 float range. Float clips use fixed endpoints
+and do not support use_props, peak_offset, or auto_gamma.
 
-both arrays are always present and always the same length, including when that
-length is zero. a shade is included only when its count is strictly greater than
-`ceil(total_pixels * threshold / 100)`, and equal shares keep ascending shade
-order.
+to use per-frame levels, connect PeakStats to Levels with use_props=True:
 
-`gpu=1` counts on the device and writes the same two arrays as `gpu=0`, so
-`Posterize(use_props=True, method=1, gpu=1)` can read them and solve its levels
-from the device histogram without the frame returning to the host.
+    stats = core.nimages.PeakStats(clip)
+    leveled = core.nimages.Levels(stats, use_props=True)
 
-### `Levels`
+### Posterize
 
-applies the ImageMagick `-level` curve to every plane of every frame. Integer
-Gray, RGB and YUV clips from 8 to 16 bits use native-range tables. `GRAYS` and
-`RGBS` use per-sample float math without quantizing through an integer lookup
-table. The curve applies to each sample as it stands rather than to luma.
-
-```python
-# integer clips take code values, table built once
-leveled = core.nimages.Levels(clip, black=12, white=245, gamma=1.18)
-
-# float clips take the same argument in 8-bit code values
-leveled = core.nimages.Levels(clip, black=5.1, white=239.7, gamma=1.18)
-
-# per-frame parameters read from PeakStats
-leveled = core.nimages.Levels(stats, use_props=True, peak_offset=0, auto_gamma=True)
-```
+    posterized = core.nimages.Posterize(clip, bits=4)
 
 | argument | default | meaning |
 | --- | --- | --- |
-| `black` | `0` | black point: a code value on an integer clip, 8-bit code values on a float one |
-| `white` | sample maximum, `255` on a float clip | white point, in the same units as `black` |
-| `gamma` | `1.0` | gamma of the curve |
-| `use_props` | `false` | read `NImagesBlackLevel` and `NImagesWhiteLevel` from each input frame instead |
-| `peak_offset` | `0` | added to the black point, in source sample units |
-| `auto_gamma` | `false` | derive gamma from the effective black point, ignoring `gamma` |
-| `gpu` | `0` | `1` runs the integer table on the Vulkan device, which needs VapourSynth R80 and a Vulkan 1.4 device |
-| `debug` | `false` | log the resolved curve and each frame's stage timings |
+| bits | required | output depth, from 1 to the input sample depth |
+| method | 0 | 0 spaces levels evenly; 1 fits levels to each frame's histogram |
+| use_props | false | infer the output depth from NImagesGrayShades on each frame |
 
-for an input `x`, black `b`, white `w` and sample maximum `Q`:
+for property-based depth, connect PeakGrayShades and omit bits:
 
-```text
-x < b  -> 0
-x > w  -> Q
-else   -> round(Q * ((x - b) / (w - b)) ** (1 / gamma))
-```
+    shades = core.nimages.PeakGrayShades(clip)
+    posterized = core.nimages.Posterize(shades, use_props=True)
 
-rounding is ties-to-even at every step, matching the pillow path. `peak_offset`
-is a code-value offset, so `peak_offset=1` on `black=12` levels from 13 rather
-than from one percentage point, which is about 2.55 code values.
+Posterize does not dither. with method=1, levels are fitted separately for each
+frame.
 
-`black` and `white` are one argument set for both domains. On an integer clip
-they are code values, and an endpoint that is not a finite whole number or that
-falls outside the sample range is refused. On a float clip they are 8-bit code
-values: `white=245` becomes `245 / 255`, and the default `255` becomes `1.0`.
-Float outputs are clamped to `[0, 1]`, values outside the endpoints clamp to 0
-or 1, and NaN samples remain NaN. Float `Levels` does not accept
-`use_props=True`, nonzero `peak_offset`, or `auto_gamma=True`, because the peak
-properties are integer-only.
+### Deblur
 
-`gpu=1` is worth it only after a device producer: a `Levels` between two host
-filters pays more for the two transfers than the 4.6 ms of table lookups it
-replaces. inside a device chain it is byte-identical to `gpu=0`, and a chain of
-`Deblur(gpu=1)`, `Levels(gpu=1)` and `Posterize(gpu=1)` is 25% to 42% cheaper
-per frame than downloading after the `Deblur` and mapping on the host. a float
-clip and a clip whose format varies are refused, because the float curve has no
-table and the device plan is resolved once. `use_props=True` works either way
-and rebuilds 256 words per frame.
-
-`auto_gamma` normalizes the black point by `Q` before applying its formula. the
-expression is undefined at or above half the sample range, so the filter rejects
-such a black point.
-
-### `Posterize`
-
-by default maps every plane of each frame to `2 ** bits` evenly spaced values,
-dithering. Like `Levels` it takes 8 to 16 bit integer Gray, RGB or YUV formats.
-
-```python
-posterized = core.nimages.Posterize(clip, bits=4)
-```
-
-posterizing an RGB clip's planes independently is not the same operation as
-posterizing its luma. an RGB caller that wants the grayscale behaviour converts
-first, as in [use](#use) above.
+    sharp = core.nimages.Deblur(clip, method=1)
 
 | argument | default | meaning |
 | --- | --- | --- |
-| `bits` | required | number of bits, from 1 through the input sample depth |
-| `use_props` | `false` | read `NImagesGrayShades` from each input frame instead, this is the same as auto bits detection. |
-| `debug` | `false` | log the resolved depth and each frame's stage timings |
-| `method` | `0` | `0` spaces the levels evenly, `1` solves them from the frame's histogram with Lloyd-Max |
-| `gpu` | `0` | `1` runs the table on the Vulkan device, including the `method=1` solve |
+| method | 0 | 0 uses deconvolution; 1 uses an edge-masked unsharp mask |
+| radius | 0.8 | Gaussian blur sigma in pixels, above 0 and at most 16 |
+| strength | 0.65 or 0.85 | blend strength; the default depends on method |
+| iterations | 6 | deconvolution passes, from 0 to 64 |
+| threshold | 2 | edge threshold in 8-bit levels |
+| overshoot | 0 | allowed excursion beyond nearby pixel values, in 8-bit steps |
 
-`bits` equal to the input sample depth is the identity. the mapping uses the
-full native sample maximum `Q`:
+method=1 uses strength 0.85 by default and does not use iterations. Deblur
+preserves YUV chroma and keeps RGB channel differences when sharpening.
 
-```text
-colors = 2 ** bits
-level  = round(x * (colors - 1) / Q)
-out    = round(level * Q / (colors - 1))
-```
+## optional settings
 
-the pillow path follows this with `quantize(colors, dither=NONE)`, which is
-provably redundant here: the mapping already produces exactly `colors` distinct
-values, and pillow's quantized output is byte-identical to its input.
+all filters accept `gpu=1` to use a Vulkan device. This requires vapoursynth R80
+and a Vulkan 1.4 device. gpu processing requires the clip format to stay
+constant. Levels on the gpu supports integer formats; float Levels uses the cpu.
 
-`method=1` solves the levels instead of spacing them. it runs the Lloyd-Max
-solver over the frame's own histogram: 40 passes move each interior level to
-the mean of its bucket, both endpoints stay pinned to `0` and the sample maximum,
-and a bucket holding no sample keeps its even level. the histogram comes from
-plane 0 for a Gray or YUV clip and from the fixed-point luma for an RGB one, and
-the solved table then applies to every plane. the levels are solved per frame, so
-a clip whose frames differ gets a level set each, which a page-per-frame caller
-wants and a moving clip would show as flicker.
-
-`gpu=1` maps the table on the device, byte-identical to `gpu=0`, and like
-`Levels` it pays only inside a device chain. `method=1` works there too: plane
-0's histogram is counted on the device, read back, and solved with the same host
-code, which takes `PeakGrayShades` into `Posterize(method=1)` from 20.0 ms to
-6.2 ms at 12 MP `GRAY8` and from 49.1 ms to 14.0 ms at `GRAY16`.
-`use_props=True` works under `gpu=1` and rebuilds the table per frame.
-
-**note**: when `bits` equals the sample depth, the frame is returned unchanged.
-
-### `Deblur`
-
-sharpens the luma of every frame, with the edge mask, halo clamp and blend that
-`nmanga/deblur.py` uses:
-
-```python
-sharp = core.nimages.Deblur(clip, method=1)
-```
-
-`method=0` runs a Richardson-Lucy style deconvolution for `iterations` passes
-and `method=1` an unsharp mask against a gaussian reference. both build their
-candidate from the luma alone, clamp it to the 3x3 local extremes of that luma
-plus `overshoot`, and blend it back through a soft edge mask, so flat areas and
-fine texture come back untouched.
-
-| argument | default | meaning |
-| --- | --- | --- |
-| `method` | `0` | `0` deconvolves, `1` is the unsharp mask |
-| `radius` | `0.8` | gaussian sigma of the assumed blur, in pixels, above `0` and at most `16` |
-| `strength` | `0.65` for `0`, `0.85` for `1` | how much of the candidate is blended back |
-| `iterations` | `6` | refinement passes, `0` through `64`, `method=0` only |
-| `threshold` | `2` | edge threshold in 8-bit levels, from `0` |
-| `overshoot` | `0` | extra excursion allowed past the local extremes, in 8-bit steps |
-| `gpu` | `0` | `1` runs the same arithmetic on the Vulkan device, which needs VapourSynth R80 and a Vulkan 1.4 device |
-| `debug` | `false` | log the resolved parameters and each frame's stage timings |
-
-the defaults follow the method in effect, so `Deblur(clip, method=1)` is the
-unsharp mask at `0.85`, and an explicit `strength` overrides either default.
-`method=1` has no refinement loop, so it ignores `iterations` entirely,
-including a value outside the range the deconvolution accepts.
-
-`gpu=1` is the same filter on the Vulkan device, both methods and every format
-the host path takes. the output is a device frame, and a clip that is not
-already there is uploaded with `std.GPUUpload`, so a `gpu=1` node inside a
-device graph pays no transfer. 8 bit is byte-identical to `gpu=0`, the deeper
-integers are within one code value and the float formats within two ULP;
-`tools/deblur_hash.py --device` is the gate, and
-[17](docs/improvements/17-vulkan-deblur.md#outcome-so-far) has the per-format
-parity, the latency ratio (7.7x to 10.4x) and the aggregate one: 5.6x to 7.8x
-at 12 MP with 13 frames in flight. at 24 MP four full-resolution planes per
-frame hold five frames in flight on a 4 GB card, so a wider fan-in wants
-`core.max_vram_cache_size` (2048 MB is enough here). a clip whose
-format is not constant is refused, because the plan is built once at creation.
-
-only luma moves. on RGB the delta is added to the three planes as one equal
-offset per pixel, limited to the gamut the pixel has left, which keeps the
-channel differences instead of clipping each channel on its own. on YUV it is
-added to the luma plane with chroma carried through byte for byte, so a
-subsampled format never runs a kernel over its chroma. `threshold` and
-`overshoot` are 8-bit units whatever the sample depth, and a float clip is read
-as the reference's `[0, 1]` range.
-
-the arithmetic is not the reference's. the kernels are a separable direct
-convolution in `f32` whose interior reads a bounds-free window, which is several
-times faster than `scipy.ndimage.gaussian_filter` and agrees with it to a
-fraction of a code value. `tests/fixtures/deblur.json` carries the frozen
-tolerance, and `tools/golden.py` refuses to write the fixtures when the port and
-`nmanga.deblur` disagree.
-
-### debug
-
-every filter takes `debug`. when it is set, the first frame the filter is asked
-for logs the arguments it resolved and the input it accepted, and each frame logs
-its stage timings and total, both through the VapourSynth log:
-
-```text
-[nimages][debug] PeakStats: upper_limit=60 peak_percentage=Some(0.25) peak_prominence=None skip_white=true input=Gray 8 bit 1404x2000
-[nimages][debug] PeakStats frame 3: black=12 white=245 histogram=2.104 ms peaks=0.081 ms copy=2.130 ms total=4.315 ms
-[nimages][debug] Levels frame 3: black=12 white=245 gamma=1.07 curve=0.014 ms map=6.902 ms total=6.916 ms
-```
-
-collect them with a log handler:
-
-```python
-import vapoursynth as vs
-
-vs.core.add_log_handler(lambda kind, message: print(message))
-```
-
-the settings line comes from the first frame rather than from creation, because
-VapourSynth drops a message logged from a filter's create function.
-`docs/FINDINGS.md` §2.5 and §2.6 record that, and `tools/bench.py` reads these
-same lines to split a workflow into stages.
-
-## differences from the pillow pipeline
-
-the filters port `nmanga/autolevel.py`. two places deliberately differ, both
-recorded in `docs/FINDINGS.md` with fixtures that pin the divergence:
-
-- **gray shades use fixed native-range bins.** the reference calls
-  `np.histogram(arr, bins=256)` with no `range=`, so numpy bins over the frame's
-  observed min..max and `shade` comes back as a bin index rather than a gray
-  value. this plugin bins 8-bit input over `0..=255` and wider input over every
-  native code value. a constant image reports shade 128 at 100% in the
-  reference, and an image holding only 10 and 20 reports shades 0 and 255. this
-  plugin reports the actual sample values.
-- **invalid arguments are rejected.** the reference's percentage guard is
-  `value <= 0 and value >= 100`, a conjunction of opposites that never fires, so
-  out-of-range values reach the analysis unchanged.
-
-## build from source
-
-```console
-cargo build --release --locked
-```
-
-the artifact lands in `target/release/`. copy it into a
-`vapoursynth/plugins/nimages/` directory next to a `manifest.vs` that holds:
-
-```text
-[VapourSynth Manifest V1]
-vs_nimages
-```
-
-to build the wheel, which runs cargo and stages the plugin for you:
-
-```console
-python -m build
-```
-
-## development
-
-```powershell
-cargo test --locked
-cargo clippy --all-targets
-cargo fmt --check
-```
-
-the separate [miri workflow](.github/workflows/miri.yml) runs on pushes, pull
-requests and manual dispatches. it interprets the library unit tests with both
-scalar and avx2 paths, using nightly Rust and deterministic float operations.
-it checks memory safety independently of the wheel and VapourSynth integration
-jobs. to run its scalar check locally:
-
-```powershell
-rustup toolchain install nightly --profile minimal --component miri --component rust-src
-$env:RUSTFLAGS = "-C target-feature=-avx2"
-$env:MIRIFLAGS = "-Zmiri-deterministic-floats"
-cargo +nightly miri setup
-cargo +nightly miri test --locked --lib -- --test-threads=1
-```
-
-use `-C target-feature=+avx2` for the vector check. on windows, pass
-`--target x86_64-unknown-linux-gnu` to both Miri commands to use its linux
-interpreter.
-
-`cargo test` runs the algorithm unit tests and the integration tests in
-`tests/`, which replay the committed golden vectors in `tests/fixtures/`. those
-vectors come from the reference python implementation and are regenerated with
-
-```powershell
-uv run --extra golden tools\golden.py --nmanga-path ..\nao-manga-rls
-```
-
-to exercise the built plugin itself, sync the test extras and run the validator,
-which replays the same vectors through the real filters:
-
-```powershell
-uv sync --extra dev --extra dev-tests
-.venv\Scripts\python.exe tests\check-nimages.py
-```
-
-`docs/BENCH.md` records what the filters cost against the python pipeline they
-replace, measured on the same pages:
-
-```powershell
-uv run --extra golden --extra dev-tests tools\bench.py
-```
-
-`AGENTS.md` documents the repository layout, the crate's pitfalls and the
-commands in more detail.
+all filters accept debug=1 to write settings and per-frame timings to the
+vapoursynth log.
 
 ## license
 
-MPL-2.0. see `LICENSE`.
+MPL-2.0. see LICENSE.
