@@ -1,7 +1,7 @@
 # Deblur on the device
 
-status: in progress. `method=1` on 8 bit Gray is in the tree and byte-identical to
-`gpu=0`; `method=0`, 16 bit, float and RGB/YUV are still M4 and M5. see
+status: in progress. both methods on 8 bit Gray are in the tree and byte-identical to
+`gpu=0`; 16 bit, float and RGB/YUV are still M5. see
 [the outcome so far](#outcome-so-far) for the numbers and the one bug it cost.
 
 ## current cost
@@ -183,8 +183,8 @@ smaller than the latency win and is the first thing M6 measures.
 
 ## outcome so far
 
-written 2026-10-24. M1 to M3 are landed for `method=1` on 8 bit Gray; M4 and M5
-are not.
+written 2026-10-24. M1 to M4 are landed: both methods run on 8 bit Gray and are
+byte-identical to `gpu=0`. M5, the wider formats, is not.
 
 | piece | where |
 | --- | --- |
@@ -196,18 +196,21 @@ are not.
 | the parity gate | `tools/deblur_hash.py --device` |
 | the device probe | `tools/gpu_probe.py` |
 
-`gpu=1` refuses `method=0`, 16 bit and float input, and a variable format, each
-with a message naming what it saw.
+`gpu=1` refuses 16 bit and float input, RGB/YUV, and a variable format, each with
+a message naming what it saw.
 
 ### parity
 
-`tools/deblur_hash.py --device` runs 24 cases; the seven 8 bit Gray `method=1`
-cases are byte-identical to `gpu=0`, and the other 17 are skipped with their
-refusal printed:
+`tools/deblur_hash.py --device` runs 24 cases; all fifteen 8 bit Gray cases are
+byte-identical to `gpu=0`, eight of `method=0` and seven of `method=1`. the nine
+skips are Gray16, GrayS and the variable-format clip, each with its refusal
+printed:
 
 - defaults, an odd width (129x97), a 1 px frame, a frame whose row padding is `0xA5`
 - `radius=16` (the 129-tap kernel), a non-default `strength`, `threshold` and
   `overshoot`, and `threshold=0`
+- `method=0` additionally covers six refinement iterations, the division by
+  `max(blur, 1e-7)` and the estimate scaling
 
 the CPU table is unchanged (`deblur_hash.py --check` matches all 24), the
 validator reports 2150 checks, and `cargo test`, `cargo clippy -- -D warnings`
@@ -218,14 +221,20 @@ and `cargo fmt --check` are clean.
 one frame on a quiet machine, a fresh `Deblur` node per request, median of seven.
 `gpu=1` is measured through `std.GPUDownload`, which is what a caller pays:
 
-| page | CPU | device + download | bus round trip | speedup |
-| --- | ---: | ---: | ---: | ---: |
-| 2902x4128, 12.0 MP | 156.4 ms | 16.1 ms | 6.9 ms | 9.7x |
-| 5806x4128, 24.0 MP | 314.9 ms | 32.1 ms | 12.8 ms | 9.8x |
+| page | method | CPU | device + download | bus round trip | speedup |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 2902x4128, 12.0 MP | 1 | 206.4 ms | 21.5 ms | 10.9 ms | 9.6x |
+| 2902x4128, 12.0 MP | 0 | 599.2 ms | 48.8 ms | 10.9 ms | 12.3x |
+| 5806x4128, 24.0 MP | 1 | 498.9 ms | 38.0 ms | 17.8 ms | 13.1x |
+| 5806x4128, 24.0 MP | 0 | 1218.0 ms | 92.4 ms | 17.8 ms | 13.2x |
 
 the source is a `BlankClip`, so the frame costs nothing to make and both engines
 see the same input; these are filter numbers, not decode. the device work alone is
-the total minus the bus, about 9 ms at 12 MP against the 5.6 ms estimated above.
+the total minus the bus: about 11 ms for `method=1` and 38 ms for `method=0` at
+12 MP, against the 5.6 ms estimated for `method=1` above. the host was noisier in
+this run than in the first one (same build, `method=1` 12 MP was 156.4 ms there),
+so read the ratios, not the absolute milliseconds.
+
 the aggregate number M6 asks for is still open: no fan-in has been run.
 
 ### what the first kernel cost
@@ -239,7 +248,17 @@ columns, so the blur read a neighbouring row: 16 of 6144 samples differed by up 
 arithmetic, not `sqrt`, was the first thing to break.
 
 the plan's memory table was also optimistic: the mask needs a raw and a blurred
-plane, so the workspace is five planes, not two.
+plane, so `method=1` runs on five planes, not two, and `method=0` on six. the
+deconvolution also needed a second estimate plane, because the estimate is read
+and written in the same pass, and the read/write alias of one plane is not
+something to rely on a frame binding for.
+
+the second bug was a missing barrier. after the refactor that moved the mask into
+a helper, the blend recorded directly after the mask's vertical pass, and the
+framework does not order two dispatches inside one recording. the blend read a
+mask that had not been made visible: 3509 of 6144 samples on the numpy page, and
+only 3 per case in the hash harness, because the two sources put different
+pressure on the queue. `record_mask` now ends with the barrier its output needs.
 
 ## risks
 
