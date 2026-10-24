@@ -10,6 +10,8 @@ use vapoursynth4_rs::node::{Filter, Node, VideoNode};
 use vapoursynth4_rs::{core::CoreRef, ffi, key};
 
 use crate::error::{NImagesError, Result};
+use crate::gpu;
+use crate::gpu::histogram::Engine;
 use crate::peaks::{PeakOptions, find_local_peak};
 
 use super::{
@@ -33,6 +35,10 @@ pub struct PeakStats {
     source: VideoNode,
     options: PeakOptions,
     debug: bool,
+    /// Whether this instance counts on the device.
+    gpu: bool,
+    /// The device kernel, built once when `gpu` is set.
+    engine: Option<Engine>,
     /// Set once the settings line has been written for this instance.
     reported: AtomicBool,
 }
@@ -43,8 +49,14 @@ impl Filter for PeakStats {
     type FilterData = ();
 
     const NAME: &'static CStr = c"PeakStats";
-    const ARGS: &'static CStr = c"clip:vnode;upper_limit:int:opt;peak_percentage:float:opt;peak_prominence:float:opt;skip_white:int:opt;debug:int:opt;";
-    const RETURN_TYPE: &'static CStr = c"clip:vnode;";
+    const ARGS: &'static CStr = c"clip:vnode:all;upper_limit:int:opt;peak_percentage:float:opt;peak_prominence:float:opt;skip_white:int:opt;gpu:int:opt;debug:int:opt;";
+    const RETURN_TYPE: &'static CStr = c"clip:vnode:all;";
+
+    /// `all` is answered by the instance: a `gpu=1` run's frame is device
+    /// memory and a `gpu=0` run's is not.
+    fn gpu_output(&self) -> bool {
+        self.gpu
+    }
 
     fn create(
         input: MapRef,
@@ -84,6 +96,29 @@ impl Filter for PeakStats {
         };
         let debug = read_int(&input, key!(c"debug"))?.unwrap_or(0) != 0;
 
+        let gpu = read_int(&input, key!(c"gpu"))?.unwrap_or(0) != 0;
+        let (source, engine) = if gpu {
+            gpu::require_device(&core)?;
+            if !vapoursynth4_rs::utils::is_constant_video_format(&info) {
+                return Err(NImagesError::new(
+                    "PeakStats gpu=1: the clip's format is not constant",
+                ));
+            }
+            let source = if source.residency() == ffi::VSNodeResidency::GPU {
+                source
+            } else {
+                gpu::upload(&core, &source)?
+            };
+            (source, Some(Engine::new(&core)?))
+        } else {
+            let source = if source.residency() == ffi::VSNodeResidency::GPU {
+                gpu::download(&core, &source)?
+            } else {
+                source
+            };
+            (source, None)
+        };
+
         let dependency = source.as_ptr();
         add_filter(
             &mut core,
@@ -94,6 +129,8 @@ impl Filter for PeakStats {
                 source,
                 options,
                 debug,
+                gpu,
+                engine,
                 reported: AtomicBool::new(false),
             },
             dependency,
@@ -132,7 +169,10 @@ impl Filter for PeakStats {
                 report_settings_once(self.debug, &self.reported, &mut core, line);
 
                 let mark = Instant::now();
-                let histogram = plane_histogram(&input)?;
+                let histogram = match &self.engine {
+                    Some(engine) => engine.count(&core, &input)?,
+                    None => plane_histogram(&input)?,
+                };
                 trace.mark("histogram", mark);
 
                 let mark = Instant::now();

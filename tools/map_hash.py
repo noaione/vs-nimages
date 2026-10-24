@@ -19,6 +19,10 @@ Pixels come from a numpy page written into `std.ModifyFrame`, so no image file
 or writer is needed, and every case is deterministic. Planes after the first
 carry a different page, so a kernel that mapped plane 0 into every plane would
 show up as a difference rather than as a pass.
+
+`Posterize(method=1)` solves its level set from plane 0's histogram, and `gpu=1`
+counts that histogram on the device. The solve and the table build are the same
+host code either way, so its pixels must match exactly too.
 """
 
 from __future__ import annotations
@@ -164,7 +168,27 @@ def cases() -> list[Case]:
             lambda: CORE.nimages.PeakGrayShades(gray(97, 65), threshold=0.01),
             {"use_props": 1},
         ),
-        Case("posterize/gray8/lloyd-refused", lambda: gray(97, 65), {"bits": 4, "method": 1}, "method=1"),
+        Case("posterize/gray8/lloyd-bits4", lambda: gray(97, 65), {"bits": 4, "method": 1}),
+        Case(
+            "posterize/gray16/lloyd-bits12",
+            lambda: source(129, 97, vs.GRAY16),
+            {"bits": 12, "method": 1},
+        ),
+        Case(
+            "posterize/rgb24/lloyd-bits4",
+            lambda: source(96, 64, vs.RGB24),
+            {"bits": 4, "method": 1},
+        ),
+        Case(
+            "posterize/yuv420p8/lloyd-bits4",
+            lambda: source(130, 66, vs.YUV420P8),
+            {"bits": 4, "method": 1},
+        ),
+        Case(
+            "posterize/gray8/lloyd-use-props",
+            lambda: CORE.nimages.PeakGrayShades(gray(97, 65), threshold=0.01),
+            {"use_props": 1, "method": 1},
+        ),
     ]
     return table
 

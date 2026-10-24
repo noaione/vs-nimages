@@ -49,11 +49,23 @@ past that.
 byte-identical to the host path; they are worth it only inside a device chain,
 1.2x to 1.5x while the chain fits and a loss at a wide fan-in, and
 [18](docs/improvements/18-vulkan-pointwise-maps.md#outcome-so-far) records both.
+
+`PeakStats(gpu=1)` and `PeakGrayShades(gpu=1)` count plane 0 on the device and
+analyse the table with the same host code, so the properties, the shade arrays
+and the pixels match `gpu=0` exactly; `Posterize(method=1, gpu=1)` solves its
+levels from that table. counting is 10x to 18x cheaper than the host's inside a
+device chain, which takes `PeakGrayShades` into `Posterize(method=1)` from 20.0
+to 6.2 ms at 12 MP `GRAY8` and from 49.1 to 14.0 ms at `GRAY16`; a lone analyzer
+is transfer bound at 1.6x to 1.9x.
+[19](docs/improvements/19-vulkan-histogram-analyzers.md#outcome-so-far) records
+both, and `tools/histogram_hash.py` is the gate.
+
 `docs/improvements/15-vulkan-device-path.md` records what the pinned binding
 offers, what the host/device bus costs, and which filters pay for it: the device
 `Deblur` is a win, the pointwise maps and the histogram analyzers are chain
 members, and float `Levels` stays on the host. plans 16 through 19 are the
-validation harness, the Deblur kernel, the pointwise maps and the analyzers.
+validation harness, the Deblur kernel, the pointwise maps and the analyzers, and
+all of them have landed.
 the dependency on the Vulkan-capable binding revision is in the working tree and
 raises the floor to VapourSynth R80.
 
@@ -100,7 +112,8 @@ carries a `parity` of `nmanga`, `diverges` or `reference-only` plus the
 - `src/gpu/`: the device layer. `mod.rs` is the VapourSynth-facing half (gate,
   pipeline, pool, plane binding, barriers, upload/download), `shared.rs` the
   launch geometry and the GLSL preamble with no binding type, `deblur.rs` the
-  Deblur kernels, and `map.rs` the table lookup `Levels` and `Posterize` share.
+  Deblur kernels, `map.rs` the table lookup `Levels` and `Posterize` share, and
+  `histogram.rs` the counting kernel both analyzers use.
   see `docs/improvements/15-vulkan-device-path.md`.
 - `src/histogram.rs`: the stride-aware `[u64; 256]` histogram every analyzer
   shares. `from_plane` refuses rows that do not fit instead of reading past them.
@@ -123,6 +136,8 @@ carries a `parity` of `nmanga`, `diverges` or `reference-only` plus the
   determinism and the error messages.
 - `tools/map_hash.py`: `Levels` and `Posterize` byte-exactness, `--device` against
   the host path and `--check` for the recorded host table.
+- `tools/histogram_hash.py`: `PeakStats` and `PeakGrayShades` property parity,
+  `--device` against the host path and `--check` for the recorded host table.
 - `tools/golden.py`: the golden-vector generator. see below.
 - `tools/deblur_hash.py`: the Deblur hash harness. `--check` is the CPU gate and
   `--device` compares `gpu=1` against `gpu=0` on the same cases.
@@ -246,7 +261,8 @@ argument and property tables.
 - `auto_gamma` refuses a black point of 128 or more, because the expression is
   undefined there.
 - `Posterize(method=1)` solves the levels for each frame from plane 0's
-  histogram with Lloyd-Max, and `method=0`, the default, spaces them evenly.
+  histogram with Lloyd-Max, and `method=0`, the default, spaces them evenly. under
+  `gpu=1` the histogram comes from the device and the solve stays on the host.
 - every filter takes `debug:int:opt`. it writes a settings line on the first
   frame it is asked for and a stage timing line per frame, both through
   `core.log`, so a host collects them with `add_log_handler`. `tools/bench.py`

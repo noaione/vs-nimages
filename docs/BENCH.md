@@ -199,9 +199,10 @@ pixel and wins least because its host path only touches one.
 they are a loss: a host clip costs more to upload and download than the 4.6 ms
 and 4.3 ms of lookups they replace. they earn their place after a device
 producer, where the frame is already there and only the final download is left.
-`tools/map_hash.py` compares them on 29 cases: every integer family and depth is
-byte-identical to `gpu=0`, and the float `Levels` and the Lloyd `Posterize` are
-refused by name.
+`tools/map_hash.py` compares them on 33 cases: every integer family and depth is
+byte-identical to `gpu=0`, the float `Levels` is refused by name, and
+`Posterize(method=1)` now solves its levels from a device histogram rather than
+being refused.
 
 one frame per pull through `Deblur(gpu=1)` and the two maps, 12 MP `GRAY8`,
 | method | host maps | device maps | saved |
@@ -227,6 +228,31 @@ that each device filter's output frame is one more frame against the card's
 memory, and the wide-fan-in number is the allocator rather than the kernel: the
 same wall the `Deblur` section above records at 24 MP. one frame at a time,
 which is what a caller with a bounded pipeline has, is the shape to quote.
+
+## the histogram analyzers
+
+`PeakStats(gpu=1)` and `PeakGrayShades(gpu=1)` count plane 0 on the device, read
+the table back, and run the same host analysis on it. 12 MP, flat page, median of
+20 frames, from `tools/histogram_hash.py --bench`:
+
+| piece | `GRAY8` | `GRAY16` | host `GRAY8` | host `GRAY16` |
+| --- | ---: | ---: | ---: | ---: |
+| counting, marginal in a device chain | 0.5 ms | 1.3 to 2.4 ms | 7.7 to 8.0 ms | 19.7 to 23.4 ms |
+| counting, with the frame uploaded and downloaded | 5.3 ms | 12.7 to 13.9 ms | 8.5 ms | 24.7 ms |
+
+a lone analyzer is transfer bound: 12 MB up and 12 or 24 MB back is more than the
+7.7 or 20 ms of counting it removes, so the gain is 1.6x to 1.9x. after a device
+producer it is 10x to 18x cheaper than the host's counting, which is what makes
+`Posterize(method=1)` a device chain member:
+
+| chain, 12 MP | host | device | saved |
+| --- | ---: | ---: | ---: |
+| `PeakGrayShades` into `Posterize(use_props=True, method=1)`, `GRAY8` | 20.0 to 21.1 ms | 6.2 to 6.4 ms | 3.2x |
+| the same, `GRAY16` | 49.1 to 51.8 ms | 14.0 to 14.2 ms | 3.6x |
+
+both analyzers write the same four properties and the same two shade arrays as
+`gpu=0` and hand back the input's pixels: `tools/histogram_hash.py --device`
+compares 35 cases, the flat, four-tone, sparse and noise pages included.
 
 ## what a webp actually hands out
 

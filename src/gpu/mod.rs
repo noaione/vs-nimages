@@ -7,6 +7,7 @@
 //! correct are in `docs/improvements/15-vulkan-device-path.md`.
 
 pub(crate) mod deblur;
+pub(crate) mod histogram;
 pub(super) mod shared;
 
 use std::ffi::CStr;
@@ -84,6 +85,20 @@ impl Device {
     {
         self.pool.record(f)
     }
+
+    /// Waits out one submission whose result the host reads.
+    ///
+    /// A kernel that writes a buffer the host then maps has nothing else to
+    /// wait on: the framework tracks frames, and a counter table is not one.
+    /// Waiting the submission's own value keeps concurrent recordings on other
+    /// threads from serializing behind it.
+    pub(crate) fn wait(&self, value: u64) -> Result<()> {
+        // SAFETY: `value` is a point this pool published, because `record`
+        // returned it.
+        unsafe { self.pool.wait_value(value) }
+            .map(|_| ())
+            .map_err(|error| gpu_error("could not wait for the device result", &error))
+    }
 }
 
 /// Refuses the device path early when the core has no usable device.
@@ -115,13 +130,59 @@ pub(crate) fn barrier_fn(core: &CoreRef) -> Result<BarrierFn> {
 /// that writes a scratch plane and then reads it records this between them. The
 /// two stages are both compute: a separable blur is compute in, compute out.
 pub(crate) fn compute_barrier(exec: &mut ExecContext<'_>, barrier: BarrierFn) {
+    barrier_between(
+        exec,
+        barrier,
+        ffi::VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        ffi::VK_ACCESS_2_SHADER_WRITE_BIT,
+        ffi::VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        ffi::VK_ACCESS_2_SHADER_READ_BIT | ffi::VK_ACCESS_2_SHADER_WRITE_BIT,
+    );
+}
+
+/// Makes a transfer's writes visible to a kernel that reads them.
+///
+/// Zeroing a counter table is a fill, which is a transfer command, so the
+/// dispatch that increments those counters records this between the two.
+pub(crate) fn fill_barrier(exec: &mut ExecContext<'_>, barrier: BarrierFn) {
+    barrier_between(
+        exec,
+        barrier,
+        ffi::VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        ffi::VK_ACCESS_2_TRANSFER_WRITE_BIT,
+        ffi::VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        ffi::VK_ACCESS_2_SHADER_READ_BIT | ffi::VK_ACCESS_2_SHADER_WRITE_BIT,
+    );
+}
+
+/// Makes a kernel's writes visible to a transfer that copies them out.
+pub(crate) fn transfer_barrier(exec: &mut ExecContext<'_>, barrier: BarrierFn) {
+    barrier_between(
+        exec,
+        barrier,
+        ffi::VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        ffi::VK_ACCESS_2_SHADER_WRITE_BIT,
+        ffi::VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        ffi::VK_ACCESS_2_TRANSFER_READ_BIT,
+    );
+}
+
+/// Records one memory barrier between two stages on one command buffer.
+fn barrier_between(
+    exec: &mut ExecContext<'_>,
+    barrier: BarrierFn,
+    src_stage: ffi::VkPipelineStageFlags2,
+    src_access: ffi::VkAccessFlags2,
+    dst_stage: ffi::VkPipelineStageFlags2,
+    dst_access: ffi::VkAccessFlags2,
+) {
     let memory = ffi::VkMemoryBarrier2 {
         sType: ffi::VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
         pNext: ptr::null(),
-        srcStageMask: ffi::VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-        srcAccessMask: ffi::VK_ACCESS_2_SHADER_WRITE_BIT,
-        dstStageMask: ffi::VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-        dstAccessMask: ffi::VK_ACCESS_2_SHADER_READ_BIT,
+        srcStageMask: src_stage,
+        srcAccessMask: src_access,
+        dstStageMask: dst_stage,
+        dstAccessMask: dst_access,
     };
     let dependency = ffi::VkDependencyInfo {
         sType: ffi::VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
