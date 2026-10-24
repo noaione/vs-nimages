@@ -1,11 +1,12 @@
-//! `Deblur` on the device: the unsharp chain, one recording per frame.
+//! `Deblur` on the device: both methods, one recording per frame.
 //!
 //! The CPU path in [`crate::deblur`] is the definition. Every kernel here repeats
 //! its arithmetic in the same order: taps ascending, multiply and add as separate
 //! operations, the Sobel chain left to right, the blend's `min`/`max` over the
-//! same nine samples, and the write rounded ties to even. `method=1` is the first
-//! chain because it has no division in it, so the only operation without an exact
-//! device equivalent is the Sobel's `sqrt`.
+//! same nine samples, and the write rounded ties to even. `method=0` adds the
+//! ratio and the estimate passes, whose division and `sqrt` are the only
+//! operations without an exact guarantee from a driver; `precise` and the hash
+//! gate are what hold the rest of the order.
 
 use std::mem::size_of;
 
@@ -13,8 +14,9 @@ use vapoursynth4_rs::ColorFamily;
 use vapoursynth4_rs::SampleType;
 use vapoursynth4_rs::core::CoreRef;
 use vapoursynth4_rs::frame::{VideoFormat, VideoFrame};
+use vapoursynth4_rs::vulkan::{ExecContext, VulkanError};
 
-use crate::deblur::{Method, Plan};
+use crate::deblur::{Gaussian, Method, Plan};
 use crate::error::{NImagesError, Result};
 
 use super::shared::{self, PREAMBLE, bytes_of, shader};
@@ -24,7 +26,7 @@ use super::{
 
 /// Storage buffers one prepare dispatch binds: the input plane and the `GRAY32`
 /// luma it writes.
-const PREPARE_BINDINGS: u32 = 2;
+const PREPARE_BINDINGS: u32 = 3;
 /// Storage buffers one blur dispatch binds: source, taps, destination, aux.
 const BLUR_BINDINGS: u32 = 4;
 /// Storage buffers one Sobel dispatch binds: the blurred luma and the mask.
@@ -44,17 +46,20 @@ struct PreparePush {
     width: u32,
     height: u32,
     src_stride_bytes: u32,
-    dst_stride_words: u32,
+    luma_stride: u32,
+    estimate_stride: u32,
     scale: f32,
+    pedestal: f32,
+    mode: u32,
 }
 
-const _: () = assert!(size_of::<PreparePush>() == 7 * size_of::<u32>());
+const _: () = assert!(size_of::<PreparePush>() == 10 * size_of::<u32>());
 
 /// What the separable blur is told.
 ///
 /// `mode` picks what the vertical pass leaves behind: `0` the blurred plane,
 /// `1` the unsharp candidate, `2` the deconvolution ratio, `3` the estimate
-/// scaled by the blurred ratio. The last two are unused until `method=0` lands.
+/// scaled by the blurred ratio.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct BlurPush {
@@ -109,9 +114,12 @@ struct BlendPush {
     dst_stride_bytes: u32,
     inverse: f32,
     max_value: f32,
+    strength: f32,
+    pedestal: f32,
+    mode: u32,
 }
 
-const _: () = assert!(size_of::<BlendPush>() == 12 * size_of::<u32>());
+const _: () = assert!(size_of::<BlendPush>() == 15 * size_of::<u32>());
 
 const PREPARE_BODY: &str = r#"
 layout(push_constant) uniform Params {
@@ -120,12 +128,16 @@ layout(push_constant) uniform Params {
     uint width;
     uint height;
     uint src_stride_bytes;
-    uint dst_stride_words;
+    uint luma_stride;
+    uint estimate_stride;
     float scale;
+    float pedestal;
+    uint mode;
 } p;
 
 layout(std430, set = 0, binding = 0) readonly buffer Src { uint words[]; } src;
-layout(std430, set = 0, binding = 1) writeonly buffer Dst { float values[]; } dst;
+layout(std430, set = 0, binding = 1) writeonly buffer Luma { float values[]; } luma;
+layout(std430, set = 0, binding = 2) writeonly buffer Estimate { float values[]; } estimate;
 
 void main() {
     for (uint unit = gl_GlobalInvocationID.x; unit < p.units; unit += p.stride) {
@@ -134,7 +146,11 @@ void main() {
         uint byte = y * p.src_stride_bytes + x;
         uint word = src.words[byte >> 2u];
         uint code = (word >> (8u * (byte & 3u))) & 0xFFu;
-        dst.values[y * p.dst_stride_words + x] = float(code) * p.scale;
+        precise float value = float(code) * p.scale;
+        luma.values[y * p.luma_stride + x] = value;
+        if (p.mode == 1u) {
+            estimate.values[y * p.estimate_stride + x] = value + p.pedestal;
+        }
     }
 }
 "#;
@@ -260,6 +276,9 @@ layout(push_constant) uniform Params {
     uint dst_stride_bytes;
     float inverse;
     float max_value;
+    float strength;
+    float pedestal;
+    uint mode;
 } p;
 
 layout(std430, set = 0, binding = 0) readonly buffer Luma { float values[]; } luma;
@@ -310,8 +329,17 @@ void main() {
             float br = luma.values[below + right];
             precise float low = min(min(min(min(min(min(min(min(tl, tm), tr), ml), mm), mr), bl), bm), br);
             precise float high = max(max(max(max(max(max(max(max(tl, tm), tr), ml), mm), mr), bl), bm), br);
+            // mode 0 reads the unsharp candidate; mode 1 is method=0, where the
+            // candidate is the estimate adjusted towards the luma on the host.
+            precise float candidate_value;
+            if (p.mode == 0u) {
+                candidate_value = candidate.values[y * p.candidate_stride + x];
+            } else {
+                precise float estimate = candidate.values[y * p.candidate_stride + x];
+                candidate_value = mm + p.strength * ((estimate - p.pedestal) - mm);
+            }
             precise float limited = clamp_host(
-                candidate.values[y * p.candidate_stride + x],
+                candidate_value,
                 low - p.overshoot,
                 high + p.overshoot
             );
@@ -345,14 +373,9 @@ pub(crate) struct Engine {
 impl Engine {
     /// Builds the four pipelines and uploads the three tap tables.
     ///
-    /// Only the unsharp method and 8 bit Gray are implemented; both refusals name
-    /// what was asked for, so a caller learns the limit at creation.
+    /// Only 8 bit Gray is implemented; the refusal names what was asked for, so
+    /// a caller learns the limit at creation.
     pub(crate) fn new(core: &CoreRef, plan: Plan, format: &VideoFormat) -> Result<Self> {
-        if plan.method != Method::EdgeSharpen {
-            return Err(NImagesError::new(
-                "Deblur gpu=1: method=0 is not implemented on the device yet",
-            ));
-        }
         if format.color_family != ColorFamily::Gray
             || format.sample_type != SampleType::Integer
             || format.bits_per_sample != 8
@@ -424,13 +447,6 @@ impl Engine {
             .ok_or_else(|| {
                 NImagesError::new("Deblur gpu=1: the core could not allocate a device frame")
             })?;
-
-        let mut luma = gray32_frame(core, width, height, None)?;
-        let mut temp = gray32_frame(core, width, height, None)?;
-        let mut candidate = gray32_frame(core, width, height, None)?;
-        let mut mask_raw = gray32_frame(core, width, height, None)?;
-        let mut mask = gray32_frame(core, width, height, None)?;
-
         let output_stride = output.stride(0);
         if output_stride < 0 || output_stride % 4 != 0 {
             return Err(NImagesError::new(
@@ -438,254 +454,426 @@ impl Engine {
             ));
         }
 
-        let columns = w.div_ceil(BLEND_LANES);
+        let mut luma = gray32_frame(core, width, height, None)?;
+        let mut temp = gray32_frame(core, width, height, None)?;
+        // The Sobel writes `mask`, the mask's own blur writes `mask_raw`, and
+        // the blend reads `mask_raw`. On the deconvolution path `mask_raw` also
+        // holds the ratio until the mask pass overwrites it.
+        let mut mask_raw = gray32_frame(core, width, height, None)?;
+        let mut mask = gray32_frame(core, width, height, None)?;
+
         let launch = shared::Launch::per_pixel(w, h);
-        let blend_launch = shared::Launch::new(columns.saturating_mul(h));
-        let groups = [launch.groups, 1, 1];
-        let blend_groups = [blend_launch.groups, 1, 1];
-
-        let luma_stride = words(&luma)?;
-        let temp_stride = words(&temp)?;
-        let candidate_stride = words(&candidate)?;
-        let mask_strides = words(&mask_raw)?;
-        let mask_blur_stride = words(&mask)?;
-
-        let quantisation = self.plan.quantisation;
-        let scale = quantisation.scale;
-        let prepare = PreparePush {
-            units: launch.units,
-            stride: launch.stride(),
+        let blend_launch = shared::Launch::new(w.div_ceil(BLEND_LANES).saturating_mul(h));
+        let geometry = Geometry {
             width: w,
             height: h,
-            src_stride_bytes: u32::try_from(input.stride(0)).unwrap_or(u32::MAX),
-            dst_stride_words: luma_stride,
-            scale,
+            units: launch.units,
+            stride: launch.stride(),
+            groups: [launch.groups, 1, 1],
+            columns: w.div_ceil(BLEND_LANES),
+            blend_units: blend_launch.units,
+            blend_stride: blend_launch.stride(),
+            blend_groups: [blend_launch.groups, 1, 1],
+            luma_stride: words(&luma)?,
+            temp_stride: words(&temp)?,
+            mask_raw_stride: words(&mask_raw)?,
+            mask_stride: words(&mask)?,
+            output_stride: u32::try_from(output_stride).unwrap_or(u32::MAX),
+        };
+        let quantisation = self.plan.quantisation;
+        let barrier = self.barrier;
+
+        let submit = match self.plan.method {
+            Method::EdgeSharpen => {
+                let mut candidate = gray32_frame(core, width, height, None)?;
+                let candidate_stride = words(&candidate)?;
+                let prepare = PreparePush {
+                    units: geometry.units,
+                    stride: geometry.stride,
+                    width: w,
+                    height: h,
+                    src_stride_bytes: u32::try_from(input.stride(0)).unwrap_or(u32::MAX),
+                    luma_stride: geometry.luma_stride,
+                    estimate_stride: geometry.temp_stride,
+                    scale: quantisation.scale,
+                    pedestal: self.plan.blend.pedestal,
+                    mode: 0,
+                };
+                self.blur.record(|exec| {
+                    self.record_prepare(
+                        exec,
+                        input,
+                        &mut luma,
+                        None,
+                        &temp,
+                        &prepare,
+                        geometry.groups,
+                    )?;
+                    compute_barrier(exec, barrier);
+                    self.record_blur_pair(
+                        exec,
+                        &geometry,
+                        &luma,
+                        geometry.luma_stride,
+                        &self.plan.gaussian,
+                        &self.gaussian,
+                        &mut temp,
+                        &mut candidate,
+                        candidate_stride,
+                        1,
+                        &luma,
+                        geometry.luma_stride,
+                    )?;
+                    compute_barrier(exec, barrier);
+                    self.record_mask(exec, &geometry, &luma, &mut temp, &mut mask_raw, &mut mask)?;
+                    self.record_blend(
+                        exec,
+                        &geometry,
+                        &luma,
+                        &candidate,
+                        candidate_stride,
+                        &mask_raw,
+                        &mut output,
+                        0,
+                    )
+                })
+            }
+            Method::Deconvolution => {
+                let mut estimate_a = gray32_frame(core, width, height, None)?;
+                let mut estimate_b = gray32_frame(core, width, height, None)?;
+                let a_stride = words(&estimate_a)?;
+                let b_stride = words(&estimate_b)?;
+                let iterations = self.plan.iterations;
+                let prepare = PreparePush {
+                    units: geometry.units,
+                    stride: geometry.stride,
+                    width: w,
+                    height: h,
+                    src_stride_bytes: u32::try_from(input.stride(0)).unwrap_or(u32::MAX),
+                    luma_stride: geometry.luma_stride,
+                    estimate_stride: a_stride,
+                    scale: quantisation.scale,
+                    pedestal: self.plan.blend.pedestal,
+                    mode: 1,
+                };
+                self.blur.record(|exec| {
+                    self.record_prepare(
+                        exec,
+                        input,
+                        &mut luma,
+                        Some(&mut estimate_a),
+                        &temp,
+                        &prepare,
+                        geometry.groups,
+                    )?;
+                    compute_barrier(exec, barrier);
+
+                    // Each iteration turns the estimate into the ratio, then
+                    // scales the estimate by the ratio's blur. The second
+                    // estimate plane breaks the read/write alias one plane would
+                    // need.
+                    let mut current_is_a = true;
+                    for _ in 0..iterations {
+                        let (old, old_stride, new, new_stride) = if current_is_a {
+                            (&estimate_a, a_stride, &mut estimate_b, b_stride)
+                        } else {
+                            (&estimate_b, b_stride, &mut estimate_a, a_stride)
+                        };
+                        self.record_blur_pair(
+                            exec,
+                            &geometry,
+                            old,
+                            old_stride,
+                            &self.plan.gaussian,
+                            &self.gaussian,
+                            &mut temp,
+                            &mut mask_raw,
+                            geometry.mask_raw_stride,
+                            2,
+                            &luma,
+                            geometry.luma_stride,
+                        )?;
+                        compute_barrier(exec, barrier);
+                        self.record_blur_pair(
+                            exec,
+                            &geometry,
+                            &mask_raw,
+                            geometry.mask_raw_stride,
+                            &self.plan.gaussian,
+                            &self.gaussian,
+                            &mut temp,
+                            new,
+                            new_stride,
+                            3,
+                            old,
+                            old_stride,
+                        )?;
+                        compute_barrier(exec, barrier);
+                        current_is_a = !current_is_a;
+                    }
+
+                    let (candidate, candidate_stride) = if current_is_a {
+                        (&estimate_a, a_stride)
+                    } else {
+                        (&estimate_b, b_stride)
+                    };
+                    self.record_mask(exec, &geometry, &luma, &mut temp, &mut mask_raw, &mut mask)?;
+                    self.record_blend(
+                        exec,
+                        &geometry,
+                        &luma,
+                        candidate,
+                        candidate_stride,
+                        &mask_raw,
+                        &mut output,
+                        1,
+                    )
+                })
+            }
         };
 
-        let blur_push = |radius: usize,
-                         taps: usize,
-                         mode: u32,
-                         direction: u32,
-                         src_stride: u32,
-                         dst_stride: u32,
-                         aux_stride: u32| BlurPush {
-            units: launch.units,
-            stride: launch.stride(),
-            width: w,
-            height: h,
-            radius: radius as u32,
-            taps: taps as u32,
-            mode,
-            direction,
+        submit.map_err(|error| gpu_error("could not record the Deblur device passes", &error))?;
+        Ok(output)
+    }
+
+    /// Widens the input's luma into code values, and seeds the estimate on the
+    /// deconvolution path.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the prepare binds the input, the luma, the optional estimate and the block"
+    )]
+    fn record_prepare(
+        &self,
+        exec: &mut ExecContext<'_>,
+        input: &VideoFrame,
+        luma: &mut VideoFrame,
+        estimate: Option<&mut VideoFrame>,
+        fallback: &VideoFrame,
+        push: &PreparePush,
+        groups: [u32; 3],
+    ) -> std::result::Result<(), VulkanError> {
+        let src = exec.read_plane(input, 0)?;
+        let dst = exec.write_plane(luma, 0)?;
+        // The third binding must exist even when nothing writes it, and it must
+        // not be the frame this dispatch writes.
+        let seed = match estimate {
+            Some(frame) => exec.write_plane(frame, 0)?,
+            None => exec.read_plane(fallback, 0)?,
+        };
+        exec.dispatch(
+            self.prepare.pipeline(),
+            &[src, dst, seed],
+            bytes_of(push),
+            groups,
+        )
+    }
+
+    /// Records one separable gaussian: horizontal into the scratch plane, then
+    /// the vertical pass with `mode`'s consumer fused into its output.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a separable pass names its source, table, scratch, destination and aux"
+    )]
+    fn record_blur_pair(
+        &self,
+        exec: &mut ExecContext<'_>,
+        geometry: &Geometry,
+        source: &VideoFrame,
+        source_stride: u32,
+        kernel: &Gaussian,
+        taps: &VideoFrame,
+        temp: &mut VideoFrame,
+        destination: &mut VideoFrame,
+        destination_stride: u32,
+        mode: u32,
+        aux: &VideoFrame,
+        aux_stride: u32,
+    ) -> std::result::Result<(), VulkanError> {
+        let horizontal = BlurPush {
+            units: geometry.units,
+            stride: geometry.stride,
+            width: geometry.width,
+            height: geometry.height,
+            radius: kernel.horizontal_radius() as u32,
+            taps: kernel.count() as u32,
+            mode: 0,
+            direction: 0,
             strength: self.plan.strength,
             pedestal: self.plan.blend.pedestal,
             floor_value: self.plan.blend.division_floor,
-            src_stride,
-            dst_stride,
+            src_stride: source_stride,
+            dst_stride: geometry.temp_stride,
             aux_stride,
         };
+        let (src, tap, dst, aux_plane) = (
+            exec.read_plane(source, 0)?,
+            exec.read_plane(taps, 0)?,
+            exec.write_plane(temp, 0)?,
+            exec.read_plane(aux, 0)?,
+        );
+        exec.dispatch(
+            self.blur.pipeline(),
+            &[src, tap, dst, aux_plane],
+            bytes_of(&horizontal),
+            geometry.groups,
+        )?;
+        compute_barrier(exec, self.barrier);
 
-        let gaussian = &self.gaussian;
-        let prefilter = &self.prefilter;
-        let mask_taps = &self.mask;
-        let barrier = self.barrier;
-        let plan = self.plan;
-
-        let submit = self.blur.record(|exec| {
-            // 1. widen the luma plane into code values.
-            let src = exec.read_plane(input, 0)?;
-            let dst = exec.write_plane(&mut luma, 0)?;
-            exec.dispatch(
-                self.prepare.pipeline(),
-                &[src, dst],
-                bytes_of(&prepare),
-                groups,
-            )?;
-            compute_barrier(exec, barrier);
-
-            // 2. the candidate's blur: horizontal, then vertical with the
-            //    unsharp mix folded into the same pass.
-            let push = blur_push(
-                plan.gaussian.horizontal_radius(),
-                plan.gaussian.count(),
-                0,
-                0,
-                luma_stride,
-                temp_stride,
-                luma_stride,
-            );
-            let src = exec.read_plane(&luma, 0)?;
-            let taps = exec.read_plane(gaussian, 0)?;
-            let dst = exec.write_plane(&mut temp, 0)?;
-            let aux = exec.read_plane(&luma, 0)?;
-            exec.dispatch(
-                self.blur.pipeline(),
-                &[src, taps, dst, aux],
-                bytes_of(&push),
-                groups,
-            )?;
-            compute_barrier(exec, barrier);
-
-            let push = blur_push(
-                plan.gaussian.vertical_radius(),
-                plan.gaussian.count(),
-                1,
-                1,
-                temp_stride,
-                candidate_stride,
-                luma_stride,
-            );
-            let src = exec.read_plane(&temp, 0)?;
-            let taps = exec.read_plane(gaussian, 0)?;
-            let dst = exec.write_plane(&mut candidate, 0)?;
-            let aux = exec.read_plane(&luma, 0)?;
-            exec.dispatch(
-                self.blur.pipeline(),
-                &[src, taps, dst, aux],
-                bytes_of(&push),
-                groups,
-            )?;
-            compute_barrier(exec, barrier);
-
-            // 3. the edge detector's prefilter, into `mask_raw`.
-            let push = blur_push(
-                plan.prefilter.horizontal_radius(),
-                plan.prefilter.count(),
-                0,
-                0,
-                luma_stride,
-                temp_stride,
-                luma_stride,
-            );
-            let src = exec.read_plane(&luma, 0)?;
-            let taps = exec.read_plane(prefilter, 0)?;
-            let dst = exec.write_plane(&mut temp, 0)?;
-            let aux = exec.read_plane(&luma, 0)?;
-            exec.dispatch(
-                self.blur.pipeline(),
-                &[src, taps, dst, aux],
-                bytes_of(&push),
-                groups,
-            )?;
-            compute_barrier(exec, barrier);
-
-            let push = blur_push(
-                plan.prefilter.vertical_radius(),
-                plan.prefilter.count(),
-                0,
-                1,
-                temp_stride,
-                mask_strides,
-                luma_stride,
-            );
-            let src = exec.read_plane(&temp, 0)?;
-            let taps = exec.read_plane(prefilter, 0)?;
-            let dst = exec.write_plane(&mut mask_raw, 0)?;
-            let aux = exec.read_plane(&luma, 0)?;
-            exec.dispatch(
-                self.blur.pipeline(),
-                &[src, taps, dst, aux],
-                bytes_of(&push),
-                groups,
-            )?;
-            compute_barrier(exec, barrier);
-
-            // 4. the Sobel and its smoothstep, then the mask's own blur.
-            let sobel_push = SobelPush {
-                units: launch.units,
-                stride: launch.stride(),
-                width: w,
-                height: h,
-                threshold: plan.mask.threshold,
-                ramp: plan.mask.ramp,
-                span_inverse: 1.0 / plan.mask.sobel_span,
-                src_stride: mask_strides,
-                dst_stride: mask_blur_stride,
-            };
-            let src = exec.read_plane(&mask_raw, 0)?;
-            let dst = exec.write_plane(&mut mask, 0)?;
-            exec.dispatch(
-                self.sobel.pipeline(),
-                &[src, dst],
-                bytes_of(&sobel_push),
-                groups,
-            )?;
-            compute_barrier(exec, barrier);
-
-            let push = blur_push(
-                plan.mask_blur.horizontal_radius(),
-                plan.mask_blur.count(),
-                0,
-                0,
-                mask_blur_stride,
-                temp_stride,
-                luma_stride,
-            );
-            let src = exec.read_plane(&mask, 0)?;
-            let taps = exec.read_plane(mask_taps, 0)?;
-            let dst = exec.write_plane(&mut temp, 0)?;
-            let aux = exec.read_plane(&luma, 0)?;
-            exec.dispatch(
-                self.blur.pipeline(),
-                &[src, taps, dst, aux],
-                bytes_of(&push),
-                groups,
-            )?;
-            compute_barrier(exec, barrier);
-
-            let push = blur_push(
-                plan.mask_blur.vertical_radius(),
-                plan.mask_blur.count(),
-                0,
-                1,
-                temp_stride,
-                mask_blur_stride,
-                luma_stride,
-            );
-            let src = exec.read_plane(&temp, 0)?;
-            let taps = exec.read_plane(mask_taps, 0)?;
-            let dst = exec.write_plane(&mut mask, 0)?;
-            let aux = exec.read_plane(&luma, 0)?;
-            exec.dispatch(
-                self.blur.pipeline(),
-                &[src, taps, dst, aux],
-                bytes_of(&push),
-                groups,
-            )?;
-            compute_barrier(exec, barrier);
-
-            // 5. limit the candidate to the local extremes and blend it back.
-            let blend_push = BlendPush {
-                units: blend_launch.units,
-                stride: blend_launch.stride(),
-                column_groups: columns,
-                width: w,
-                height: h,
-                overshoot: plan.blend.overshoot,
-                luma_stride,
-                candidate_stride,
-                mask_stride: mask_blur_stride,
-                dst_stride_bytes: u32::try_from(output_stride).unwrap_or(u32::MAX),
-                inverse: quantisation.inverse as f32,
-                max_value: quantisation.max_value as f32,
-            };
-            let src = exec.read_plane(&luma, 0)?;
-            let candidate_plane = exec.read_plane(&candidate, 0)?;
-            let mask_plane = exec.read_plane(&mask, 0)?;
-            let dst = exec.write_plane(&mut output, 0)?;
-            exec.dispatch(
-                self.blend.pipeline(),
-                &[src, candidate_plane, mask_plane, dst],
-                bytes_of(&blend_push),
-                blend_groups,
-            )?;
-            Ok(())
-        });
-
-        submit.map_err(|error| gpu_error("could not record the Deblur device passes", &error))?;
-
-        Ok(output)
+        let vertical = BlurPush {
+            mode,
+            direction: 1,
+            radius: kernel.vertical_radius() as u32,
+            src_stride: geometry.temp_stride,
+            dst_stride: destination_stride,
+            ..horizontal
+        };
+        let (src, tap, dst, aux_plane) = (
+            exec.read_plane(temp, 0)?,
+            exec.read_plane(taps, 0)?,
+            exec.write_plane(destination, 0)?,
+            exec.read_plane(aux, 0)?,
+        );
+        exec.dispatch(
+            self.blur.pipeline(),
+            &[src, tap, dst, aux_plane],
+            bytes_of(&vertical),
+            geometry.groups,
+        )
     }
+
+    /// The edge mask: the prefilter, the Sobel and smoothstep, then the mask's
+    /// own blur.
+    fn record_mask(
+        &self,
+        exec: &mut ExecContext<'_>,
+        geometry: &Geometry,
+        luma: &VideoFrame,
+        temp: &mut VideoFrame,
+        mask_raw: &mut VideoFrame,
+        mask: &mut VideoFrame,
+    ) -> std::result::Result<(), VulkanError> {
+        self.record_blur_pair(
+            exec,
+            geometry,
+            luma,
+            geometry.luma_stride,
+            &self.plan.prefilter,
+            &self.prefilter,
+            temp,
+            mask_raw,
+            geometry.mask_raw_stride,
+            0,
+            luma,
+            geometry.luma_stride,
+        )?;
+        compute_barrier(exec, self.barrier);
+
+        let push = SobelPush {
+            units: geometry.units,
+            stride: geometry.stride,
+            width: geometry.width,
+            height: geometry.height,
+            threshold: self.plan.mask.threshold,
+            ramp: self.plan.mask.ramp,
+            span_inverse: 1.0 / self.plan.mask.sobel_span,
+            src_stride: geometry.mask_raw_stride,
+            dst_stride: geometry.mask_stride,
+        };
+        let src = exec.read_plane(mask_raw, 0)?;
+        let dst = exec.write_plane(mask, 0)?;
+        exec.dispatch(
+            self.sobel.pipeline(),
+            &[src, dst],
+            bytes_of(&push),
+            geometry.groups,
+        )?;
+        compute_barrier(exec, self.barrier);
+
+        self.record_blur_pair(
+            exec,
+            geometry,
+            mask,
+            geometry.mask_stride,
+            &self.plan.mask_blur,
+            &self.mask,
+            temp,
+            mask_raw,
+            geometry.mask_raw_stride,
+            0,
+            luma,
+            geometry.luma_stride,
+        )?;
+        // The blend reads what this last vertical wrote, so the mask's output
+        // has to be visible before it records.
+        compute_barrier(exec, self.barrier);
+        Ok(())
+    }
+
+    /// Limits the candidate to the local extremes and blends it back.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the blend binds five frames and the candidate's row stride"
+    )]
+    fn record_blend(
+        &self,
+        exec: &mut ExecContext<'_>,
+        geometry: &Geometry,
+        luma: &VideoFrame,
+        candidate: &VideoFrame,
+        candidate_stride: u32,
+        mask: &VideoFrame,
+        output: &mut VideoFrame,
+        mode: u32,
+    ) -> std::result::Result<(), VulkanError> {
+        let push = BlendPush {
+            units: geometry.blend_units,
+            stride: geometry.blend_stride,
+            column_groups: geometry.columns,
+            width: geometry.width,
+            height: geometry.height,
+            overshoot: self.plan.blend.overshoot,
+            luma_stride: geometry.luma_stride,
+            candidate_stride,
+            mask_stride: geometry.mask_raw_stride,
+            dst_stride_bytes: geometry.output_stride,
+            inverse: self.plan.quantisation.inverse as f32,
+            max_value: self.plan.quantisation.max_value as f32,
+            strength: self.plan.strength,
+            pedestal: self.plan.blend.pedestal,
+            mode,
+        };
+        let src = exec.read_plane(luma, 0)?;
+        let candidate_plane = exec.read_plane(candidate, 0)?;
+        let mask_plane = exec.read_plane(mask, 0)?;
+        let dst = exec.write_plane(output, 0)?;
+        exec.dispatch(
+            self.blend.pipeline(),
+            &[src, candidate_plane, mask_plane, dst],
+            bytes_of(&push),
+            geometry.blend_groups,
+        )
+    }
+}
+
+/// The frame's own geometry, resolved once and handed to every pass.
+struct Geometry {
+    width: u32,
+    height: u32,
+    /// Work units and the grid a per-pixel pass runs them with.
+    units: u32,
+    stride: u32,
+    groups: [u32; 3],
+    /// Columns per blend invocation, and the blend's own grid.
+    columns: u32,
+    blend_units: u32,
+    blend_stride: u32,
+    blend_groups: [u32; 3],
+    /// Row strides, in `f32` words except the output's bytes.
+    luma_stride: u32,
+    temp_stride: u32,
+    mask_raw_stride: u32,
+    mask_stride: u32,
+    output_stride: u32,
 }
 
 /// A row stride in `f32` words, for a `GRAY32` plane.
