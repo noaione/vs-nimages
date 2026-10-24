@@ -23,7 +23,9 @@ use vapoursynth4_rs::{core::CoreRef, ffi, key};
 
 use crate::error::{NImagesError, Result};
 use crate::gpu;
+use crate::gpu::histogram::Engine;
 use crate::gpu::map::Map;
+use crate::histogram::Histogram;
 use crate::posterize::{
     MAX_INTEGER_SAMPLE_BITS, MIN_BITS, PosterizeError, lloyd_max_levels, posterize_lut,
     posterize_lut_from_levels_u8, posterize_lut_from_levels_u16, posterize_lut_u16,
@@ -90,6 +92,8 @@ pub struct Posterize {
     gpu: bool,
     /// The device kernel, built once when `gpu` is set.
     engine: Option<Map>,
+    /// The device counter table `method=1` solves its levels from.
+    counters: Option<Engine>,
     /// The table uploaded at creation, and its length. Unset when the bits come
     /// from the frame's shades, which uploads one per frame instead.
     table: Option<(VideoFrame, u32)>,
@@ -185,16 +189,8 @@ impl Filter for Posterize {
 
         let debug = read_int(&input, key!(c"debug"))?.unwrap_or(0) != 0;
         let gpu = read_int(&input, key!(c"gpu"))?.unwrap_or(0) != 0;
-        let (source, engine, table) = if gpu {
+        let (source, engine, table, counters) = if gpu {
             gpu::require_device(&core)?;
-            // The level solve reads plane 0's histogram, which is host work, so
-            // the Lloyd method keeps the frame on the host side of the boundary.
-            if method == Method::Lloyd {
-                return Err(NImagesError::new(
-                    "Posterize gpu=1: method=1 solves its levels from the frame's histogram, \
-                     which is host work; run it with gpu=0",
-                ));
-            }
             if !vapoursynth4_rs::utils::is_constant_video_format(&info) {
                 return Err(NImagesError::new(
                     "Posterize gpu=1: the clip's format is not constant",
@@ -209,14 +205,21 @@ impl Filter for Posterize {
                 Some(resolved) => device_table(&core, &resolved.table)?,
                 None => None,
             };
-            (source, Some(Map::new(&core)?), table)
+            // `method=1` solves its levels from plane 0's histogram, so it
+            // needs the counter table as well as the map.
+            let counters = if method == Method::Lloyd {
+                Some(Engine::new(&core)?)
+            } else {
+                None
+            };
+            (source, Some(Map::new(&core)?), table, counters)
         } else {
             let source = if source.residency() == ffi::VSNodeResidency::GPU {
                 gpu::download(&core, &source)?
             } else {
                 source
             };
-            (source, None, None)
+            (source, None, None, None)
         };
 
         let dependency = source.as_ptr();
@@ -234,6 +237,7 @@ impl Filter for Posterize {
                 gpu,
                 engine,
                 table,
+                counters,
                 reported: AtomicBool::new(false),
             },
             dependency,
@@ -299,7 +303,12 @@ impl Filter for Posterize {
                         }
                         None => Cow::Owned(resolve_from_bits(bits, sample_depth)?),
                     },
-                    Method::Lloyd => Cow::Owned(resolve_lloyd(&input, bits, sample_depth)?),
+                    Method::Lloyd => Cow::Owned(match &self.counters {
+                        Some(counters) => {
+                            resolve_lloyd_from(counters.count(&core, &input)?, bits, sample_depth)?
+                        }
+                        None => resolve_lloyd(&input, bits, sample_depth)?,
+                    }),
                 };
 
                 let mark = Instant::now();
@@ -368,7 +377,14 @@ fn shade_bits(frame: &VideoFrame, sample_depth: u8) -> Result<u8> {
 /// the evenly spaced table does, so an RGB caller that wants gray behaviour
 /// converts first.
 fn resolve_lloyd(frame: &VideoFrame, bits: u8, sample_depth: u8) -> Result<ResolvedBits> {
-    let histogram = plane_histogram(frame)?;
+    resolve_lloyd_from(plane_histogram(frame)?, bits, sample_depth)
+}
+
+/// Solves one frame's levels from a histogram and builds its lookup table.
+///
+/// The counters are the same numbers whichever engine built them, so the host
+/// and device paths reach the same levels from the same table.
+fn resolve_lloyd_from(histogram: Histogram, bits: u8, sample_depth: u8) -> Result<ResolvedBits> {
     let colors = 1usize << bits;
     let levels = lloyd_max_levels(histogram.counts(), colors).map_err(table_error)?;
 

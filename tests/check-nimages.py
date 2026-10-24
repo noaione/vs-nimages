@@ -37,7 +37,7 @@ NAMESPACE = "nimages"
 FUNCTIONS = ("Deblur", "Levels", "PeakGrayShades", "PeakStats", "Posterize")
 # The filters with a `gpu` argument declare their output as `all`, which the
 # instance answers: a `gpu=0` run still hands back a host frame.
-DEVICE_FILTERS = ("Deblur", "Levels", "Posterize")
+DEVICE_FILTERS = ("Deblur", "Levels", "PeakGrayShades", "PeakStats", "Posterize")
 CLIP_ALL = "clip:vnode:all;"
 
 # Histogram cases above this many pixels are left to the Rust tests; building a
@@ -208,8 +208,8 @@ def check_registration() -> None:
 
     for name in FUNCTIONS:
         exported = getattr(core.nimages, name)
-        # Three filters answer `all` from their own `gpu` argument, so a `gpu=0`
-        # run still returns a host frame; the analyzers have no device path.
+        # Every filter answers `all` from its own `gpu` argument, so a `gpu=0`
+        # run still returns a host frame and a `gpu=1` run returns a device one.
         same(
             exported.return_signature,
             CLIP_ALL if name in DEVICE_FILTERS else "clip:vnode;",

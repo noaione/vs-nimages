@@ -10,6 +10,8 @@ use vapoursynth4_rs::node::{Filter, Node, VideoNode};
 use vapoursynth4_rs::{core::CoreRef, ffi, key};
 
 use crate::error::{NImagesError, Result};
+use crate::gpu;
+use crate::gpu::histogram::Engine;
 use crate::gray_shades::analyze_gray_shades;
 
 use super::{
@@ -29,6 +31,10 @@ pub struct PeakGrayShades {
     source: VideoNode,
     threshold: f64,
     debug: bool,
+    /// Whether this instance counts on the device.
+    gpu: bool,
+    /// The device kernel, built once when `gpu` is set.
+    engine: Option<Engine>,
     /// Set once the settings line has been written for this instance.
     reported: AtomicBool,
 }
@@ -39,8 +45,14 @@ impl Filter for PeakGrayShades {
     type FilterData = ();
 
     const NAME: &'static CStr = c"PeakGrayShades";
-    const ARGS: &'static CStr = c"clip:vnode;threshold:float:opt;debug:int:opt;";
-    const RETURN_TYPE: &'static CStr = c"clip:vnode;";
+    const ARGS: &'static CStr = c"clip:vnode:all;threshold:float:opt;gpu:int:opt;debug:int:opt;";
+    const RETURN_TYPE: &'static CStr = c"clip:vnode:all;";
+
+    /// `all` is answered by the instance: a `gpu=1` run's frame is device
+    /// memory and a `gpu=0` run's is not.
+    fn gpu_output(&self) -> bool {
+        self.gpu
+    }
 
     fn create(
         input: MapRef,
@@ -59,6 +71,29 @@ impl Filter for PeakGrayShades {
         }
         let debug = read_int(&input, key!(c"debug"))?.unwrap_or(0) != 0;
 
+        let gpu = read_int(&input, key!(c"gpu"))?.unwrap_or(0) != 0;
+        let (source, engine) = if gpu {
+            gpu::require_device(&core)?;
+            if !vapoursynth4_rs::utils::is_constant_video_format(&info) {
+                return Err(NImagesError::new(
+                    "PeakGrayShades gpu=1: the clip's format is not constant",
+                ));
+            }
+            let source = if source.residency() == ffi::VSNodeResidency::GPU {
+                source
+            } else {
+                gpu::upload(&core, &source)?
+            };
+            (source, Some(Engine::new(&core)?))
+        } else {
+            let source = if source.residency() == ffi::VSNodeResidency::GPU {
+                gpu::download(&core, &source)?
+            } else {
+                source
+            };
+            (source, None)
+        };
+
         let dependency = source.as_ptr();
         add_filter(
             &mut core,
@@ -69,6 +104,8 @@ impl Filter for PeakGrayShades {
                 source,
                 threshold,
                 debug,
+                gpu,
+                engine,
                 reported: AtomicBool::new(false),
             },
             dependency,
@@ -107,7 +144,10 @@ impl Filter for PeakGrayShades {
                 );
 
                 let mark = Instant::now();
-                let histogram = plane_histogram(&input)?;
+                let histogram = match &self.engine {
+                    Some(engine) => engine.count(&core, &input)?,
+                    None => plane_histogram(&input)?,
+                };
                 trace.mark("histogram", mark);
 
                 let mark = Instant::now();

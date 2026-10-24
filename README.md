@@ -124,6 +124,7 @@ with stats.get_frame(n) as frame:
 | `peak_percentage` | `0.25` | minimum share of the frame a peak covers, in percent |
 | `peak_prominence` | none | minimum prominence of a peak, in percent; unset disables it |
 | `skip_white` | `false` | skip the white analysis and report the sample maximum |
+| `gpu` | `0` | `1` counts the histogram on the Vulkan device, which needs VapourSynth R80 and a Vulkan 1.4 device |
 | `debug` | `false` | log the resolved arguments and each frame's stage timings |
 
 | property | type | meaning |
@@ -132,6 +133,13 @@ with stats.get_frame(n) as frame:
 | `NImagesWhiteLevel` | int | selected white level, in source sample units |
 | `NImagesBlackPeakFound` | int bool | whether a black peak was found rather than defaulting |
 | `NImagesWhitePeakFound` | int bool | whether a white peak was found rather than defaulting |
+
+`gpu=1` counts plane 0 on the Vulkan device, reads 1 KB back and runs the same
+analysis on it, so the properties and the pixels are identical to `gpu=0`. it
+pays after a device producer, where counting costs 0.5 ms instead of 7.7 ms at
+12 MP. a lone analyzer is transfer bound because the frame has to cross the bus;
+[19](docs/improvements/19-vulkan-histogram-analyzers.md#outcome-so-far) has both
+numbers.
 
 both percentages are percentages, not fractions: `0.25` means 0.25 percent of all
 pixels, and the required count is `ceil(total_pixels * percentage / 100)`.
@@ -158,6 +166,7 @@ with shades.get_frame(n) as frame:
 | --- | --- | --- |
 | `threshold` | `0.01` | minimum share of the frame a shade needs, in percent |
 | `debug` | `false` | log the resolved arguments and each frame's stage timings |
+| `gpu` | `0` | `1` counts the histogram on the Vulkan device, which needs VapourSynth R80 and a Vulkan 1.4 device |
 
 | property | type | meaning |
 | --- | --- | --- |
@@ -168,6 +177,10 @@ both arrays are always present and always the same length, including when that
 length is zero. a shade is included only when its count is strictly greater than
 `ceil(total_pixels * threshold / 100)`, and equal shares keep ascending shade
 order.
+
+`gpu=1` counts on the device and writes the same two arrays as `gpu=0`, so
+`Posterize(use_props=True, method=1, gpu=1)` can read them and solve its levels
+from the device histogram without the frame returning to the host.
 
 ### `Levels`
 
@@ -251,7 +264,7 @@ first, as in [use](#use) above.
 | `use_props` | `false` | read `NImagesGrayShades` from each input frame instead, this is the same as auto bits detection. |
 | `debug` | `false` | log the resolved depth and each frame's stage timings |
 | `method` | `0` | `0` spaces the levels evenly, `1` solves them from the frame's histogram with Lloyd-Max |
-| `gpu` | `0` | `1` runs the even table on the Vulkan device; `method=1` is refused there |
+| `gpu` | `0` | `1` runs the table on the Vulkan device, including the `method=1` solve |
 
 `bits` equal to the input sample depth is the identity. the mapping uses the
 full native sample maximum `Q`:
@@ -275,11 +288,12 @@ and the solved table then applies to every plane. the levels are solved per
 frame, so a clip whose frames differ gets a level set each, which a page-per-frame
 caller wants and a moving clip would show as flicker.
 
-`gpu=1` maps the even table on the device, byte-identical to `gpu=0`, and like
-`Levels` it pays only inside a device chain. `method=1` is refused with a
-message, because the Lloyd solve reads the frame's histogram, which is host
-work; run that method with `gpu=0`. `use_props=True` works under `gpu=1` and
-rebuilds the table per frame.
+`gpu=1` maps the table on the device, byte-identical to `gpu=0`, and like
+`Levels` it pays only inside a device chain. `method=1` works there too: plane
+0's histogram is counted on the device, read back, and solved with the same host
+code, which takes `PeakGrayShades` into `Posterize(method=1)` from 20.0 ms to
+6.2 ms at 12 MP `GRAY8` and from 49.1 ms to 14.0 ms at `GRAY16`.
+`use_props=True` works under `gpu=1` and rebuilds the table per frame.
 
 **note**: when `bits` equals the sample depth, the frame is returned unchanged.
 

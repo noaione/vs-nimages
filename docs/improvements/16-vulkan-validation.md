@@ -135,6 +135,7 @@ and the other tomorrow, and a shader A/B is two processes because
 | --- | --- |
 | device section in the validator | `tests/check-nimages.py` |
 | Deblur hash harness | `tools/deblur_hash.py` (new), promoted from `.tmpbuild/` |
+| analyzer property harness | `tools/histogram_hash.py` (new), with `--device` and `--bench` |
 | device bench | `tools/bench.py --device`, plus a `gpu` column in `docs/BENCH.md` |
 | results | a new section in `docs/BENCH.md`, not a rewrite of the existing block |
 | launch geometry, index arithmetic, tap order | `#[cfg(test)]` tests in `src/gpu/shared.rs`, which names no binding type |

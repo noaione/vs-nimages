@@ -24,11 +24,12 @@ outcomes.
 | [16 validating a device kernel](16-vulkan-validation.md) | in part: the Deblur hash harness and its `--device` mode landed, the fan-in protocol was measured |
 | [17 Deblur on the device](17-vulkan-deblur.md) | in progress: both methods on Gray, RGB and YUV, 8-16 bit and 32 bit float, landed (8 bit exact, deeper within 1 LSB, float within 2 ULP), 7.7x to 10.4x latency and 5.6x to 7.8x aggregate at 12 MP; the plane count brought the 24 MP envelope to five frames in flight, and tiling is what would remove it |
 | [18 pointwise maps](18-vulkan-pointwise-maps.md) | landed: `Levels` and `Posterize` byte-identical on every integer format, 29 cases; 25% to 42% of a device chain, kept |
-| [19 histogram analyzers](19-vulkan-histogram-analyzers.md) | proposed | `PeakStats`/`PeakGrayShades` on the device, and `Posterize(method=1)` after them |
+| [19 histogram analyzers](19-vulkan-histogram-analyzers.md) | landed: `PeakStats` and `PeakGrayShades` count on the device and write the same properties, 35 cases; `Posterize(method=1)` now runs there too, 3.2x to 3.6x on the chain; `u16` moved | `PeakStats`/`PeakGrayShades` on the device, and `Posterize(method=1)` after them |
 
 the dependency on the Vulkan-capable binding is in the tree and raises the
-floor to VapourSynth R80. `Deblur`'s device path is the only one landed; the
-other four plans are still on paper.
+floor to VapourSynth R80. all five device plans are landed;
+[17](17-vulkan-deblur.md#aggregate) is the one whose envelope is still bounded by
+the card's memory rather than by the kernel.
 
 ## candidate status
 

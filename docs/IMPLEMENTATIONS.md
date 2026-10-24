@@ -201,6 +201,12 @@ For Gray formats above 8 bits, peak property values use the frame's native code
 units. `upper_limit` remains in 8-bit-equivalent units and scales to the sample
 maximum.
 
+`gpu=1` counts plane 0 on the Vulkan device, reads the table back, and runs the
+same peak search, so the properties are identical to `gpu=0`. It requires
+VapourSynth R80, a Vulkan 1.4 device and a constant format, and it is worth it
+after a device producer: counting is 10x to 18x cheaper there. See
+[19](improvements/19-vulkan-histogram-analyzers.md#outcome-so-far).
+
 ### 5.2 `PeakGrayShades`
 
 ```python
@@ -230,6 +236,10 @@ with shades.get_frame(n) as frame:
     shade_values = list(frame.props.get("NImagesGrayShades", []))
     percentages = list(frame.props.get("NImagesGrayShadePercentages", []))
 ```
+
+`gpu=1` counts on the device and writes the same two arrays as `gpu=0`, so a
+downstream `Posterize(use_props=True, method=1, gpu=1)` reads them unchanged and
+solves its levels from the same device histogram.
 
 ### 5.3 `Levels`
 
@@ -297,9 +307,11 @@ every plane; an RGB caller that wants the grayscale behaviour converts first. Th
 levels are recomputed for every frame, so a clip whose frames differ gets a level
 set each.
 
-`gpu=1` maps the even table on the Vulkan device, byte-identical to `gpu=0`.
-`method=1` is refused there, because the Lloyd solve reads the frame's
-histogram on the host. `use_props=True` works under `gpu=1` and rebuilds the
+`gpu=1` maps the table on the Vulkan device, byte-identical to `gpu=0`.
+`method=1` works there too: plane 0's histogram is counted on the device, read
+back, and solved with the same host code, which takes `PeakGrayShades` into
+`Posterize(method=1)` from 20.0 ms to 6.2 ms at 12 MP `GRAY8` and from 49.1 ms
+to 14.0 ms at `GRAY16`. `use_props=True` works under `gpu=1` and rebuilds the
 table per frame.
 
 Peak analysis and levels deliberately remain separate. Users should compose
