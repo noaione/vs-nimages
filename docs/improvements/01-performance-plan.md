@@ -22,7 +22,7 @@ outcomes.
 | --- | --- | --- |
 | [15 the device path](15-vulkan-device-path.md) | proposed, research complete | the binding surface, the gates, the bus budget, the per-filter verdict |
 | [16 validating a device kernel](16-vulkan-validation.md) | proposed | the device gate in `tests/check-nimages.py`, the Deblur hash harness, the bench protocol |
-| [17 Deblur on the device](17-vulkan-deblur.md) | in progress: both methods on 8 bit Gray landed and byte-identical, 9.6x and 12.3x at 12 MP; the wider formats pending |
+| [17 Deblur on the device](17-vulkan-deblur.md) | in progress: both methods on Gray 8-16 bit and 32 bit float landed (8 bit exact, deeper within 1 LSB, float within 2 ULP), 10.5x and 11.5x at 12 MP; RGB/YUV pending |
 | [18 pointwise maps](18-vulkan-pointwise-maps.md) | proposed | `Levels` and `Posterize` as chain members, standalone is a loss |
 | [19 histogram analyzers](19-vulkan-histogram-analyzers.md) | proposed | `PeakStats`/`PeakGrayShades` on the device, and `Posterize(method=1)` after them |
 
