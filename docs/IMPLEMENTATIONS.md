@@ -898,7 +898,10 @@ accepted: `Levels` declares one `black` and one `white`, and the separate
 The performance plan is maintained in
 [01-performance-plan.md](improvements/01-performance-plan.md). Future
 improvement documents use the numbered filename pattern
-`XX-plan-name.md` in `docs/improvements/`.
+`XX-plan-name.md` in `docs/improvements/`. The Vulkan device path is
+post-first-release: [15-vulkan-device-path.md](improvements/15-vulkan-device-path.md)
+is its entry point, and the validation harness and the three kernel plans sit
+below it. §3 and §6.1 above stay scoped to the first release.
 
 ## 15. Suggested usage
 
