@@ -213,7 +213,12 @@ primaries, so the validator catches a formula change without a device.
 | `YUV420P8` | 8.7 to 9.1 ms | under 1 ms | 26.4 to 27.1 ms | 12.1 to 12.4 ms |
 | `RGB24` | 23.1 to 24.5 ms | under 1 ms | 70.8 to 71.0 ms | 25.7 to 26.3 ms |
 
-RGB counting is three times the gray cost on the host, which is the two extra
+[21](21-vector-rgb-luma.md) later vectorised the host luma and gave the RGB
+reader the striped counters, so the `RGB24` host columns read 10.4 to 14.1 ms
+and 40.2 to 43.1 ms against a device 21.6 to 27.8 ms. the table above is the
+reading this plan landed with, and the device margin it quotes has narrowed.
+
+RGB counting was three times the gray cost on the host at this point, which is
 plane reads and the arithmetic, and it is still 20x cheaper on the device. the
 chain ratio is 2.7x for RGB and 2.2x for YUV: a 4:2:0 clip needs 1.5 samples per
 pixel on the bus, so the roundtrip is 10.8 ms against 6.5 ms for `GRAY8`, and

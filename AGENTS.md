@@ -54,17 +54,20 @@ byte-identical to the host path; they are worth it only inside a device chain,
 `PeakStats(gpu=1)` and `PeakGrayShades(gpu=1)` count on the device and analyse
 the table with the same host code, so the properties, the shade arrays and the
 pixels match `gpu=0` exactly; `Posterize(method=1, gpu=1)` solves its
-levels from that table. counting is 10x to 18x cheaper than the host's inside a
-device chain, which takes `PeakGrayShades` into `Posterize(method=1)` from 20.0
-to 6.2 ms at 12 MP `GRAY8` and from 49.1 to 14.0 ms at `GRAY16`; a lone analyzer
-is transfer bound at 1.6x to 1.9x.
+levels from that table. counting is 5x to 20x cheaper than the host's inside a
+device chain, which takes `PeakGrayShades` into `Posterize(method=1)` from 23.9
+to 7.2 ms at 12 MP `GRAY8` and from 55.5 to 18.2 ms at `GRAY16`; a lone analyzer
+is transfer bound, so on its own it loses to the host.
 [19](docs/improvements/19-vulkan-histogram-analyzers.md#outcome-so-far) records
 both, and `tools/histogram_hash.py` is the gate.
 the analyzers also take `YUV` and `RGB`: plane 0 for `YUV`, the reference's
 fixed-point luma for `RGB`, so an `RGB` page with equal planes reports what the
-same page as gray does. that puts the `Posterize(method=1)` chain at 2.2x for
-`YUV420P8` and 2.7x for `RGB24`;
-[20](docs/improvements/20-analyzer-color-inputs.md#outcome-so-far) records it.
+same page as gray does. that puts the `Posterize(method=1)` chain at 2.7x for
+`YUV420P8` and 1.6x to 1.9x for `RGB24`;
+[20](docs/improvements/20-analyzer-color-inputs.md#outcome-so-far) and
+[21](docs/improvements/21-vector-rgb-luma.md#outcome-so-far) record them. the
+host `RGB` luma is vectorised, so an RGB count costs 1.1 to 1.5 times the gray
+one rather than three times.
 
 `docs/improvements/15-vulkan-device-path.md` records what the pinned binding
 offers, what the host/device bus costs, and which filters pay for it: the device
@@ -123,6 +126,10 @@ carries a `parity` of `nmanga`, `diverges` or `reference-only` plus the
   see `docs/improvements/15-vulkan-device-path.md`.
 - `src/histogram.rs`: the stride-aware `[u64; 256]` histogram every analyzer
   shares. `from_plane` refuses rows that do not fit instead of reading past them.
+- `src/luma.rs`: the reference luma, `(r * 19595 + g * 38470 + b * 7471 + 32768)
+  >> 16`, as a scalar expression plus `std::arch` kernels for 8-bit and native
+  16-bit rows, each with a scalar fallback. the RGB readers in `histogram.rs`
+  call it; `std::is_x86_feature_detected!` picks the kernel.
 - `src/peaks.rs`: `find_local_peak`, a dependency-free replacement for
   `scipy.signal.find_peaks` as `nmanga` uses it. the region of interest is
   assembled in a fixed `[u64; 258]` buffer, so frame evaluation allocates nothing.
