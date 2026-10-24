@@ -11,7 +11,7 @@ pub(super) mod shared;
 
 use std::ffi::CStr;
 use std::ptr;
-
+pub(crate) mod map;
 use vapoursynth4_rs::core::CoreRef;
 use vapoursynth4_rs::ffi;
 use vapoursynth4_rs::frame::VideoFrame;
@@ -205,11 +205,20 @@ fn transfer(core: &CoreRef, node: &VideoNode, function: &CStr) -> Result<VideoNo
 
 /// Uploads `values` as a one-row `GRAY32` device frame.
 ///
-/// A dispatch binds frames, so a tap table or a constant block a kernel reads
+/// A dispatch binds frames, so a tap table a kernel reads is a frame too. The
+/// values are copied as their `f32` bit patterns, which is what the kernel reads.
+pub(crate) fn upload_floats(core: &CoreRef, values: &[f32]) -> Result<VideoFrame> {
+    let words: Vec<u32> = values.iter().map(|value| value.to_bits()).collect();
+    upload_words(core, &words)
+}
+
+/// Uploads `words` as a one-row `GRAY32` device frame.
+///
+/// A dispatch binds frames, so a tap table or a lookup table a kernel indexes
 /// is a frame too. The host is the only writer here, so the copy is recorded
 /// once and the frame's producer pair is what later recordings wait on.
-pub(crate) fn upload_floats(core: &CoreRef, values: &[f32]) -> Result<VideoFrame> {
-    let bytes = values.len().saturating_mul(size_of::<f32>());
+pub(crate) fn upload_words(core: &CoreRef, words: &[u32]) -> Result<VideoFrame> {
+    let bytes = words.len().saturating_mul(size_of::<u32>());
     if bytes == 0 {
         return Err(NImagesError::new("gpu: a table cannot be empty"));
     }
@@ -236,9 +245,9 @@ pub(crate) fn upload_floats(core: &CoreRef, values: &[f32]) -> Result<VideoFrame
         if mapped.len() < bytes {
             return Err(NImagesError::new("gpu: the staging buffer is too small"));
         }
-        for (slot, value) in values.iter().enumerate() {
-            let start = slot * size_of::<f32>();
-            mapped[start..start + size_of::<f32>()].copy_from_slice(&value.to_ne_bytes());
+        for (slot, word) in words.iter().enumerate() {
+            let start = slot * size_of::<u32>();
+            mapped[start..start + size_of::<u32>()].copy_from_slice(&word.to_ne_bytes());
         }
     }
 
@@ -249,7 +258,7 @@ pub(crate) fn upload_floats(core: &CoreRef, values: &[f32]) -> Result<VideoFrame
         0,
         0,
     );
-    let width = i32::try_from(values.len())
+    let width = i32::try_from(words.len())
         .map_err(|_| NImagesError::new("gpu: the table is too wide for one row"))?;
     let mut frame = core
         .new_gpu_video_frame(&format, width, 1, None)

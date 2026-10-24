@@ -15,11 +15,13 @@ use vapoursynth4_rs::node::{Filter, Node, VideoNode};
 use vapoursynth4_rs::{ColorFamily, SampleType, core::CoreRef, ffi, key};
 
 use crate::error::{NImagesError, Result};
+use crate::gpu;
+use crate::gpu::map::Map;
 use crate::levels::{automatic_gamma_for_range, levels_lut, levels_lut_u16, validate};
 
 use super::{
     Accept, FrameTrace, MappingTable, add_filter, check_frame_format, checked_info, describe_frame,
-    input_failed, map_frame, max_sample_value, read_clip, read_float, read_int,
+    device_table, input_failed, map_frame, max_sample_value, read_clip, read_float, read_int,
     report_settings_once,
 };
 
@@ -87,6 +89,13 @@ pub struct Levels {
     source: VideoNode,
     curve: Curve,
     debug: bool,
+    /// Whether this instance runs the table on the device.
+    gpu: bool,
+    /// The device kernel, built once when `gpu` is set.
+    engine: Option<Map>,
+    /// The table uploaded at creation, and its length in samples. Unset when
+    /// the curve is rebuilt per frame, which uploads one per frame instead.
+    table: Option<(VideoFrame, u32)>,
     /// Set once the settings line has been written for this instance.
     reported: AtomicBool,
 }
@@ -97,8 +106,14 @@ impl Filter for Levels {
     type FilterData = ();
 
     const NAME: &'static CStr = c"Levels";
-    const ARGS: &'static CStr = c"clip:vnode;black:float:opt;white:float:opt;gamma:float:opt;use_props:int:opt;peak_offset:int:opt;auto_gamma:int:opt;debug:int:opt;";
-    const RETURN_TYPE: &'static CStr = c"clip:vnode;";
+    const ARGS: &'static CStr = c"clip:vnode:all;black:float:opt;white:float:opt;gamma:float:opt;use_props:int:opt;peak_offset:int:opt;auto_gamma:int:opt;gpu:int:opt;debug:int:opt;";
+    const RETURN_TYPE: &'static CStr = c"clip:vnode:all;";
+
+    /// `all` is answered by the instance: a `gpu=1` run's frame is device
+    /// memory and a `gpu=0` run's is not.
+    fn gpu_output(&self) -> bool {
+        self.gpu
+    }
 
     fn create(
         input: MapRef,
@@ -154,6 +169,41 @@ impl Filter for Levels {
             }
         };
         let debug = read_int(&input, key!(c"debug"))?.unwrap_or(0) != 0;
+        let gpu = read_int(&input, key!(c"gpu"))?.unwrap_or(0) != 0;
+        let (source, engine, table) = if gpu {
+            gpu::require_device(&core)?;
+            // The device path resolves the curve once, so the clip has to say
+            // what it is at creation, and the float curve, which has no table,
+            // is refused instead of quietly running on the host.
+            if !vapoursynth4_rs::utils::is_constant_video_format(&info) {
+                return Err(NImagesError::new(
+                    "Levels gpu=1: the clip's format is not constant",
+                ));
+            }
+            if domain == Some(CurveDomain::Float32) {
+                return Err(NImagesError::new(
+                    "Levels gpu=1: the float curve stays on the host; run a Gray or RGB \
+                     float clip with gpu=0",
+                ));
+            }
+            let source = if source.residency() == ffi::VSNodeResidency::GPU {
+                source
+            } else {
+                gpu::upload(&core, &source)?
+            };
+            let table = match &curve {
+                Curve::Constant(resolved) => device_table(&core, &resolved.table)?,
+                _ => None,
+            };
+            (source, Some(Map::new(&core)?), table)
+        } else {
+            let source = if source.residency() == ffi::VSNodeResidency::GPU {
+                gpu::download(&core, &source)?
+            } else {
+                source
+            };
+            (source, None, None)
+        };
 
         let dependency = source.as_ptr();
         add_filter(
@@ -165,6 +215,9 @@ impl Filter for Levels {
                 source,
                 curve,
                 debug,
+                gpu,
+                engine,
+                table,
                 reported: AtomicBool::new(false),
             },
             dependency,
@@ -272,7 +325,22 @@ impl Filter for Levels {
                 trace.mark("curve", mark);
 
                 let mark = Instant::now();
-                let output = map_frame(&core, &input, &resolved.table)?;
+                let output = match (&self.engine, &self.table) {
+                    // A fixed curve uploaded its table at creation. A curve that
+                    // is rebuilt per frame uploads one per frame, because a shared
+                    // table would be rewritten while a recording still reads it.
+                    (Some(engine), Some((table, length))) => {
+                        engine.render(&core, &input, table, *length)?
+                    }
+                    (Some(engine), None) => {
+                        let (table, length) =
+                            device_table(&core, &resolved.table)?.ok_or_else(|| {
+                                NImagesError::new("Levels gpu=1: the curve has no table to upload")
+                            })?;
+                        engine.render(&core, &input, &table, length)?
+                    }
+                    _ => map_frame(&core, &input, &resolved.table)?,
+                };
                 trace.mark("map", mark);
 
                 trace.emit(

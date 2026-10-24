@@ -273,6 +273,12 @@ It evaluates each sample without an integer LUT, maps the selected interval to
 `0..=1`, clamps outside it, and preserves NaN samples. Float `Levels` does not
 accept `use_props=True`, nonzero `peak_offset`, or `auto_gamma=True`.
 
+`gpu=1` runs the integer table on the Vulkan device, byte-identical to the host
+path. It is refused for the float curve, which has no table, and for a clip
+whose format varies. A device map is only a win inside a device chain, where the
+frame is already device-resident; see
+[18](improvements/18-vulkan-pointwise-maps.md#outcome-so-far).
+
 ### 5.4 `Posterize`
 
 ```python
@@ -290,6 +296,11 @@ a Gray clip and the luma plane of a YUV one, and the solved table then applies t
 every plane; an RGB caller that wants the grayscale behaviour converts first. The
 levels are recomputed for every frame, so a clip whose frames differ gets a level
 set each.
+
+`gpu=1` maps the even table on the Vulkan device, byte-identical to `gpu=0`.
+`method=1` is refused there, because the Lloyd solve reads the frame's
+histogram on the host. `use_props=True` works under `gpu=1` and rebuilds the
+table per frame.
 
 Peak analysis and levels deliberately remain separate. Users should compose
 `PeakStats` and `Levels(use_props=True)` when automatic per-frame levels are

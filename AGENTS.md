@@ -45,6 +45,10 @@ fan-in numbers. aggregate is 5.6x to 7.8x the CPU at 12 MP; at 24 MP the four
 96 MB planes per frame hold five frames in flight, and a caller bounding
 `core.max_vram_cache_size` is what keeps the allocator from aborting the host
 past that.
+`Levels(gpu=1)` and `Posterize(gpu=1)` map integer planes on the device and are
+byte-identical to the host path; they are worth it only inside a device chain,
+1.2x to 1.5x while the chain fits and a loss at a wide fan-in, and
+[18](docs/improvements/18-vulkan-pointwise-maps.md#outcome-so-far) records both.
 `docs/improvements/15-vulkan-device-path.md` records what the pinned binding
 offers, what the host/device bus costs, and which filters pay for it: the device
 `Deblur` is a win, the pointwise maps and the histogram analyzers are chain
@@ -95,8 +99,9 @@ carries a `parity` of `nmanga`, `diverges` or `reference-only` plus the
   input.
 - `src/gpu/`: the device layer. `mod.rs` is the VapourSynth-facing half (gate,
   pipeline, pool, plane binding, barriers, upload/download), `shared.rs` the
-  launch geometry and the GLSL preamble with no binding type, and `deblur.rs`
-  the Deblur kernels. see `docs/improvements/15-vulkan-device-path.md`.
+  launch geometry and the GLSL preamble with no binding type, `deblur.rs` the
+  Deblur kernels, and `map.rs` the table lookup `Levels` and `Posterize` share.
+  see `docs/improvements/15-vulkan-device-path.md`.
 - `src/histogram.rs`: the stride-aware `[u64; 256]` histogram every analyzer
   shares. `from_plane` refuses rows that do not fit instead of reading past them.
 - `src/peaks.rs`: `find_local_peak`, a dependency-free replacement for
@@ -116,6 +121,8 @@ carries a `parity` of `nmanga`, `diverges` or `reference-only` plus the
   through the built plugin, then checks geometry, per-frame independence,
   repeated and out-of-order and concurrent requests, property preservation,
   determinism and the error messages.
+- `tools/map_hash.py`: `Levels` and `Posterize` byte-exactness, `--device` against
+  the host path and `--check` for the recorded host table.
 - `tools/golden.py`: the golden-vector generator. see below.
 - `tools/deblur_hash.py`: the Deblur hash harness. `--check` is the CPU gate and
   `--device` compares `gpu=1` against `gpu=0` on the same cases.

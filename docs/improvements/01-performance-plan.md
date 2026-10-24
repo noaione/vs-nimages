@@ -23,7 +23,7 @@ outcomes.
 | [15 the device path](15-vulkan-device-path.md) | proposed, research complete | the binding surface, the gates, the bus budget, the per-filter verdict |
 | [16 validating a device kernel](16-vulkan-validation.md) | in part: the Deblur hash harness and its `--device` mode landed, the fan-in protocol was measured |
 | [17 Deblur on the device](17-vulkan-deblur.md) | in progress: both methods on Gray, RGB and YUV, 8-16 bit and 32 bit float, landed (8 bit exact, deeper within 1 LSB, float within 2 ULP), 7.7x to 10.4x latency and 5.6x to 7.8x aggregate at 12 MP; the plane count brought the 24 MP envelope to five frames in flight, and tiling is what would remove it |
-| [18 pointwise maps](18-vulkan-pointwise-maps.md) | proposed | `Levels` and `Posterize` as chain members, standalone is a loss |
+| [18 pointwise maps](18-vulkan-pointwise-maps.md) | landed: `Levels` and `Posterize` byte-identical on every integer format, 29 cases; 25% to 42% of a device chain, kept |
 | [19 histogram analyzers](19-vulkan-histogram-analyzers.md) | proposed | `PeakStats`/`PeakGrayShades` on the device, and `Posterize(method=1)` after them |
 
 the dependency on the Vulkan-capable binding is in the tree and raises the

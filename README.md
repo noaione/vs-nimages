@@ -195,6 +195,7 @@ leveled = core.nimages.Levels(stats, use_props=True, peak_offset=0, auto_gamma=T
 | `use_props` | `false` | read `NImagesBlackLevel` and `NImagesWhiteLevel` from each input frame instead |
 | `peak_offset` | `0` | added to the black point, in source sample units |
 | `auto_gamma` | `false` | derive gamma from the effective black point, ignoring `gamma` |
+| `gpu` | `0` | `1` runs the integer table on the Vulkan device, which needs VapourSynth R80 and a Vulkan 1.4 device |
 | `debug` | `false` | log the resolved curve and each frame's stage timings |
 
 for an input `x`, black `b`, white `w` and sample maximum `Q`:
@@ -217,6 +218,15 @@ Float outputs are clamped to `[0, 1]`, values outside the endpoints clamp to 0
 or 1, and NaN samples remain NaN. Float `Levels` does not accept
 `use_props=True`, nonzero `peak_offset`, or `auto_gamma=True`, because the peak
 properties are integer-only.
+
+`gpu=1` is worth it only after a device producer: a `Levels` between two host
+filters pays more for the two transfers than the 4.6 ms of table lookups it
+replaces. inside a device chain it is byte-identical to `gpu=0`, and a chain of
+`Deblur(gpu=1)`, `Levels(gpu=1)` and `Posterize(gpu=1)` is 25% to 42% cheaper
+per frame than downloading after the `Deblur` and mapping on the host. a float
+clip and a clip whose format varies are refused, because the float curve has no
+table and the device plan is resolved once. `use_props=True` works either way
+and rebuilds 256 words per frame.
 
 `auto_gamma` normalizes the black point by `Q` before applying its formula. the
 expression is undefined at or above half the sample range, so the filter rejects
@@ -241,6 +251,7 @@ first, as in [use](#use) above.
 | `use_props` | `false` | read `NImagesGrayShades` from each input frame instead, this is the same as auto bits detection. |
 | `debug` | `false` | log the resolved depth and each frame's stage timings |
 | `method` | `0` | `0` spaces the levels evenly, `1` solves them from the frame's histogram with Lloyd-Max |
+| `gpu` | `0` | `1` runs the even table on the Vulkan device; `method=1` is refused there |
 
 `bits` equal to the input sample depth is the identity. the mapping uses the
 full native sample maximum `Q`:
@@ -263,6 +274,12 @@ plane 0, which is the gray plane of a Gray clip and the luma plane of a YUV one,
 and the solved table then applies to every plane. the levels are solved per
 frame, so a clip whose frames differ gets a level set each, which a page-per-frame
 caller wants and a moving clip would show as flicker.
+
+`gpu=1` maps the even table on the device, byte-identical to `gpu=0`, and like
+`Levels` it pays only inside a device chain. `method=1` is refused with a
+message, because the Lloyd solve reads the frame's histogram, which is host
+work; run that method with `gpu=0`. `use_props=True` works under `gpu=1` and
+rebuilds the table per frame.
 
 **note**: when `bits` equals the sample depth, the frame is returned unchanged.
 
