@@ -1,7 +1,8 @@
 # Deblur on the device
 
-status: proposed. first kernel of the set in [15](15-vulkan-device-path.md),
-gated by [16](16-vulkan-validation.md).
+status: in progress. `method=1` on 8 bit Gray is in the tree and byte-identical to
+`gpu=0`; `method=0`, 16 bit, float and RGB/YUV are still M4 and M5. see
+[the outcome so far](#outcome-so-far) for the numbers and the one bug it cost.
 
 ## current cost
 
@@ -121,30 +122,29 @@ item 2 is where a driver's shader compiler can defeat the plan. SPIR-V's
 `NoContraction` decoration, which `precise` emits, is the control, and the hash
 harness in [16](16-vulkan-validation.md) is what proves it held.
 
-the one statement with no exact device equivalent is the Sobel's `sqrt`. Rust's
-`f32::sqrt` is correctly rounded and a driver's is not required to be. the kernel
-compares the magnitude against a threshold, so a one-ULP difference changes the
-mask only for a pixel whose magnitude lands exactly on the threshold. the port
-measures the count of such pixels and reports it. the host's two kernels compute
-`f32::sqrt` on both paths, so the count is expected to be zero, and the number
-exists to prove it. a nonzero count is recorded against the frozen tolerance
-rather than reconciled.
+the one operation with no exact device equivalent is the Sobel's `sqrt`. Rust's
+`f32::sqrt` is correctly rounded and a driver's is not required to be. the mask is
+a smoothstep of the magnitude, so a one-ULP difference moves the mask slightly
+wherever it sits on the ramp, not only at the threshold: the hash harness is the
+gate, and the seven cases that run on this host do not expose it. a host whose
+`sqrt` differs records the deviation against the frozen tolerance instead of
+widening it.
 
 ## memory
 
-two `f32` ping-pong planes, the source and the output:
+five `GRAY32` planes, the source and the output:
 
-| page | one `f32` plane | ping-pong | total |
+| page | one `f32` plane | the five working planes | total |
 | --- | ---: | ---: | ---: |
-| 2902x4128, 12.0 MP | 48 MB | 96 MB | about 120 MB with source and output |
-| 5806x4128, 24.0 MP | 96 MB | 192 MB | about 240 MB |
+| 2902x4128, 12.0 MP | 48 MB | 240 MB | about 264 MB with source and output |
+| 5806x4128, 24.0 MP | 96 MB | 480 MB | about 528 MB |
 
-the row ring has no device equivalent: a dispatch binds a whole plane, so the
-scratch granularity is a plane. two `f32` planes are enough because the consumer
-fusion removed the extra walks, which is why the device workspace is smaller than
-the five-plane CPU one. the 2.35 GB limit on this host therefore holds roughly nine
-24 MP frames in flight, and the core's reservation throttles concurrency rather
-than failing an allocation.
+the planes are `luma`, the horizontal scratch, the candidate, the raw mask and the
+blurred mask. the row ring has no device equivalent: a dispatch binds a whole
+plane, so the scratch granularity is a plane, and the mask needs its own input and
+output. the 2.35 GB limit on this host therefore holds about four 24 MP frames in
+flight, and the core's reservation throttles concurrency rather than failing an
+allocation.
 
 ## milestones
 
@@ -181,6 +181,66 @@ rate under 12 worker threads, so its aggregate cost for `method=0` is about
 overlap independent frames only as far as VRAM allows, so the aggregate win is
 smaller than the latency win and is the first thing M6 measures.
 
+## outcome so far
+
+written 2026-10-24. M1 to M3 are landed for `method=1` on 8 bit Gray; M4 and M5
+are not.
+
+| piece | where |
+| --- | --- |
+| the device layer | `src/gpu/mod.rs`: gate, pipeline, pool, plane binding, dispatch, barrier, upload |
+| launch and push blocks | `src/gpu/shared.rs`, no binding type, unit tested |
+| the four kernels | `src/gpu/deblur.rs`: prepare, separable blur, Sobel, blend |
+| the filter | `src/filters/deblur.rs`: `gpu:int:opt`, `clip:vnode:all`, `gpu_output()` |
+| the planning | `src/deblur.rs`: `Plan`, `Gaussian`, `Mask`, `Blend`, `Quantisation` |
+| the parity gate | `tools/deblur_hash.py --device` |
+| the device probe | `tools/gpu_probe.py` |
+
+`gpu=1` refuses `method=0`, 16 bit and float input, and a variable format, each
+with a message naming what it saw.
+
+### parity
+
+`tools/deblur_hash.py --device` runs 24 cases; the seven 8 bit Gray `method=1`
+cases are byte-identical to `gpu=0`, and the other 17 are skipped with their
+refusal printed:
+
+- defaults, an odd width (129x97), a 1 px frame, a frame whose row padding is `0xA5`
+- `radius=16` (the 129-tap kernel), a non-default `strength`, `threshold` and
+  `overshoot`, and `threshold=0`
+
+the CPU table is unchanged (`deblur_hash.py --check` matches all 24), the
+validator reports 2150 checks, and `cargo test`, `cargo clippy -- -D warnings`
+and `cargo fmt --check` are clean.
+
+### measured
+
+one frame on a quiet machine, a fresh `Deblur` node per request, median of seven.
+`gpu=1` is measured through `std.GPUDownload`, which is what a caller pays:
+
+| page | CPU | device + download | bus round trip | speedup |
+| --- | ---: | ---: | ---: | ---: |
+| 2902x4128, 12.0 MP | 156.4 ms | 16.1 ms | 6.9 ms | 9.7x |
+| 5806x4128, 24.0 MP | 314.9 ms | 32.1 ms | 12.8 ms | 9.8x |
+
+the source is a `BlankClip`, so the frame costs nothing to make and both engines
+see the same input; these are filter numbers, not decode. the device work alone is
+the total minus the bus, about 9 ms at 12 MP against the 5.6 ms estimated above.
+the aggregate number M6 asks for is still open: no fan-in has been run.
+
+### what the first kernel cost
+
+one bug, and it was not the one predicted. `fold()` mapped the reflection with
+integer `%`, and GLSL leaves the sign of `a % b` undefined when `a` is negative.
+the driver returned a value outside the adjusted range for the `radius` leftmost
+columns, so the blur read a neighbouring row: 16 of 6144 samples differed by up to
+5 codes, all at `x < radius`. `mod()` on floats is defined as
+`x - y * floor(x / y)`, and with it the seven cases are byte-identical. index
+arithmetic, not `sqrt`, was the first thing to break.
+
+the plan's memory table was also optimistic: the mask needs a raw and a blurred
+plane, so the workspace is five planes, not two.
+
 ## risks
 
 - **the Sobel `sqrt`.** the only non-portable operation, and the reason the
@@ -202,7 +262,7 @@ smaller than the latency win and is the first thing M6 measures.
    endianness, and big-endian is refused, because `storageBuffer16BitAccess` is
    optional and the pipeline builder does not expose it. the `f32` planes start
    from an output the plugin allocates.
-- **VRAM under concurrency.** nine frames at 24 MP on a 2.35 GB budget leaves no
+- **VRAM under concurrency.** four frames at 24 MP on a 2.35 GB budget leaves
   room for a second device consumer. the fan-in measurement reports what happens
   when the budget is reached.
 

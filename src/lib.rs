@@ -5,7 +5,10 @@
 //! * safe, VapourSynth-free algorithm modules ([`deblur`], [`gray_shades`],
 //!   [`histogram`], [`levels`], [`peaks`], [`posterize`]) that hold all of the
 //!   behaviour, so they can be tested without a core
-//! * the filter layer in [`filters`], the only place that touches the plugin API
+//! * the filter layer in [`filters`] and the device layer in `gpu`, the two
+//!   places that touch the plugin API
+//! * `gpu` holds Vulkan kernels behind each filter's `gpu` argument; its
+//!   `shared` module names no binding type, so kernel geometry stays testable
 //!
 //! `PeakStats` and `PeakGrayShades` leave pixels alone and attach their results
 //! as frame properties, so a caller composes `PeakStats` -> `Levels(use_props=True)`
@@ -13,6 +16,7 @@
 
 mod error;
 mod filters;
+mod gpu;
 
 pub mod deblur;
 pub mod gray_shades;

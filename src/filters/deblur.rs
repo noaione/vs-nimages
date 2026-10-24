@@ -20,13 +20,29 @@ use vapoursynth4_rs::map::MapRef;
 use vapoursynth4_rs::node::{Filter, Node, VideoNode};
 use vapoursynth4_rs::{ColorFamily, SampleType, core::CoreRef, ffi, key};
 
-use crate::deblur::{DeblurError, Method, Params, Workspace};
+use crate::deblur::{DeblurError, Method, Params, Plan, SampleFormat, Workspace};
 use crate::error::{NImagesError, Result};
 
 use super::{
     Accept, FrameTrace, add_filter, check_frame_format, checked_info, describe_frame, input_failed,
     max_sample_value, plane_shape, read_clip, read_float, read_int, report_settings_once,
 };
+
+use crate::gpu;
+use crate::gpu::deblur::Engine;
+
+/// The device plan's view of a frame format.
+///
+/// The mapping lives here because only the filter layer knows what a frame
+/// format is; `src/gpu` takes the resolved value.
+fn sample_format(format: &VideoFormat) -> Option<SampleFormat> {
+    match format.sample_type {
+        SampleType::Float => (format.bits_per_sample == 32).then_some(SampleFormat::Float32),
+        SampleType::Integer => Some(SampleFormat::Integer(
+            u32::try_from(format.bits_per_sample).ok()?,
+        )),
+    }
+}
 
 /// The 8 bit code value range the kernels work in.
 const CODE_VALUES: f32 = 255.0;
@@ -48,6 +64,10 @@ pub struct Deblur {
     /// One workspace per concurrently evaluated frame.
     workspace: Mutex<Vec<Workspace>>,
     debug: bool,
+    /// Whether this instance runs the kernels on the device.
+    gpu: bool,
+    /// The device pipelines, built once when `gpu` is set.
+    engine: Option<Engine>,
     /// Set once the settings line has been written for this instance.
     reported: AtomicBool,
 }
@@ -58,8 +78,14 @@ impl Filter for Deblur {
     type FilterData = ();
 
     const NAME: &'static CStr = c"Deblur";
-    const ARGS: &'static CStr = c"clip:vnode;method:int:opt;radius:float:opt;strength:float:opt;iterations:int:opt;threshold:float:opt;overshoot:float:opt;debug:int:opt;";
-    const RETURN_TYPE: &'static CStr = c"clip:vnode;";
+    const ARGS: &'static CStr = c"clip:vnode:all;method:int:opt;radius:float:opt;strength:float:opt;iterations:int:opt;threshold:float:opt;overshoot:float:opt;gpu:int:opt;debug:int:opt;";
+    const RETURN_TYPE: &'static CStr = c"clip:vnode:all;";
+
+    /// `all` is answered by the instance: a `gpu=1` run's frame is device
+    /// memory and a `gpu=0` run's is not.
+    fn gpu_output(&self) -> bool {
+        self.gpu
+    }
 
     fn create(
         input: MapRef,
@@ -104,6 +130,36 @@ impl Filter for Deblur {
 
         let debug = read_int(&input, key!(c"debug"))?.unwrap_or(0) != 0;
 
+        let gpu = read_int(&input, key!(c"gpu"))?.unwrap_or(0) != 0;
+        let (source, engine) = if gpu {
+            gpu::require_device(&core)?;
+            let source = if source.residency() == ffi::VSNodeResidency::GPU {
+                source
+            } else {
+                gpu::upload(&core, &source)?
+            };
+            if !vapoursynth4_rs::utils::is_constant_video_format(&info) {
+                return Err(NImagesError::new(
+                    "Deblur gpu=1: the clip's format is not constant",
+                ));
+            }
+            let sample = sample_format(&info.format).ok_or_else(|| {
+                NImagesError::new("Deblur gpu=1: the sample format has no device plan")
+            })?;
+            let plan = Plan::new(&params, sample).ok_or_else(|| {
+                NImagesError::new("Deblur gpu=1: the arguments have no device plan")
+            })?;
+            let engine = Engine::new(&core, plan, &info.format)?;
+            (source, Some(engine))
+        } else {
+            let source = if source.residency() == ffi::VSNodeResidency::GPU {
+                gpu::download(&core, &source)?
+            } else {
+                source
+            };
+            (source, None)
+        };
+
         let dependency = source.as_ptr();
         add_filter(
             &mut core,
@@ -115,6 +171,8 @@ impl Filter for Deblur {
                 params,
                 workspace: Mutex::new(Vec::new()),
                 debug,
+                gpu,
+                engine,
                 reported: AtomicBool::new(false),
             },
             dependency,
@@ -154,6 +212,18 @@ impl Filter for Deblur {
                         describe_frame(&input)
                     ),
                 );
+
+                if let Some(engine) = &self.engine {
+                    let mark = Instant::now();
+                    let output = engine.render(&core, &input)?;
+                    trace.mark("gpu", mark);
+                    trace.emit(
+                        &mut core,
+                        n,
+                        format_args!("method={} ", self.params.method.name()),
+                    );
+                    return Ok(Some(output));
+                }
 
                 let width = usize::try_from(input.frame_width(0))
                     .map_err(|_| NImagesError::new("Deblur: plane 0 has a negative width"))?;

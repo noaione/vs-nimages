@@ -1,8 +1,9 @@
 # the Vulkan device path
 
-status: proposed. research complete on 2026-10-24 against
-`vs-mangacolor` at `29da9fb` and the pinned binding rev `685c29d`. no device
-kernel is in the tree.
+status: accepted, first kernel landed. research complete on 2026-10-24 against
+`vs-mangacolor` at `29da9fb` and the pinned binding rev `685c29d`.
+`Deblur(gpu=1)` runs `method=1` on 8 bit Gray and is byte-identical to `gpu=0`;
+[17](17-vulkan-deblur.md#outcome-so-far) records what it cost and measures.
 
 this plan is the entry point for [16](16-vulkan-validation.md) through
 [19](19-vulkan-histogram-analyzers.md). it records what the device path is on
