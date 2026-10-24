@@ -8,6 +8,27 @@ the current implementation prioritizes reference parity, bounded frame-local
 work, and safe stride handling. do not optimize by changing histogram binning,
 rounding, endpoint behavior, properties, or per-frame independence.
 
+## the device plans
+
+the Vulkan work is [15](15-vulkan-device-path.md) through
+[19](19-vulkan-histogram-analyzers.md). [15](15-vulkan-device-path.md) holds the
+verdict: the device `Deblur` is the only filter whose CPU cost is above the
+host/device bus, the pointwise maps and the histogram analyzers are chain
+members that pay only after a device producer exists, and float `Levels` stays
+on the host. the candidates below stay the CPU ones and keep their recorded
+outcomes.
+
+| plan | status | what it covers |
+| --- | --- | --- |
+| [15 the device path](15-vulkan-device-path.md) | proposed, research complete | the binding surface, the gates, the bus budget, the per-filter verdict |
+| [16 validating a device kernel](16-vulkan-validation.md) | proposed | the device gate in `tests/check-nimages.py`, the Deblur hash harness, the bench protocol |
+| [17 Deblur on the device](17-vulkan-deblur.md) | proposed | both methods, 31 dispatches in one recording, the exactness rules, the milestones |
+| [18 pointwise maps](18-vulkan-pointwise-maps.md) | proposed | `Levels` and `Posterize` as chain members, standalone is a loss |
+| [19 histogram analyzers](19-vulkan-histogram-analyzers.md) | proposed | `PeakStats`/`PeakGrayShades` on the device, and `Posterize(method=1)` after them |
+
+none of the five is in the tree. the dependency on the Vulkan-capable binding
+revision is, uncommitted, and raises the floor to VapourSynth R80.
+
 ## candidate status
 
 checked against the code as it stands:

@@ -35,6 +35,15 @@ the five filters are implemented and covered by `tests/check-nimages.py`.
 `docs/FINDINGS.md` §8 tracks the milestones: M1, M2 and M3 are done, M4 is
 deferred because it touches the sibling checkout, and M5 is distribution work.
 
+the Vulkan device path is planned and not implemented.
+`docs/improvements/15-vulkan-device-path.md` records what the pinned binding
+offers, what the host/device bus costs, and which filters pay for it: the device
+`Deblur` is a win, the pointwise maps and the histogram analyzers are chain
+members, and float `Levels` stays on the host. plans 16 through 19 are the
+validation harness, the Deblur kernel, the pointwise maps and the analyzers.
+the dependency on the Vulkan-capable binding revision is in the working tree and
+raises the floor to VapourSynth R80.
+
 ## where the behaviour comes from
 
 the filters port `nmanga/autolevel.py` from the sibling checkout
@@ -59,8 +68,9 @@ carries a `parity` of `nmanga`, `diverges` or `reference-only` plus the
   one. ask before adding it.
 - treat `tests/fixtures/` as generated. change it by running `tools/golden.py`,
   never by editing the json or the `.bin` files.
-- keep `src/` free of VapourSynth types outside `lib.rs` and `src/filters/`. the
-  algorithms must stay testable without a core.
+- keep `src/` free of VapourSynth types outside `lib.rs`, `src/filters/` and
+  `src/gpu/`. the algorithms must stay testable without a core, and
+  `src/gpu/shared.rs` names no binding type.
 - pass `--locked` to cargo so the committed lockfile is what gets built.
 
 ## source layout
@@ -74,6 +84,10 @@ carries a `parity` of `nmanga`, `diverges` or `reference-only` plus the
 - `src/filters/{peak_stats,peak_gray_shades,levels,posterize,deblur}.rs`: the
   five filters. all `Parallel`, all with a strict spatial dependency on their
   input.
+- `src/gpu/`: the device layer, when it lands. `mod.rs` is the VapourSynth-facing
+  half, `shared.rs` the launch geometry and the GLSL preamble, and one module per
+  filter holds its kernels. see
+  `docs/improvements/15-vulkan-device-path.md`.
 - `src/histogram.rs`: the stride-aware `[u64; 256]` histogram every analyzer
   shares. `from_plane` refuses rows that do not fit instead of reading past them.
 - `src/peaks.rs`: `find_local_peak`, a dependency-free replacement for
