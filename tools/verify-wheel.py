@@ -4,7 +4,7 @@ GitHub Actions runs this on every native wheel before it is uploaded, so a wheel
 that lost a CPU variant, its manifest or the manifest's plugin name fails the
 build instead of shipping.
 
-    python tools/verify-wheel.py dist/vapoursynth_nimages-0.2.0-....whl
+    python tools/verify-wheel.py dist/vapoursynth_nimages-0.2.1-....whl
 """
 
 from __future__ import annotations

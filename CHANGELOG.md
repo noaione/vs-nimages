@@ -2,6 +2,12 @@
 
 ### unreleased
 
+nothing yet!
+
+### [0.2.1] (2026-10-25)
+
+Lets `gpu=1` take a clip whose dimensions vary per frame.
+
 **Changed**:
 - `Levels`, `Posterize`, `PeakStats`, `PeakGrayShades` and `Deblur` accept a
   `gpu=1` clip whose dimensions vary per frame, which is what a mixed-size
