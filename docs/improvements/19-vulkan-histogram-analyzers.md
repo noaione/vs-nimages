@@ -151,9 +151,10 @@ than a footnote.
   map, so `gpu=1` returns a device frame with the input's pixels and the
   analyzer's properties. the harness compares both, and the caller downloads
   the frame when it needs the pixels.
-- **the format gates.** a constant format is checked at create, the frame's own
-  format is re-checked per frame, and a variable-dimension clip reports
-  `Undefined` at the node. the device path changes none of them.
+- **the format gates.** the frame's own format is re-checked per frame, and a clip
+  that declares no format is accepted: the count reads depth, family and
+  subsampling from the frame. a variable-dimension clip reports `Undefined` at
+  the node and runs, because every buffer is sized from the frame.
 - **it was the last plan because it looked like the least valuable.** the chain
   measurement says otherwise for `Posterize(method=1)`, at 3.2x to 3.6x; without
   a device producer it is the 1.6x to 1.9x the transfer allows.
@@ -182,8 +183,9 @@ on the device and analyse the table with the same host functions, and
 | flat, four-tone, sparse and noise pages | 8 | identical, the contention cases included |
 | `1x1`, `2x2` | 3 | identical |
 | a non-Gray clip and a float clip | 2 | refused by name on both engines |
+| a clip whose dimensions vary per frame, and one that declares no format | 6 | identical properties and pixels |
 
-35 cases, all identical or refused as intended, and the pixels come back
+58 cases, all identical or refused as intended, and the pixels come back
 byte-identical too because an analyzer only copies the frame. `--check` records
 the host properties, so a change to the peak search or the shade ordering shows
 up without a device. `--device` also runs the chain this plan exists for:

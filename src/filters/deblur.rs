@@ -26,6 +26,7 @@ use crate::error::{NImagesError, Result};
 use super::{
     Accept, FrameTrace, add_filter, check_frame_format, checked_info, describe_frame, input_failed,
     max_sample_value, plane_shape, read_clip, read_float, read_int, report_settings_once,
+    require_declared_format,
 };
 
 use crate::gpu;
@@ -135,11 +136,7 @@ impl Filter for Deblur {
             } else {
                 gpu::upload(&core, &source)?
             };
-            if !vapoursynth4_rs::utils::is_constant_video_format(&info) {
-                return Err(NImagesError::new(
-                    "Deblur gpu=1: the clip's format is not constant",
-                ));
-            }
+            require_declared_format(&info, "Deblur")?;
             let sample = sample_format(&info.format).ok_or_else(|| {
                 NImagesError::new("Deblur gpu=1: the sample format has no device plan")
             })?;

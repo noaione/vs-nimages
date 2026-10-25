@@ -2,7 +2,13 @@
 
 ### unreleased
 
-nothing yet!
+**Changed**:
+- `Levels`, `Posterize`, `PeakStats`, `PeakGrayShades` and `Deblur` accept a
+  `gpu=1` clip whose dimensions vary per frame, which is what a mixed-size
+  sequence through `imgseqs.Read(mismatch=True)` reports. `Deblur` still needs
+  the clip to declare its format because its device plan is built once;
+  `Levels`, `Posterize` and the two analyzers read the format from each frame and
+  take a clip that declares none as well.
 
 ### [0.2.0] (2026-10-25)
 

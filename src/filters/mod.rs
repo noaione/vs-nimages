@@ -217,6 +217,23 @@ pub(super) fn validate_percentage(value: Option<f64>, name: &str) -> Result<Opti
     }
 }
 
+/// Refuses a `gpu=1` clip that declares no format, for a device path that has to
+/// build a table or a plan before the first frame.
+///
+/// Unknown dimensions are not refused. `width` and `height` are 0 for a clip
+/// whose pages differ in size, which is what `imgseqs.Read(mismatch=True)`
+/// reports, and every device kernel reads the size from the frame it was handed.
+pub(super) fn require_declared_format(info: &VideoInfo, function: &str) -> Result<()> {
+    if info.format.color_family == ColorFamily::Undefined {
+        return Err(NImagesError::new(format!(
+            "{function} gpu=1: the clip declares no format, so the device path has \
+             nothing to build at creation; a clip whose dimensions vary is accepted, \
+             one whose format varies is not"
+        )));
+    }
+    Ok(())
+}
+
 /// Registers the output node against one strictly spatial input.
 ///
 /// The dependency is taken as a raw node pointer so the caller can move the node

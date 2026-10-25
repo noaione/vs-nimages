@@ -164,8 +164,11 @@ preserves `YUV` chroma and keeps `RGB` channel differences when sharpening.
 ## optional settings
 
 all filters accept `gpu=1` to use a Vulkan device. This requires vapoursynth R80
-and a Vulkan 1.4 device. gpu processing requires the clip format to stay
-constant. `Levels` on the gpu supports integer formats; float `Levels` uses the cpu.
+and a Vulkan 1.4 device. `gpu=1` accepts a clip whose dimensions vary per frame;
+`Deblur` also needs the format declared, because its device plan is built once,
+while `Levels`, `Posterize`, `PeakStats` and `PeakGrayShades` read the format
+from each frame. `Levels` on the gpu supports integer formats; float `Levels`
+uses the cpu.
 
 all filters accept `debug=1` to write settings and per-frame timings to the
 vapoursynth log.

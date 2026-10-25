@@ -111,6 +111,31 @@ def gray(width: int, height: int) -> vs.VideoNode:
     return source(width, height, vs.GRAY8)
 
 
+VARIABLE_SIZES = ((32, 16), (17, 9), (1, 1))
+
+
+def variable(format_: vs.VideoFormat) -> vs.VideoNode:
+    """A clip whose frames report their own dimensions."""
+    clips = [source(width, height, format_, length=2) for width, height in VARIABLE_SIZES]
+    return CORE.std.Splice(clips, mismatch=True)
+
+
+def mixed_depth() -> vs.VideoNode:
+    """A clip that mixes 8 and 16 bit frames, so it declares no format."""
+    return CORE.std.Splice(
+        [source(32, 16, vs.GRAY8, length=2), source(32, 16, vs.GRAY16, length=2)],
+        mismatch=True,
+    )
+
+
+def mixed_family() -> vs.VideoNode:
+    """A clip that mixes Gray and RGB frames, so it declares no format either."""
+    return CORE.std.Splice(
+        [source(32, 16, vs.GRAY8, length=2), source(32, 16, vs.RGB24, length=2)],
+        mismatch=True,
+    )
+
+
 def cases() -> list[Case]:
     """The fixed case table, the maps first and then the two refusals."""
     levels = {
@@ -137,6 +162,9 @@ def cases() -> list[Case]:
         Case("levels/yuv444p16/defaults", lambda: source(96, 64, vs.YUV444P16), dict(levels["defaults"])),
         Case("levels/gray8/one-pixel", lambda: source(1, 1, vs.GRAY8), dict(levels["defaults"])),
         Case("levels/gray8/2x2", lambda: source(2, 2, vs.GRAY8), dict(levels["defaults"])),
+        Case("levels/gray8/variable-dims", lambda: variable(vs.GRAY8), dict(levels["defaults"])),
+        Case("levels/gray8/variable-depth", mixed_depth, dict(levels["defaults"])),
+        Case("levels/mixed-family", mixed_family, dict(levels["defaults"])),
         Case(
             "levels/gray8/use-props",
             lambda: CORE.nimages.PeakStats(gray(97, 65), upper_limit=60),
@@ -163,6 +191,14 @@ def cases() -> list[Case]:
         Case("posterize/yuv444p16/bits6", lambda: source(96, 64, vs.YUV444P16), {"bits": 6}),
         Case("posterize/gray8/identity", lambda: gray(97, 65), {"bits": 8}),
         Case("posterize/gray8/one-pixel", lambda: source(1, 1, vs.GRAY8), {"bits": 3}),
+        Case("posterize/gray8/variable-dims", lambda: variable(vs.GRAY8), {"bits": 4}),
+        Case("posterize/gray8/variable-depth", mixed_depth, {"bits": 4}),
+        Case("posterize/gray8/mixed-family", mixed_family, {"bits": 4}),
+        Case(
+            "posterize/gray8/lloyd-variable-dims",
+            lambda: variable(vs.GRAY8),
+            {"bits": 4, "method": 1},
+        ),
         Case(
             "posterize/gray8/use-props",
             lambda: CORE.nimages.PeakGrayShades(gray(97, 65), threshold=0.01),

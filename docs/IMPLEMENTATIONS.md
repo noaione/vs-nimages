@@ -209,9 +209,11 @@ and an `RGB` clip through the fixed-point luma of its three planes:
 `YUV` clip reports limited-range luma, because plane 0 is read as it arrives.
 
 `gpu=1` counts on the Vulkan device, reads the table back, and runs the same peak
-search, so the properties are identical to `gpu=0`. It requires VapourSynth R80,
-a Vulkan 1.4 device and a constant format, and it is worth it after a device
-producer: counting is 10x to 18x cheaper there, and 20x for `RGB`.
+search, so the properties are identical to `gpu=0`. It requires VapourSynth R80
+and a Vulkan 1.4 device, and it is worth it after a device producer: counting is
+10x to 18x cheaper there, and 20x for `RGB`. A clip whose dimensions vary per
+frame or whose format is not declared takes the same path, because the count
+reads the format from each frame.
 [19](improvements/19-vulkan-histogram-analyzers.md#outcome-so-far).
 
 ### 5.2 `PeakGrayShades`
@@ -291,8 +293,10 @@ It evaluates each sample without an integer LUT, maps the selected interval to
 accept `use_props=True`, nonzero `peak_offset`, or `auto_gamma=True`.
 
 `gpu=1` runs the integer table on the Vulkan device, byte-identical to the host
-path. It is refused for the float curve, which has no table, and for a clip
-whose format varies. A device map is only a win inside a device chain, where the
+path. It is refused for the float curve, which has no table. A clip whose
+dimensions vary per frame or whose format is not declared works: the curve is
+resolved and the table uploaded per frame. A device map is only a win inside a
+device chain, where the
 frame is already device-resident; see
 [18](improvements/18-vulkan-pointwise-maps.md#outcome-so-far).
 
@@ -319,7 +323,8 @@ whose frames differ gets a level set each.
 and solved with the same host code, which takes `PeakGrayShades` into
 `Posterize(method=1)` from 20.0 ms to 6.2 ms at 12 MP `GRAY8` and from 49.1 ms
 to 14.0 ms at `GRAY16`. `use_props=True` works under `gpu=1` and rebuilds the
-table per frame.
+table per frame, which is also what a clip that declares no format gets; a clip
+whose dimensions vary per frame uses the table the declared depth built.
 
 Peak analysis and levels deliberately remain separate. Users should compose
 `PeakStats` and `Levels(use_props=True)` when automatic per-frame levels are
@@ -364,8 +369,8 @@ resident is uploaded with `std.GPUUpload`, which is what a `gpu:int:opt`
 argument would otherwise get inserted for. The parity the port holds is 8 bit
 byte-identical, the deeper integers within one code value and the float
 formats within two ULP, gated by `tools/deblur_hash.py --device`; a clip whose
-format is not constant is refused, because the plan is resolved once at
-creation.
+format is not declared is refused, because the plan is resolved once at
+creation. Dimensions may vary per frame.
 
 The defaults follow the method in effect, and `method=1` has no refinement loop,
 so it ignores `iterations` entirely, including a value outside the range

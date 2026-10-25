@@ -39,7 +39,9 @@ deferred because it touches the sibling checkout, and M5 is distribution work.
 the Vulkan device path is in part implemented. `Deblur(gpu=1)` runs both methods
 on Gray, RGB and YUV at every integer depth from 8 to 16 bits and on their 32 bit
 float formats; 8 bit is byte-identical to `gpu=0`, the deeper integers within
-one LSB and the float path within two ULP, and a variable format is refused;
+one LSB and the float path within two ULP, and a clip that declares no format
+is refused. every device path takes a clip whose dimensions vary per frame,
+because each kernel reads its geometry from the frame;
 [17](docs/improvements/17-vulkan-deblur.md#outcome-so-far) has the per-format
 parity, and [the aggregate](docs/improvements/17-vulkan-deblur.md#aggregate) the
 fan-in numbers. aggregate is 5.6x to 7.8x the CPU at 12 MP; at 24 MP the four

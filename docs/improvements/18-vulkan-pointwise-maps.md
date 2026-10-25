@@ -177,8 +177,9 @@ every integer format the filters accept. the gate is `tools/map_hash.py`:
 | `Levels(gpu=1)` on a float clip | 1 | refused, names the float curve |
 | `Posterize(gpu=1, method=1)` | 1 | refused, names the histogram |
 | odd width, 2x2, 1 px, subsampled 4:2:0 | 6 | byte-identical |
+| a clip whose dimensions vary per frame, and one that declares no format | 7 | byte-identical, table rebuilt per frame |
 
-29 cases, all of them identical or refused as intended. the host table
+41 cases, all of them identical or refused as intended. the host table
 (`tools/map_hash.py --check`) is recorded as well, so a later change to a table
 builder shows up without needing a device.
 

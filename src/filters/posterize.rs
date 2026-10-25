@@ -191,11 +191,6 @@ impl Filter for Posterize {
         let gpu = read_int(&input, key!(c"gpu"))?.unwrap_or(0) != 0;
         let (source, engine, table, counters) = if gpu {
             gpu::require_device(&core)?;
-            if !vapoursynth4_rs::utils::is_constant_video_format(&info) {
-                return Err(NImagesError::new(
-                    "Posterize gpu=1: the clip's format is not constant",
-                ));
-            }
             let source = if source.residency() == ffi::VSNodeResidency::GPU {
                 source
             } else {
@@ -311,6 +306,15 @@ impl Filter for Posterize {
                     }),
                 };
 
+                // A table uploaded at creation carries the declared depth, so a frame
+                // that disagrees is refused rather than read as bytes of the wrong
+                // width. A clip that declares no format uploads its table per frame.
+                let creation_depth = self.resolved.as_ref().map(|resolved| resolved.sample_depth);
+                if self.table.is_some() && creation_depth != Some(sample_depth) {
+                    return Err(NImagesError::new(
+                        "Posterize gpu=1: the input sample depth changed after filter creation",
+                    ));
+                }
                 let mark = Instant::now();
                 let output = match (&self.engine, &self.table) {
                     // A fixed `bits` uploaded its table at creation; bits that come

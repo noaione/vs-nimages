@@ -140,6 +140,38 @@ class Case:
 def gray(width: int, height: int, mode: str = "ramp") -> vs.VideoNode:
     return source(width, height, vs.GRAY8, mode)
 
+VARIABLE_SIZES = ((32, 16), (17, 9), (1, 1))
+
+
+def variable(format_: vs.VideoFormat, mode: str = "ramp") -> vs.VideoNode:
+    """A clip whose frames report their own dimensions."""
+    clips = [
+        source(width, height, format_, mode, length=2) for width, height in VARIABLE_SIZES
+    ]
+    return CORE.std.Splice(clips, mismatch=True)
+
+
+def mixed_depth() -> vs.VideoNode:
+    """A clip that mixes 8 and 16 bit frames, so it declares no format."""
+    return CORE.std.Splice(
+        [
+            source(32, 16, vs.GRAY8, "ramp", length=2),
+            source(32, 16, vs.GRAY16, "ramp", length=2),
+        ],
+        mismatch=True,
+    )
+
+
+def mixed_family() -> vs.VideoNode:
+    """A clip that mixes Gray and RGB frames, so it declares no format either."""
+    return CORE.std.Splice(
+        [
+            source(32, 16, vs.GRAY8, "ramp", length=2),
+            source(32, 16, vs.RGB24, "ramp", length=2),
+        ],
+        mismatch=True,
+    )
+
 
 def cases() -> list[Case]:
     """The fixed case table."""
@@ -331,6 +363,29 @@ def cases() -> list[Case]:
             dict(shades["defaults"]),
             kind="shades",
             refused="Gray, YUV or RGB 8 to 16 bit",
+        ),
+    ]
+    table += [
+        Case("stats/gray8/variable-dims", lambda: variable(vs.GRAY8), dict(stats["defaults"])),
+        Case("stats/variable-depth/defaults", mixed_depth, dict(stats["defaults"])),
+        Case("stats/mixed-family", mixed_family, dict(stats["defaults"])),
+        Case(
+            "shades/gray8/variable-dims",
+            lambda: variable(vs.GRAY8),
+            dict(shades["defaults"]),
+            kind="shades",
+        ),
+        Case(
+            "shades/variable-depth/defaults",
+            mixed_depth,
+            dict(shades["defaults"]),
+            kind="shades",
+        ),
+        Case(
+            "shades/mixed-family",
+            mixed_family,
+            dict(shades["defaults"]),
+            kind="shades",
         ),
     ]
     return table

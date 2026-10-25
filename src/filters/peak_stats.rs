@@ -100,11 +100,6 @@ impl Filter for PeakStats {
         let gpu = read_int(&input, key!(c"gpu"))?.unwrap_or(0) != 0;
         let (source, engine) = if gpu {
             gpu::require_device(&core)?;
-            if !vapoursynth4_rs::utils::is_constant_video_format(&info) {
-                return Err(NImagesError::new(
-                    "PeakStats gpu=1: the clip's format is not constant",
-                ));
-            }
             let source = if source.residency() == ffi::VSNodeResidency::GPU {
                 source
             } else {

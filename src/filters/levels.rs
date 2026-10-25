@@ -172,19 +172,12 @@ impl Filter for Levels {
         let gpu = read_int(&input, key!(c"gpu"))?.unwrap_or(0) != 0;
         let (source, engine, table) = if gpu {
             gpu::require_device(&core)?;
-            // The device path resolves the curve once, so the clip has to say
-            // what it is at creation, and the float curve, which has no table,
-            // is refused instead of quietly running on the host.
-            if !vapoursynth4_rs::utils::is_constant_video_format(&info) {
-                return Err(NImagesError::new(
-                    "Levels gpu=1: the clip's format is not constant",
-                ));
-            }
+            // The float curve has no device table, so the device path refuses it
+            // rather than quietly running the frame on the host. A clip that
+            // declares no format is judged per frame instead, because only the
+            // frame can say whether it holds floats.
             if domain == Some(CurveDomain::Float32) {
-                return Err(NImagesError::new(
-                    "Levels gpu=1: the float curve stays on the host; run a Gray or RGB \
-                     float clip with gpu=0",
-                ));
+                return Err(gpu_float_error());
             }
             let source = if source.residency() == ffi::VSNodeResidency::GPU {
                 source
@@ -244,6 +237,11 @@ impl Filter for Levels {
                 let input = self.source.get_frame_filter(n, &mut frame_ctx);
                 check_frame_format(&input, "Levels", Accept::Levels)?;
                 let domain = curve_domain(input.get_video_format())?;
+                // Only a clip that declares no format reaches the device path
+                // without this check at creation.
+                if self.gpu && domain == CurveDomain::Float32 {
+                    return Err(gpu_float_error());
+                }
 
                 if self.debug {
                     let settings = describe_frame(&input);
@@ -493,6 +491,14 @@ fn float_mode_error() -> NImagesError {
     NImagesError::new(
         "Levels: float clips take their endpoints in 8-bit code values, and do not \
          support use_props=True, nonzero peak_offset, or auto_gamma=True",
+    )
+}
+
+/// The refusal a float frame gets under `gpu=1`, from creation or from a frame.
+fn gpu_float_error() -> NImagesError {
+    NImagesError::new(
+        "Levels gpu=1: the float curve stays on the host; run a Gray or RGB \
+         float clip with gpu=0",
     )
 }
 

@@ -225,8 +225,10 @@ aggregate is measured and the 24 MP ceiling is known; tiling is the open item.
 | the device probe | `tools/gpu_probe.py` |
 
 `gpu=1` refuses a format outside those three families, a sample type outside
-8 to 16 bit integer and 32 bit float, and a variable format, each with a
-message naming what it saw.
+8 to 16 bit integer and 32 bit float, and a clip that declares no format, each
+with a message naming what it saw. dimensions are free to vary: the kernel reads
+them from the frame, and the variable-dimension case in `tools/deblur_hash.py`
+is the gate.
 
 ### parity
 
