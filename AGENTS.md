@@ -71,6 +71,12 @@ same page as gray does. that puts the `Posterize(method=1)` chain at 2.7x for
 host `RGB` luma is vectorised, so an RGB count costs 1.1 to 1.5 times the gray
 one rather than three times.
 
+the device section [16](docs/improvements/16-vulkan-validation.md#outcome-so-far)
+asked for is in `tests/check-nimages.py`: it holds `gpu=1` against `gpu=0` for
+all five filters, adds 27 checks, and on a host without a device prints the
+creation error and passes, unless `NIMAGES_REQUIRE_DEVICE=1` makes the skip a
+failure.
+
 `docs/improvements/15-vulkan-device-path.md` records what the pinned binding
 offers, what the host/device bus costs, and which filters pay for it: the device
 `Deblur` is a win, the pointwise maps and the histogram analyzers are chain
@@ -151,6 +157,9 @@ carries a `parity` of `nmanga`, `diverges` or `reference-only` plus the
   through the built plugin, then checks geometry, per-frame independence,
   repeated and out-of-order and concurrent requests, property preservation,
   determinism and the error messages.
+  it ends with a device section: `gpu=1` against `gpu=0` on the same source and
+  arguments for every filter that has the argument, skipped with the creation
+  error on a host without a device.
 - `tools/map_hash.py`: `Levels` and `Posterize` byte-exactness, `--device` against
   the host path and `--check` for the recorded host table.
 - `tools/histogram_hash.py`: `PeakStats` and `PeakGrayShades` property parity,

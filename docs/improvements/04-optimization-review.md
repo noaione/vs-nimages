@@ -50,7 +50,8 @@ for 05, 06 and 12.
 | 7 | 11 streaming blur scratch | kept | ring `temp`: 283.2 to 238.8 MiB per frame and 651.5 to 563.0 MiB at a thirteen frame fan-in, bit-identical, wall unchanged inside the drift |
 | 8 | 12 Deblur conversion dispatch | kept | the write stage falls 39% and 58%, 18.59 to 11.39 ms and 21.86 to 9.15 ms over two rounds, at the same bytes |
 | 9 | 13 peak prominence pruning | kept | same winner in six workloads, 228,000 to 76,000 prominence scans |
-| 10 | 14 Deblur blur consumers | kept | bit-identical, estore median down 10% to 15% and throughput up 8% to 12% through the plugin, under the 15% gate at most settings |
+| 10 | 14 Deblur blur consumers | kept | bit-identical, 
+estore median down 10% to 15% and throughput up 8% to 12% through the plugin, under the 15% gate at most settings |
 
 the two combinations the review asked for separately are both in place and were
 measured apart first: 05 and 06 each have their own single-change reading, and
@@ -137,12 +138,14 @@ FMA contraction, fewer requested iterations, or a reduced-precision Levels LUT.
 
 `tools/bench.py` covers the existing 8-bit page workflows, not high-depth,
 float, Lloyd, or property-driven Posterize comparisons. the scripts
-`.tmpbuild/bench_stage.py`, `.tmpbuild/deblur_own_stages.py`,
-`.tmpbuild/deblur_parallelism.py`, and `.tmpbuild/deblur_output_hash.py` exist
-locally, but are untracked helpers. their measurements are not a reproducible
-public harness. promote/adapt the needed synthetic cases to `tools/` as a
-separate preparation step. the Deblur stage helper infers blur cost by
-subtracting configurations; use a directly timed pure blur to confirm it.
+`.tmpbuild/bench_stage.py`, `.tmpbuild/deblur_own_stages.py` and
+`.tmpbuild/deblur_parallelism.py` exist locally, but are untracked helpers.
+`.tmpbuild/deblur_output_hash.py` became `tools/deblur_hash.py`
+([16](16-vulkan-validation.md#outcome-so-far)), which runs 39 cases. their
+measurements are not a reproducible public harness. promote/adapt the needed
+synthetic cases to `tools/` as a separate preparation step. the Deblur stage
+helper infers blur cost by subtracting configurations; use a directly timed
+pure blur to confirm it.
 
 the existing page command uses suite name `posterize`, not its directory name:
 

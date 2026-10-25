@@ -775,8 +775,9 @@ current 8-bit argument meanings. RGB and YUV already work for 8-bit
 depths and adds a separate floating-point path for `Levels`.
 
 The active implementation increment extends integer mapping and analysis
-through 16 bits and adds float `Levels`. The release build passes; integration
-validation is pending for this increment.
+through 16 bits and adds float `Levels`. The increment landed. The validator
+`tests/check-nimages.py` is its gate and covers the 16-bit integer mapping and
+float `Levels`, 2157 checks passing at the time of writing.
 
 #### Proposed scope
 

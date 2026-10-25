@@ -1,6 +1,6 @@
 # striped histogram counters
 
-status: proposed. content-sensitive experiment, especially flat artwork.
+status: implemented for the 8-bit reader behind a per-plane probe, rejected for the wide one. kept.
 
 ## current cost
 

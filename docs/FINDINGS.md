@@ -657,6 +657,10 @@ against the same golden vectors.
   and writes `manifest.vs` (`vs_nimages`), which matches the crate's `cdylib` output
   name.
 - Drop the unused `vsscript-43` feature; the plugin never links VSScript.
+  **Answered 2026-10-25:** it cannot be dropped. the pinned rev's `api.rs`
+  names `VSSCRIPTAPI` and its `sciprt.rs` names `VSScript` outside any feature
+  gate, so the dependency does not build without it. the feature stays and the
+  manifest comment says it is the binding's requirement, not this plugin's.
 - Check whether `--locked` builds are viable (a `Cargo.lock` is committed).
 
 ### M6 — Higher precision and colour (later, unchanged)

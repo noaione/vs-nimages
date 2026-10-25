@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import shutil
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -26,7 +27,6 @@ from functools import partial
 from pathlib import Path
 
 import numpy as np
-
 import vapoursynth as vs
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -38,6 +38,9 @@ FUNCTIONS = ("Deblur", "Levels", "PeakGrayShades", "PeakStats", "Posterize")
 # The filters with a `gpu` argument declare their output as `all`, which the
 # instance answers: a `gpu=0` run still hands back a host frame.
 DEVICE_FILTERS = ("Deblur", "Levels", "PeakGrayShades", "PeakStats", "Posterize")
+
+#: The text `vapoursynth` raises when a frame's pixels are on the device.
+GPU_RESIDENT = "GPU resident"
 CLIP_ALL = "clip:vnode:all;"
 
 # Histogram cases above this many pixels are left to the Rust tests; building a
@@ -163,6 +166,12 @@ def clip_of_frames(arrays: list[np.ndarray]):
 def array_of(clip, n: int = 0) -> np.ndarray:
     with clip.get_frame(n) as frame:
         return np.asarray(frame[0]).copy()
+
+
+def planes_of(clip, n: int = 0) -> list[list[int]]:
+    """Every plane of frame `n`, so a downloaded frame can be compared."""
+    with clip.get_frame(n) as frame:
+        return [np.asarray(frame[plane]).tolist() for plane in range(frame.format.num_planes)]
 
 
 def props_of(clip, n: int = 0) -> dict:
@@ -1482,6 +1491,162 @@ def check_color_analysis() -> None:
         same(shades, [want], f"RGB {color} converts to luma {want}")
 
 
+# ---------------------------------------------------------------------------
+# the device path
+# ---------------------------------------------------------------------------
+
+
+def resident(clip, n: int = 0) -> bool:
+    """True when frame `n` of `clip` keeps its pixels on the device."""
+    with clip.get_frame(n) as frame:
+        try:
+            frame[0]
+        except vs.Error as error:
+            if GPU_RESIDENT in str(error):
+                return True
+            raise
+    return False
+
+
+def device_skip_reason() -> str | None:
+    """What `gpu=1` fails with here, or `None` when a device answers.
+
+    A host without Vulkan 1.4 resolves the failure at filter creation, so one
+    tiny node separates a skip from a failure this section has to report.
+    """
+    if not hasattr(core.std, "GPUDownload"):
+        return "this VapourSynth has no std.GPUDownload"
+    clip = core.std.BlankClip(width=64, height=64, format=vs.GRAY8, length=1)
+    try:
+        node = core.nimages.Levels(clip, black=16, white=235, gpu=1)
+        with core.std.GPUDownload(node).get_frame(0):
+            return None
+    except vs.Error as error:
+        return " ".join(str(error).split())
+
+
+def analyzer_props(clip) -> dict:
+    """The `NImages` properties of frame 0, with arrays made comparable."""
+    with clip.get_frame(0) as frame:
+        out = {}
+        for name, value in frame.props.items():
+            if not name.startswith("NImages"):
+                continue
+            out[name] = list(value) if isinstance(value, (list, tuple)) else value
+        return out
+
+
+def check_device() -> None:
+    section("the device path")
+    reason = device_skip_reason()
+    if reason is not None:
+        # Not a wheel gate: a runner without a usable device reports why the
+        # section did not run, and the run still passes. A job that does have a
+        # device sets `NIMAGES_REQUIRE_DEVICE=1`, which turns the skip into a
+        # failure so a broken device path cannot hide as "no device here".
+        if os.environ.get("NIMAGES_REQUIRE_DEVICE") == "1":
+            check(False, f"the device path did not run: {reason}")
+        else:
+            print(f"  skipped: {reason}")
+        return
+
+    height, width = 180, 320
+    page = ((np.arange(height)[:, None] * 7 + np.arange(width)[None, :]) % 256).astype(np.uint8)
+    source = clip_of(page)
+
+    rgb_blank = core.std.BlankClip(width=width, height=height, format=vs.RGB24, length=1)
+
+    def fill_rgb(n: int, f):
+        del n
+        out = f.copy()
+        for plane in range(3):
+            row = ((np.arange(width) + 40 + plane * 30) % 256).astype(np.uint8)
+            np.asarray(out[plane])[:] = np.tile(row, (height, 1))
+        return out
+
+    rgb = core.std.ModifyFrame(rgb_blank, rgb_blank, fill_rgb)
+
+    def build(clip, gpu: int) -> dict:
+        # The same source and the same arguments on both engines: the only
+        # difference is where the kernel ran.
+        return {
+            "PeakStats": core.nimages.PeakStats(clip, gpu=gpu),
+            "PeakGrayShades": core.nimages.PeakGrayShades(clip, gpu=gpu),
+            "Levels": core.nimages.Levels(clip, black=16, white=235, gamma=1.0, gpu=gpu),
+            "Posterize": core.nimages.Posterize(clip, bits=4, gpu=gpu),
+            "Deblur": core.nimages.Deblur(clip, gpu=gpu),
+        }
+
+    def compare(label: str, host, device) -> None:
+        if label in ("PeakStats", "PeakGrayShades"):
+            same(analyzer_props(device), analyzer_props(host), f"gpu=1 {label} properties")
+        else:
+            same(
+                planes_of(core.std.GPUDownload(device)),
+                planes_of(host),
+                f"gpu=1 {label} pixels",
+            )
+
+    host = build(source, 0)
+    device = build(source, 1)
+
+    # The frame kind is part of the contract: a `gpu=0` run hands back a host
+    # frame and a `gpu=1` run a device one.
+    for name in DEVICE_FILTERS:
+        check(not resident(host[name]), f"{name}: a gpu=0 frame stays on the host")
+        check(resident(device[name]), f"{name}: a gpu=1 frame is device resident")
+
+    for name in DEVICE_FILTERS:
+        compare(name, host[name], device[name])
+
+    # RGB reaches the luma readers and Deblur's three-plane write, which a gray
+    # page cannot see.
+    host_rgb = build(rgb, 0)
+    device_rgb = build(rgb, 1)
+    for name in ("PeakStats", "Levels", "Deblur"):
+        compare(name, host_rgb[name], device_rgb[name])
+
+    # A clip whose dimensions vary per frame: every kernel reads its geometry
+    # from the frame, so the output follows it.
+    sizes = ((318, 178), (320, 180), (321, 181))
+    variable = core.std.Splice(
+        [core.std.BlankClip(width=w, height=h, format=vs.GRAY8, length=1) for w, h in sizes],
+        mismatch=True,
+    )
+    same((variable.width, variable.height), (0, 0), "the variable source reports no fixed size")
+    node = core.nimages.Posterize(variable, bits=4, gpu=1)
+    fixed = core.nimages.Posterize(variable, bits=4)
+    for n, (frame_width, frame_height) in enumerate(sizes):
+        with core.std.GPUDownload(node).get_frame(n) as frame:
+            same(
+                (frame.width, frame.height),
+                (frame_width, frame_height),
+                f"gpu=1 variable frame {n}: geometry",
+            )
+            same(
+                np.asarray(frame[0]).tolist(),
+                array_of(fixed, n).tolist(),
+                f"gpu=1 variable frame {n}: pixels",
+            )
+
+    # A clip that mixes families declares no format, and `Deblur` builds its
+    # device plan from that format at creation, so it refuses the shape while
+    # the host path still takes it.
+    undefined = core.std.Splice(
+        [
+            core.std.BlankClip(width=16, height=16, format=vs.GRAY8, length=1),
+            core.std.BlankClip(width=16, height=16, format=vs.RGB24, length=1, color=[9, 9, 9]),
+        ],
+        mismatch=True,
+    )
+    expect_error(
+        "Deblur gpu=1 on a clip that declares no format",
+        lambda: core.nimages.Deblur(undefined, gpu=1),
+        contains="declares no format",
+    )
+    same(core.nimages.Deblur(undefined).num_frames, 2, "Deblur gpu=0 still takes the same clip")
+
+
 def main() -> int:
     if not hasattr(core, "imgseqs"):
         print(IMGSEQS_MISSING, file=sys.stderr)
@@ -1522,6 +1687,7 @@ def main() -> int:
     check_deblur(deblur)
     check_deblur_behaviour()
     check_deblur_errors()
+    check_device()
 
     print()
     if failures:

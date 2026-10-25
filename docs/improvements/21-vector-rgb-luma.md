@@ -107,9 +107,10 @@ times the gray one changes the chain ratios those tables quote.
   checked at runtime, and the scalar path stays reachable, so a mistake is a
   test failure rather than a crash. `#![deny(unsafe_op_in_unsafe_fn)]`-style
   discipline applies: every block carries its own SAFETY comment.
-- **the AVX2 build.** the crate ships a `-C target-cpu=x86-64-v3` variant, but
-  the kernel is written in 128-bit intrinsics. a wider kernel is a follow-up if
-  the 8-bit path stays above the memory floor; it is not part of this plan.
+- **the AVX2 build.** the crate ships a `-C target-cpu=x86-64-v3` variant, but the
+  kernel is written in 128-bit intrinsics. [22](22-wide-rgb-luma.md) built the
+  256-bit pair and measured it inside the run-to-run spread, so the wide kernels
+  are not in the tree.
 - **the flat page is still scatter bound.** a vector luma cannot help a single
   counter that every sample increments. the recorded flat number will improve by
   the arithmetic alone, and the honest way to read it is against the 7.5 ms that

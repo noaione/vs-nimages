@@ -1,6 +1,6 @@
 # Lloyd fixed-point exit
 
-status: proposed. low implementation risk, bounded speed benefit.
+status: implemented. kept.
 
 ## current cost
 

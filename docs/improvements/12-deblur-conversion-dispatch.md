@@ -62,8 +62,9 @@ the full filter regresses. keep scalar code for targets without the vector ISA.
 
 ## result
 
-status: deferred on measurement. the conversion share is small and a previous
-same-code rewrite regressed threefold.
+status: implemented. kept. the first attempt regressed the write stage
+threefold; the second, which dispatches once per row to a fixed-width writer,
+takes about 40% off it at the same bytes.
 
 the two stages this candidate covers are `luma` (the read) and `write` (the
 round, saturate and store), both already reported by `debug=1`. medians of
@@ -124,6 +125,6 @@ to 60 ms frame on the unsharp mask.
 
 `cargo test --locked` passed 91 unit tests and 11 golden tests, `cargo clippy
 --all-targets --locked -- -D warnings` and `cargo fmt --check` were clean, and
-`tests/check-nimages.py` passed 2150 checks. the twelve case Deblur hash harness
+`tests/check-nimages.py` passed 2150 checks. the Deblur hash harness
 reports the same hashes as before the change, on 8, 16 and 32 bit planes and
 both `NaN` pages, so the specialization is bit-exact.

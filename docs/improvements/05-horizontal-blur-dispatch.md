@@ -1,6 +1,6 @@
 # horizontal blur dispatch
 
-status: proposed. highest potential, with a recorded failed predecessor.
+status: implemented. kept. the 2.9x regression does not reproduce when the feature check is hoisted out of the row loop.
 
 ## current cost
 

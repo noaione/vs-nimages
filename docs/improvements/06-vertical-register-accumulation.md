@@ -1,6 +1,6 @@
 # vertical register accumulation
 
-status: proposed. exact arithmetic-order experiment.
+status: implemented with a measured dispatch threshold. kept.
 
 ## current cost
 

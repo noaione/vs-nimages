@@ -1,12 +1,13 @@
 # validating and measuring a device kernel
 
-status: in part landed. `tools/deblur_hash.py` and its `--device` mode are in
-the tree, with 39 cases after M5 added RGB, YUV and the depth variants; the
-validator gate is open. the fan-in protocol under [the
+status: landed. `tools/deblur_hash.py` and its `--device` mode are in the tree,
+with 39 cases after M5 added RGB, YUV and the depth variants, and the device
+section runs inside `tests/check-nimages.py`. the fan-in protocol under [the
 measurements](#the-measurements) was run on 2026-10-24, and its numbers are in
-[17](17-vulkan-deblur.md#aggregate) and `docs/BENCH.md`. the plan is the gate
+[17](17-vulkan-deblur.md#aggregate) and `docs/BENCH.md`. the plan was the gate
 for [17](17-vulkan-deblur.md), [18](18-vulkan-pointwise-maps.md) and
-[19](19-vulkan-histogram-analyzers.md).
+[19](19-vulkan-histogram-analyzers.md); [the outcome](#outcome-so-far) records
+what the gate covers.
 
 ## problem
 
@@ -42,21 +43,29 @@ is a number in the report, not a change to the fixture.
 
 ## the device gate in the suite
 
-`tests/check-nimages.py` grows a device section that runs after the CPU checks
-and is gated on a usable device, not on an argument:
+`tests/check-nimages.py` runs a device section after the CPU sections. it is
+gated on the plugin answering, not on an argument or on a device list: a host
+without Vulkan 1.4 resolves the failure at filter creation, which is what the
+node below detects.
 
 ```py
-devices = core.vulkan_devices               # list of dicts, one per physical device
-usable = [d for d in devices if d["usable"]]
-if not usable:
-    print("gpu: skipped, no usable Vulkan 1.4 device")
-    return 0                                # a skip is exit 0, like the sibling
-core.set_vulkan_device(usable[0]["index"])  # pin the device, so two runs compare
+def device_skip_reason() -> str | None:
+    clip = core.std.BlankClip(width=64, height=64, format=vs.GRAY8, length=1)
+    try:
+        node = core.nimages.Levels(clip, black=16, white=235, gpu=1)
+        with core.std.GPUDownload(node).get_frame(0):
+            return None
+    except vs.Error as error:
+        return " ".join(str(error).split())
 ```
 
-on this host that list has two entries and only the RTX 3050 is usable, because
-the Intel UHD reports 1.2.201 and the core requires 1.4. the skip therefore has a
-reason string, and the harness prints it.
+a skip prints that text and adds no checks, so a runner without a device exits
+0; `NIMAGES_REQUIRE_DEVICE=1` turns the skip into a failure instead.
+
+the harnesses that print `core.vulkan_devices` see two entries on this host, and
+only the RTX 3050 is usable, because the Intel UHD reports 1.2.201 and the core
+requires 1.4. the validator does not need that list: the same refusal reaches it
+as a creation error, which is the skip reason it prints.
 
 the rest of the section is a loop over the filters that have a `gpu` argument:
 
@@ -73,16 +82,14 @@ only difference is where the kernel ran.
 
 ## the Deblur hash harness
 
-the 12-case Deblur hash harness lives in `.tmpbuild/deblur_output_hash.py` and is
-not committed, which [04](04-optimization-review.md) lines 141-145 already calls out as
-the reason the exactness claims for 05, 06 and 12 are not reproducible from
-the tree. the device port needs it more than they did, because a shader changes
-the arithmetic environment rather than the loop shape.
+the Deblur hash harness is `tools/deblur_hash.py`: committed, and 39 cases
+after M5 added RGB, YUV and the depth variants, so the exactness claims for 05,
+06 and 12 reproduce from the tree. the device port needed it more than they
+did, because a shader changes the arithmetic environment rather than the loop
+shape. it covers:
 
-promote it to `tools/deblur_hash.py` before the first kernel:
-
-- 12 cases: both methods, `u8`/`u16`/`f32`, odd width, a 1 px frame and a 129-tap kernel,
-  a variable-dimension clip, and a frame whose stride padding is non-zero.
+- both methods, `u8`/`u16`/`f32`, `RGB` and `YUV`, an odd width, a 1 px frame, a
+  variable-dimension clip, and a frame whose stride padding is non-zero.
 - one hash per case over the output plane bytes, printed as a table sorted by
   case, so two builds compare with `diff`.
 - a `--write` mode that records the table beside a source revision, and a
@@ -136,7 +143,7 @@ and the other tomorrow, and a shader A/B is two processes because
 | device section in the validator | `tests/check-nimages.py` |
 | Deblur hash harness | `tools/deblur_hash.py` (new), promoted from `.tmpbuild/` |
 | analyzer property harness | `tools/histogram_hash.py` (new), with `--device` and `--bench` |
-| device bench | `tools/bench.py --device`, plus a `gpu` column in `docs/BENCH.md` |
+| device bench | `tools/histogram_hash.py --bench` and `tools/deblur_fanin.py --device`, whose numbers land in `docs/BENCH.md` |
 | results | a new section in `docs/BENCH.md`, not a rewrite of the existing block |
 | launch geometry, index arithmetic, tap order | `#[cfg(test)]` tests in `src/gpu/shared.rs`, which names no binding type |
 
@@ -148,11 +155,33 @@ device side.
 
 the device section is not a wheel gate. a runner without a usable device prints
 the skip reason and exits 0, which keeps the existing Windows and Linux jobs
-green. a job that has a device sets an environment flag and treats a skip as a
-failure, so a broken device path cannot hide as "no device here".
+green. a job that has a device sets `NIMAGES_REQUIRE_DEVICE=1`, which turns a
+skip into a failure, so a broken device path cannot hide as "no device here".
 
 no new wheel variant is needed: the device path is the same binary, and a host
 without Vulkan 1.4 resolves the failure at filter creation.
+
+## outcome so far
+
+written 2026-10-25. the section adds 27 checks, 2157 to 2184, over one 320x180
+gray page, one 320x180 `RGB24` page and a three frame clip of three sizes:
+
+| what | checks |
+| --- | ---: |
+| `gpu=0` hands back a host frame and `gpu=1` a device frame, all five filters | 10 |
+| `gpu=1` equals `gpu=0` on pixels or properties, gray page | 5 |
+| the same on an `RGB24` page, for the luma reader and the three plane write | 3 |
+| a clip whose dimensions vary per frame follows them, geometry and pixels | 6 |
+| `Deblur(gpu=1)` refuses a clip that declares no format, `gpu=0` takes it | 2 |
+| the page itself, from `variable.width` | 1 |
+
+the residency check is a pixel access: `vapoursynth` raises `The frame is GPU
+resident` for a device frame and returns a mapped plane for a host one, which is
+the same fact the instance advertises through its `all` return signature.
+
+the analyzer rows compare properties read straight off the device frame, since a
+property map is host state and needs no download. the pixel rows go through
+`std.GPUDownload` first, which is what a caller pays.
 
 ## done when
 
