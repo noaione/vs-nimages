@@ -2,6 +2,10 @@
 
 ### unreleased
 
+nothing yet.
+
+### [0.3.0] (2026-11-09)
+
 **Changed**:
 - the plugin builds against upstream `vapoursynth4-rs` 0.6.0 with its `vulkan`
   feature. the Vulkan half is the safe wrapper in `src/vulkan.rs` over the
