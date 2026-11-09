@@ -188,8 +188,9 @@ impl Filter for Posterize {
             } else {
                 gpu::upload(&core, &source)?
             };
+            let engine = Map::new(&core)?;
             let table = match &resolved {
-                Some(resolved) => device_table(&core, &resolved.table)?,
+                Some(resolved) => device_table(&core, &engine, &resolved.table)?,
                 None => None,
             };
             // `method=1` solves its levels from plane 0's histogram, so it
@@ -199,7 +200,7 @@ impl Filter for Posterize {
             } else {
                 None
             };
-            (source, Some(Map::new(&core)?), table, counters)
+            (source, Some(engine), table, counters)
         } else {
             let source = if source.residency() == ffi::VSNodeResidency::GPU {
                 gpu::download(&core, &source)?
@@ -315,8 +316,8 @@ impl Filter for Posterize {
                         engine.render(&core, &input, table, *length)?
                     }
                     (Some(engine), None) => {
-                        let (table, length) =
-                            device_table(&core, &resolved.table)?.ok_or_else(|| {
+                        let (table, length) = device_table(&core, engine, &resolved.table)?
+                            .ok_or_else(|| {
                                 NImagesError::new(
                                     "Posterize gpu=1: the bits have no table to upload",
                                 )

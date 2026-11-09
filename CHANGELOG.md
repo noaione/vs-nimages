@@ -7,6 +7,9 @@
   feature. the Vulkan half is the safe wrapper in `src/vulkan.rs` over the
   ash-based `VSVULKANAPI` table, and `gpu=1` still hands back a device-resident
   frame.
+- `Levels(gpu=1)` with `use_props=True` and `Posterize(gpu=1)` with a
+  per-frame table reuse the map's compute pool instead of creating one per
+  frame.
 
 ### [0.2.1] (2026-10-25)
 

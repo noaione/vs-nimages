@@ -86,6 +86,9 @@ analyzers, and all of them have landed.
 the dependency is upstream `vapoursynth4-rs` 0.6.0 with its `vulkan` feature,
 and the safe wrapper over the ash-based `VSVULKANAPI` table is `src/vulkan.rs`;
 that raises the floor to VapourSynth R80.
+[23](docs/improvements/23-async-frame-pipeline.md) records the asynchronous
+request audit, and [24](docs/improvements/24-shared-upload-pool.md) the shared
+per-frame table pool.
 
 ## where the behaviour comes from
 
@@ -175,6 +178,8 @@ carries a `parity` of `nmanga`, `diverges` or `reference-only` plus the
   `--device` compares `gpu=1` against `gpu=0` on the same cases.
 - `tools/deblur_fanin.py`: aggregate throughput through a 13 frame
   `std.AverageFrames` fan-in, for `gpu=0` and `gpu=1`.
+- `tools/async_probe.py`: frames-in-flight timing with `get_frame_async` for
+  every filter, host and device, with an asynchronous exactness check.
 - `tools/bench.py`: times the python reference against the plugin on the same
   pages. see below.
 - `docs/BENCH.md`: the method and the measured results.

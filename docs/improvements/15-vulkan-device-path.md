@@ -275,6 +275,9 @@ same change that lands the dependency.
 | [18](18-vulkan-pointwise-maps.md) | `Levels` and `Posterize` as chain members | bit-exact against `gpu=0`, chain measured with and without |
 | [19](19-vulkan-histogram-analyzers.md) | `PeakStats` and `PeakGrayShades` on the device | only if a device chain or a device source exists to amortise the upload |
 
+follow-ups: [23](23-async-frame-pipeline.md) audits the request path and
+[24](24-shared-upload-pool.md) removes the per-frame upload pool.
+
 ## risks
 
 - **the CPU's frame parallelism.** VapourSynth runs frames on 12 workers. a

@@ -37,7 +37,7 @@ use std::time::{Duration, Instant};
 
 use vapoursynth4_rs::frame::{VideoFormat, VideoFrame, VideoFrameMut};
 use vapoursynth4_rs::map::{AppendMode, KeyStr, MapMut, MapPropertyError, MapRef, Value};
-use vapoursynth4_rs::node::{Dependencies, Filter, RequestPattern, VideoNode};
+use vapoursynth4_rs::node::{Dependencies, Filter, FilterMode, RequestPattern, VideoNode};
 use vapoursynth4_rs::{ColorFamily, SampleType, VideoInfo, core::CoreRef, ffi, key};
 
 use crate::error::{NImagesError, Result};
@@ -297,6 +297,7 @@ impl<const GPU: bool, F: Filter<Error = NImagesError>> Filter for GpuNode<GPU, F
     const NAME: &'static CStr = F::NAME;
     const ARGS: &'static CStr = F::ARGS;
     const RETURN_TYPE: &'static CStr = F::RETURN_TYPE;
+    const FILTER_MODE: FilterMode = F::FILTER_MODE;
     const FLAGS: i32 = if GPU {
         ffi::VSFilterFlags::GPUOutput as i32
     } else {
@@ -472,13 +473,14 @@ impl MappingTable {
 /// float curve, which has no device form.
 pub(super) fn device_table(
     core: &CoreRef<'_>,
+    engine: &crate::gpu::map::Map,
     table: &MappingTable,
 ) -> Result<Option<(crate::gpu::SharedFrame, u32)>> {
     let Some(words) = table.device_words() else {
         return Ok(None);
     };
     let length = u32::try_from(words.len()).unwrap_or(u32::MAX);
-    Ok(Some((crate::gpu::upload_words(core, &words)?, length)))
+    Ok(Some((engine.upload_words(core, &words)?, length)))
 }
 
 /// Rewrites every sample of one plane through `table`.

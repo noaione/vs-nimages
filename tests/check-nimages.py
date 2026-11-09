@@ -583,6 +583,47 @@ def check_request_patterns() -> None:
     same(concurrent, [expected_black[n] for n in (3, 1, 0, 2, 2, 0, 1, 3)], "concurrent requests")
 
 
+def check_async_requests() -> None:
+    section("asynchronous frame requests")
+    rng = np.random.default_rng(7)
+    pages = [rng.integers(0, 256, (23, 17), dtype=np.uint8) for _ in range(4)]
+    clip = clip_of_frames(pages)
+
+    builders = (
+        ("PeakStats", lambda: core.nimages.PeakStats(clip)),
+        ("PeakGrayShades", lambda: core.nimages.PeakGrayShades(clip)),
+        ("Levels", lambda: core.nimages.Levels(clip, black=16, white=235)),
+        ("Posterize", lambda: core.nimages.Posterize(clip, bits=3)),
+        ("Deblur", lambda: core.nimages.Deblur(clip, method=1)),
+    )
+
+    for name, build in builders:
+        expected = build()
+        expected_frames = []
+        for n in range(4):
+            with expected.get_frame(n) as frame:
+                expected_frames.append(
+                    (np.asarray(frame[0]).tolist(), dict(frame.props))
+                )
+
+        # Build a second node, so the asynchronous requests cannot be
+        # answered from frames the first node already cached.
+        requested = build()
+        futures = [(n, requested.get_frame_async(n)) for n in (3, 0, 2, 1)]
+        for n, future in futures:
+            with future.result() as frame:
+                same(
+                    np.asarray(frame[0]).tolist(),
+                    expected_frames[n][0],
+                    f"{name} frame {n}: asynchronous pixels",
+                )
+                same(
+                    dict(frame.props),
+                    expected_frames[n][1],
+                    f"{name} frame {n}: asynchronous properties",
+                )
+
+
 def check_errors() -> None:
     section("invalid arguments")
     gray = clip_of(np.full((8, 8), 100, dtype=np.uint8))
@@ -1606,6 +1647,48 @@ def check_device() -> None:
     for name in ("PeakStats", "Levels", "Deblur"):
         compare(name, host_rgb[name], device_rgb[name])
 
+    # Concurrent asynchronous frames share the map's upload pool.  A
+    # per-frame table must still land in its own recording, and the pixels
+    # must match the host path for every frame.
+    async_pages = [
+        ((page.astype(np.uint16) + n * 17) % 256).astype(np.uint8) for n in range(4)
+    ]
+    async_source = clip_of_frames(async_pages)
+    async_host = core.nimages.Posterize(async_source, bits=3, method=1)
+    async_device = core.std.GPUDownload(
+        core.nimages.Posterize(async_source, bits=3, method=1, gpu=1)
+    )
+    for n, future in ((n, async_device.get_frame_async(n)) for n in (3, 0, 2, 1)):
+        with future.result() as frame:
+            same(
+                [
+                    np.asarray(frame[plane]).tolist()
+                    for plane in range(frame.format.num_planes)
+                ],
+                planes_of(async_host, n),
+                f"gpu=1 asynchronous frame {n}: pixels",
+            )
+
+    # The same shape through `Levels(use_props=True)`: the curve is rebuilt
+    # from frame properties, so each frame uploads its own table as well.
+    levels_source = core.std.SetFrameProp(
+        async_source, prop="NImagesBlackLevel", intval=16
+    )
+    levels_source = core.std.SetFrameProp(
+        levels_source, prop="NImagesWhiteLevel", intval=235
+    )
+    levels_host = core.nimages.Levels(levels_source, use_props=True)
+    levels_device = core.std.GPUDownload(
+        core.nimages.Levels(levels_source, use_props=True, gpu=1)
+    )
+    for n, future in ((n, levels_device.get_frame_async(n)) for n in (3, 0, 2, 1)):
+        with future.result() as frame:
+            same(
+                np.asarray(frame[0]).tolist(),
+                array_of(levels_host, n).tolist(),
+                f"gpu=1 asynchronous Levels frame {n}: pixels",
+            )
+
     # A clip whose dimensions vary per frame: every kernel reads its geometry
     # from the frame, so the output follows it.
     sizes = ((318, 178), (320, 180), (321, 181))
@@ -1673,6 +1756,7 @@ def main() -> int:
     check_geometry()
     check_per_frame_results()
     check_request_patterns()
+    check_async_requests()
     check_errors()
     check_color_families(posterize)
     check_high_depth_integer_mapping()

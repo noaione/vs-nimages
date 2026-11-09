@@ -20,7 +20,7 @@ use crate::error::{NImagesError, Result};
 use crate::vulkan::VulkanCoreExt;
 
 use super::shared::{self, PREAMBLE, bytes_of, shader};
-use super::{Device, gpu_error};
+use super::{Device, SharedFrame, gpu_error};
 
 /// Storage buffers one map dispatch binds: the source plane, the table, and the
 /// plane written.
@@ -135,6 +135,11 @@ impl Map {
             size_of::<MapPush>() as u32,
         )?;
         Ok(Self { pipeline })
+    }
+
+    /// Uploads a lookup table on this map's own pool.
+    pub(crate) fn upload_words(&self, core: &CoreRef, words: &[u32]) -> Result<SharedFrame> {
+        self.pipeline.upload_words(core, words)
     }
 
     /// Maps every plane of `input` through `table` into a new device frame.

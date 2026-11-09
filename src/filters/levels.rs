@@ -178,11 +178,12 @@ impl Filter for Levels {
             } else {
                 gpu::upload(&core, &source)?
             };
+            let engine = Map::new(&core)?;
             let table = match &curve {
-                Curve::Constant(resolved) => device_table(&core, &resolved.table)?,
+                Curve::Constant(resolved) => device_table(&core, &engine, &resolved.table)?,
                 _ => None,
             };
-            (source, Some(Map::new(&core)?), table)
+            (source, Some(engine), table)
         } else {
             let source = if source.residency() == ffi::VSNodeResidency::GPU {
                 gpu::download(&core, &source)?
@@ -326,8 +327,8 @@ impl Filter for Levels {
                         engine.render(&core, &input, table, *length)?
                     }
                     (Some(engine), None) => {
-                        let (table, length) =
-                            device_table(&core, &resolved.table)?.ok_or_else(|| {
+                        let (table, length) = device_table(&core, engine, &resolved.table)?
+                            .ok_or_else(|| {
                                 NImagesError::new("Levels gpu=1: the curve has no table to upload")
                             })?;
                         engine.render(&core, &input, &table, length)?

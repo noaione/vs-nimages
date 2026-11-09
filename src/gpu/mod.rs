@@ -101,6 +101,11 @@ impl Device {
         &self.pipeline
     }
 
+    /// Uploads a table on this instance's own compute pool.
+    pub(crate) fn upload_words(&self, core: &CoreRef, words: &[u32]) -> Result<SharedFrame> {
+        upload_words_with_pool(core, words, &self.pool)
+    }
+
     /// Records and submits one frame's work.
     ///
     /// The closure may only fail with a [`VulkanError`], which is what the
@@ -297,6 +302,21 @@ pub(crate) fn upload_floats(core: &CoreRef, values: &[f32]) -> Result<SharedFram
 /// is a frame too. The host is the only writer here, so the copy is recorded
 /// once and the frame's producer pair is what later recordings wait on.
 pub(crate) fn upload_words(core: &CoreRef, words: &[u32]) -> Result<SharedFrame> {
+    let pool = core
+        .create_gpu_exec_pool(ffi::VSVulkanQueueType::Compute)
+        .map_err(|error| gpu_error("could not create the upload pool", &error))?;
+    upload_words_with_pool(core, words, &pool)
+}
+
+/// Uploads `words` on an existing compute pool.
+///
+/// A filter that rebuilds a table per frame keeps one pool for the life of the
+/// instance, so each frame pays the copy and not a pool creation.
+pub(crate) fn upload_words_with_pool(
+    core: &CoreRef,
+    words: &[u32],
+    pool: &ExecPool,
+) -> Result<SharedFrame> {
     let bytes = words.len().saturating_mul(size_of::<u32>());
     if bytes == 0 {
         return Err(NImagesError::new("gpu: a table cannot be empty"));
@@ -347,9 +367,6 @@ pub(crate) fn upload_words(core: &CoreRef, words: &[u32]) -> Result<SharedFrame>
         .new_gpu_video_frame(&format, width, 1, None)
         .ok_or_else(|| NImagesError::new("gpu: the core could not allocate the table frame"))?;
 
-    let pool = core
-        .create_gpu_exec_pool(ffi::VSVulkanQueueType::Compute)
-        .map_err(|error| gpu_error("could not create the upload pool", &error))?;
     let functions = core
         .vulkan_functions()
         .map_err(|error| gpu_error("the upload needs the core's Vulkan functions", &error))?;
