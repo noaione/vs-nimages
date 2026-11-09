@@ -65,7 +65,7 @@ same measurement is what decides whether they stay.
 | frame and properties | host | `new_gpu_video_frame(format, w, h, Some(&src))`, the same property carry the CPU path gets from `prop_src` |
 | `Posterize(method=1)` | host | refused under `gpu=1`: the Lloyd solve reads a histogram |
 
-the table is uploaded into a `GRAY32` device frame and bound with `exec.read_plane`
+the table is uploaded into a `GRAY32` device frame and bound with `exec.read_video_frame`
 like any other plane. a `u8` table is 256 words, 1 KB. a native `u16` table is
 65,536 words, 256 KB. a fixed table is copied in once at `create`. a `use_props`
 table changes per frame, so each change is a fresh table frame uploaded through

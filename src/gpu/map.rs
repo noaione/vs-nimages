@@ -17,6 +17,7 @@ use vapoursynth4_rs::core::CoreRef;
 use vapoursynth4_rs::frame::{VideoFormat, VideoFrame};
 
 use crate::error::{NImagesError, Result};
+use crate::vulkan::VulkanCoreExt;
 
 use super::shared::{self, PREAMBLE, bytes_of, shader};
 use super::{Device, gpu_error};
@@ -205,9 +206,9 @@ impl Map {
                         table_length,
                         bytes,
                     };
-                    let src = exec.read_plane(input, plane)?;
-                    let mapped = exec.read_plane(table, 0)?;
-                    let dst = exec.write_plane(&mut output, plane)?;
+                    let src = exec.read_video_frame(input, plane)?;
+                    let mapped = exec.read_video_frame(table, 0)?;
+                    let dst = exec.write_video_frame(&mut output, plane)?;
                     exec.dispatch(
                         self.pipeline.pipeline(),
                         &[src, mapped, dst],

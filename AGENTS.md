@@ -77,14 +77,15 @@ all five filters, adds 27 checks, and on a host without a device prints the
 creation error and passes, unless `NIMAGES_REQUIRE_DEVICE=1` makes the skip a
 failure.
 
-`docs/improvements/15-vulkan-device-path.md` records what the pinned binding
-offers, what the host/device bus costs, and which filters pay for it: the device
-`Deblur` is a win, the pointwise maps and the histogram analyzers are chain
-members, and float `Levels` stays on the host. plans 16 through 19 are the
-validation harness, the Deblur kernel, the pointwise maps and the analyzers, and
-all of them have landed.
-the dependency on the Vulkan-capable binding revision is in the working tree and
-raises the floor to VapourSynth R80.
+`docs/improvements/15-vulkan-device-path.md` records what the upstream
+bindings offer, what the host/device bus costs, and which filters pay for it:
+the device `Deblur` is a win, the pointwise maps and the histogram analyzers
+are chain members, and float `Levels` stays on the host. plans 16 through 19
+are the validation harness, the Deblur kernel, the pointwise maps and the
+analyzers, and all of them have landed.
+the dependency is upstream `vapoursynth4-rs` 0.6.0 with its `vulkan` feature,
+and the safe wrapper over the ash-based `VSVULKANAPI` table is `src/vulkan.rs`;
+that raises the floor to VapourSynth R80.
 
 ## where the behaviour comes from
 
@@ -112,9 +113,9 @@ carries a `parity` of `nmanga`, `diverges` or `reference-only` plus the
   heading is cut at release by the maintainer.
 - treat `tests/fixtures/` as generated. change it by running `tools/golden.py`,
   never by editing the json or the `.bin` files.
-- keep `src/` free of VapourSynth types outside `lib.rs`, `src/filters/` and
-  `src/gpu/`. the algorithms must stay testable without a core, and
-  `src/gpu/shared.rs` names no binding type.
+- keep `src/` free of VapourSynth types outside `lib.rs`, `src/filters/`,
+  `src/gpu/` and `src/vulkan.rs`. the algorithms must stay testable without a
+  core, and `src/gpu/shared.rs` names no binding type.
 - pass `--locked` to cargo so the committed lockfile is what gets built.
 
 ## source layout
@@ -134,6 +135,11 @@ carries a `parity` of `nmanga`, `diverges` or `reference-only` plus the
   Deblur kernels, `map.rs` the table lookup `Levels` and `Posterize` share, and
   `histogram.rs` the counting kernel both analyzers use.
   see `docs/improvements/15-vulkan-device-path.md`.
+- `src/vulkan.rs`: the safe wrapper over the core's ash-based Vulkan table.
+  `VulkanCoreExt` reaches the core's device, and `Shader`, `ComputePipeline`,
+  `GpuBuffer`, `ExecPool`, `GpuFrame` and `ExecContext` each own or borrow one
+  handle; a GPU-resident `VideoFrame` is assembled through `newVideoFrame2`
+  from a seed frame because upstream cannot construct one from a raw pointer.
 - `src/histogram.rs`: the stride-aware `[u64; 256]` histogram every analyzer
   shares. `from_plane` refuses rows that do not fit instead of reading past them.
 - `src/luma.rs`: the reference luma, `(r * 19595 + g * 38470 + b * 7471 + 32768)
@@ -191,11 +197,14 @@ refuses; `docs/BENCH.md` has the detail.
 
 ## hard constraints from the crate
 
-`vapoursynth4-rs` 0.5.1 has six traps. `docs/FINDINGS.md` §2 has the detail.
+`vapoursynth4-rs` 0.6.0 has four traps that still shape this tree.
+`docs/FINDINGS.md` §2 records the 0.5.1 findings behind them.
 
-- register the output with `core.create_video_filter(...)`. do not use
-  `VideoNode::new`, whose null check is inverted and hands back a node with a
-  null handle exactly when creation failed.
+- `Core::create_video_filter` never passes `VSFilterFlags`. a GPU-output
+  filter is built with `VideoNode::new`, which does, and the node is handed to
+  the output map with `MapMut::set(key!(c"clip"), Value::VideoNode(node),
+  AppendMode::Replace)`. `VideoNode::new` returns `Option`, so a failed
+  creation cannot escape as a null node.
 - pass `None` to `FilterRegister::new`. API 4's plugin `registerFunction` takes
   no free callback, so any `functionData` leaks for the life of the plugin. read
   every argument from the input map in `Filter::create` instead.
@@ -208,9 +217,13 @@ refuses; `docs/BENCH.md` has the detail.
   `Dependencies::new(&array)` is correct; `impl From<[T; N]> for &Dependencies`
   returns a reference to a temporary.
 
-two smaller ones worth knowing: property keys must be ascii alphanumeric or
-underscore because `KeyStr::from_cstr` asserts, and `MapRef::from_ptr` is
-crate-private, so a mutable property map comes from `Frame::properties_mut`.
+three smaller ones: property keys must be ascii alphanumeric or underscore
+because `KeyStr::from_cstr` asserts, `MapRef::from_ptr` is crate-private so a
+mutable property map comes from `VideoFrameMut::properties_mut`, and the
+upstream `VideoFrame` cannot be built from an owned GPU pointer. a GPU-resident
+output frame is assembled by `src/vulkan.rs` through `newVideoFrame2` from a
+seed frame, which shares the planes and leaves the returned frame as their
+only owner.
 
 ## local build and test
 

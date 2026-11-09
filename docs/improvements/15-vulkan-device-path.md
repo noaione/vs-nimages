@@ -1,7 +1,7 @@
 # the Vulkan device path
 
 status: accepted, first kernel landed. research complete on 2026-10-24 against
-`vs-mangacolor` at `29da9fb` and the pinned binding rev `685c29d`.
+`vs-mangacolor` at `29da9fb` and upstream `vapoursynth4-rs` 0.6.0.
 `Deblur(gpu=1)` runs both methods on Gray, RGB and YUV at every integer depth
 from 8 to 16 bits and on their 32 bit float formats; [17](17-vulkan-deblur.md#outcome-so-far)
 records the parity per format and measures what it costs.
@@ -14,9 +14,9 @@ use it, and the order the work goes in.
 ## why this exists
 
 `vs-mangacolor` runs its two per-pixel walks on VapourSynth's own Vulkan device
-behind `gpu=1` (`../vs-mangacolor/src/gpu.rs`). the same binding revision is
-already pinned in this repository's `Cargo.toml` with the `vs-vulkan` feature, so
-the capability is compiled in and unused.
+behind `gpu=1` (`../vs-mangacolor/src/gpu.rs`). upstream `vapoursynth4-rs`
+0.6.0 carries the raw Vulkan table behind its `vulkan` feature, so the safe
+wrapper in `src/vulkan.rs` is what this plugin builds on.
 
 that sibling is a classifier: it reads the frame on the device, reduces it to a
 tens of thousands of words and hands those to a model on the host. three of the five
@@ -36,8 +36,9 @@ timeline value per submission. what the plugin does is:
 3. take an `ExecPool` for the compute queue, one per filter instance.
 4. in `get_frame`, allocate the output with `core.new_gpu_video_frame(format,
    width, height, Some(&src))`, then `pool.record(|exec| ...)`:
-   `exec.read_plane(&src, plane)` and `exec.write_plane(&mut dst, plane)` return
-   the `DispatchPlane` objects that declaring and binding share, and
+   `exec.read_video_frame(&src, plane)` and
+   `exec.write_video_frame(&mut dst, plane)` return the `DispatchPlane`
+   objects that declaring and binding share, and
    `exec.dispatch(&pipeline, &planes, &push, [groups, 1, 1])` records one
    dispatch.
 
@@ -118,7 +119,7 @@ becomes a downloaded one; a frame under `gpu=1` is returned as device memory and
 the caller ends the chain with `std.GPUDownload`.
 
 a LUT or a tap table is uploaded into a `GRAY32` device frame at `create` and
-bound with `exec.read_plane`, the same way any other plane is. `exec.uses_buffer`
+bound with `exec.read_video_frame`, the same way any other plane is. `exec.uses_buffer`
 is not a binding: it keeps a staging buffer alive for a copy the recording already
 contains, which is what the sibling's table upload uses it for. a table that
 changes per frame is copied into that frame with a recorded `vkCmdCopyBuffer2`
@@ -133,7 +134,7 @@ measured on this host. a graph is all CPU or all GPU around a device node.
 
 | gate | value | failure surface |
 | --- | --- | --- |
-| plugin ABI | `vs-43` + `vs-vulkan` features, `VAPOURSYNTH_API_VERSION` 4.3 | build error |
+| plugin ABI | `vs-43` + `vulkan` features, `VAPOURSYNTH_API_VERSION` 4.3 | build error |
 | host version | VapourSynth R80 or newer | plugin does not load |
 | device API | Vulkan 1.4 | `vulkan_core_info()` returns an error naming the device |
 | entry points | `vkCmdFillBuffer`, `vkCmdPipelineBarrier2`, `vkCmdCopyBuffer2` are all `Option` | `InputError` naming the missing function |
@@ -252,8 +253,8 @@ on a device producer existing.
 
 ## prerequisites, already in the working tree
 
-`Cargo.toml` and `Cargo.lock` are modified and uncommitted: `vapoursynth4-rs` is
-pinned to `685c29d` with `vs-43`, `vs-vulkan` and `vsscript-44`. that raises the
+`Cargo.toml` and `Cargo.lock` use upstream `vapoursynth4-rs` 0.6.0 with `vs-43`,
+`vulkan` and `vsscript-44`. that raises the
 floor from R79 to **R80** and turns on the GPU module. verified on this host:
 
 - `cargo build --release --locked` succeeds.

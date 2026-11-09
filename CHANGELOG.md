@@ -2,7 +2,11 @@
 
 ### unreleased
 
-nothing yet!
+**Changed**:
+- the plugin builds against upstream `vapoursynth4-rs` 0.6.0 with its `vulkan`
+  feature. the Vulkan half is the safe wrapper in `src/vulkan.rs` over the
+  ash-based `VSVULKANAPI` table, and `gpu=1` still hands back a device-resident
+  frame.
 
 ### [0.2.1] (2026-10-25)
 

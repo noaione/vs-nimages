@@ -10,11 +10,11 @@
 
 use std::mem::size_of;
 
+use crate::vulkan::{ExecContext, VulkanCoreExt, VulkanError};
 use vapoursynth4_rs::ColorFamily;
 use vapoursynth4_rs::SampleType;
 use vapoursynth4_rs::core::CoreRef;
 use vapoursynth4_rs::frame::{VideoFormat, VideoFrame};
-use vapoursynth4_rs::vulkan::{ExecContext, VulkanError};
 
 use crate::deblur::{Gaussian, LUMA_WEIGHTS, Method, Plan};
 use crate::error::{NImagesError, Result};
@@ -713,9 +713,9 @@ pub(crate) struct Engine {
     blend: Device,
     output: Output,
     barrier: BarrierFn,
-    gaussian: VideoFrame,
-    prefilter: VideoFrame,
-    mask: VideoFrame,
+    gaussian: crate::gpu::SharedFrame,
+    prefilter: crate::gpu::SharedFrame,
+    mask: crate::gpu::SharedFrame,
     plan: Plan,
     family: ColorFamily,
 }
@@ -834,7 +834,7 @@ impl Engine {
         let width = input.frame_width(0);
         let height = input.frame_height(0);
         if width <= 0 || height <= 0 {
-            return Ok(core.copy_frame(input));
+            return Ok(core.copy_frame(input).freeze());
         }
         let (w, h) = (
             u32::try_from(width).unwrap_or(u32::MAX),
@@ -1118,18 +1118,18 @@ impl Engine {
         push: &PreparePush,
         groups: [u32; 3],
     ) -> std::result::Result<(), VulkanError> {
-        let src0 = exec.read_plane(input, 0)?;
+        let src0 = exec.read_video_frame(input, 0)?;
         // A one-plane family binds its only plane in every source slot; the
         // kernel reads the extra two only when `channels` is three.
         let (second, third) = if push.channels == 3 { (1, 2) } else { (0, 0) };
-        let src1 = exec.read_plane(input, second)?;
-        let src2 = exec.read_plane(input, third)?;
-        let dst = exec.write_plane(luma, 0)?;
+        let src1 = exec.read_video_frame(input, second)?;
+        let src2 = exec.read_video_frame(input, third)?;
+        let dst = exec.write_video_frame(luma, 0)?;
         // The third binding must exist even when nothing writes it, and it must
         // not be the frame this dispatch writes.
         let seed = match estimate {
-            Some(frame) => exec.write_plane(frame, 0)?,
-            None => exec.read_plane(fallback, 0)?,
+            Some(frame) => exec.write_video_frame(frame, 0)?,
+            None => exec.read_video_frame(fallback, 0)?,
         };
         exec.dispatch(
             self.prepare.pipeline(),
@@ -1212,10 +1212,10 @@ impl Engine {
             aux_stride: source_stride,
         };
         let (src, aux, tap, dst) = (
-            exec.read_plane(source, 0)?,
-            exec.read_plane(source, 0)?,
-            exec.read_plane(taps, 0)?,
-            exec.write_plane(scratch, 0)?,
+            exec.read_video_frame(source, 0)?,
+            exec.read_video_frame(source, 0)?,
+            exec.read_video_frame(taps, 0)?,
+            exec.write_video_frame(scratch, 0)?,
         );
         exec.dispatch(
             self.blur.pipeline(),
@@ -1261,10 +1261,10 @@ impl Engine {
             aux_stride,
         };
         let (src, tap, dst, aux_plane) = (
-            exec.read_plane(scratch, 0)?,
-            exec.read_plane(taps, 0)?,
-            exec.write_plane(destination, 0)?,
-            exec.read_plane(aux, 0)?,
+            exec.read_video_frame(scratch, 0)?,
+            exec.read_video_frame(taps, 0)?,
+            exec.write_video_frame(destination, 0)?,
+            exec.read_video_frame(aux, 0)?,
         );
         exec.dispatch(
             self.blur.pipeline(),
@@ -1316,8 +1316,8 @@ impl Engine {
             src_stride: geometry.mask_raw_stride,
             dst_stride: geometry.temp_stride,
         };
-        let src = exec.read_plane(mask_raw, 0)?;
-        let dst = exec.write_plane(temp, 0)?;
+        let src = exec.read_video_frame(mask_raw, 0)?;
+        let dst = exec.write_video_frame(temp, 0)?;
         exec.dispatch(
             self.sobel.pipeline(),
             &[src, dst],
@@ -1387,12 +1387,12 @@ impl Engine {
             pedestal: self.plan.blend.pedestal,
             mode,
         };
-        let src = exec.read_plane(luma, 0)?;
-        let mask_plane = exec.read_plane(mask, 0)?;
+        let src = exec.read_video_frame(luma, 0)?;
+        let mask_plane = exec.read_video_frame(mask, 0)?;
         // The candidate is read and written in place: it is declared both ways
         // and bound once.
-        exec.read(candidate);
-        let candidate_plane = exec.write_plane(candidate, 0)?;
+        exec.read_video_frame(candidate, 0)?;
+        let candidate_plane = exec.write_video_frame(candidate, 0)?;
         exec.dispatch(
             self.blend.pipeline(),
             &[src, candidate_plane, mask_plane],
@@ -1425,8 +1425,8 @@ impl Engine {
             bytes: quantisation.bytes as u32,
             is_float: u32::from(quantisation.float),
         };
-        let src = exec.read_plane(restored, 0)?;
-        let dst = exec.write_plane(output, 0)?;
+        let src = exec.read_video_frame(restored, 0)?;
+        let dst = exec.write_video_frame(output, 0)?;
         exec.dispatch(
             device.pipeline(),
             &[src, dst],
@@ -1473,14 +1473,14 @@ impl Engine {
             src_bytes: quantisation.bytes as u32,
             is_float: u32::from(quantisation.float),
         };
-        let src0 = exec.read_plane(input, 0)?;
-        let src1 = exec.read_plane(input, 1)?;
-        let src2 = exec.read_plane(input, 2)?;
-        let luma_plane = exec.read_plane(luma, 0)?;
-        let restored_plane = exec.read_plane(restored, 0)?;
-        let dst0 = exec.write_plane(output, 0)?;
-        let dst1 = exec.write_plane(output, 1)?;
-        let dst2 = exec.write_plane(output, 2)?;
+        let src0 = exec.read_video_frame(input, 0)?;
+        let src1 = exec.read_video_frame(input, 1)?;
+        let src2 = exec.read_video_frame(input, 2)?;
+        let luma_plane = exec.read_video_frame(luma, 0)?;
+        let restored_plane = exec.read_video_frame(restored, 0)?;
+        let dst0 = exec.write_video_frame(output, 0)?;
+        let dst1 = exec.write_video_frame(output, 1)?;
+        let dst2 = exec.write_video_frame(output, 2)?;
         exec.dispatch(
             device.pipeline(),
             &[
@@ -1515,8 +1515,8 @@ impl Engine {
             src_stride: plan.src_stride,
             dst_stride: plan.dst_stride,
         };
-        let src = exec.read_plane(input, plane)?;
-        let dst = exec.write_plane(output, plane)?;
+        let src = exec.read_video_frame(input, plane)?;
+        let dst = exec.write_video_frame(output, plane)?;
         exec.dispatch(
             device.pipeline(),
             &[src, dst],

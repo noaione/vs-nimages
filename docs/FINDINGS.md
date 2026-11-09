@@ -67,7 +67,13 @@ analysis filters that must not touch pixels.
 These were found by reading the vendored crate source and confirmed against the
 working spike.
 
-### 2.1 `VideoNode::new` has an inverted null check — do not use it
+the tree now uses upstream `vapoursynth4-rs` 0.6.0. 2.1 is fixed by its
+`Option` return, and `create_video_filter` still passes no `VSFilterFlags`, so a
+GPU-output node is built with `VideoNode::new` and handed to the output map
+with `MapMut::set`. the rest of this section is the 0.5.1 record that shaped
+the code.
+
+### 2.1 `VideoNode::new` had an inverted null check (fixed in 0.6.0)
 
 `vapoursynth4-rs-0.5.1/src/node.rs:213`
 
@@ -83,7 +89,11 @@ any caller unwrapping it dereferences a null node.
 
 **Workaround:** register the output through
 `CoreRef::create_video_filter(output, name, &vi, Box::new(filter), deps)`, which
-has no such check and is what the spike uses. Worth reporting upstream.
+has no such check and is what the spike uses. (fixed in 0.6.0: it now returns `Option`.)
+
+**0.6.0:** the inverted check is gone. a CPU node may still use
+`create_video_filter`; a GPU-output node uses `VideoNode::new`, because only
+that path passes `VSFilterFlags`.
 
 ### 2.2 No free callback for plugin function data
 

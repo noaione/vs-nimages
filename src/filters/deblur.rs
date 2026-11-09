@@ -15,8 +15,8 @@ use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
-use vapoursynth4_rs::frame::{FrameContext, VideoFormat, VideoFrame};
-use vapoursynth4_rs::map::MapRef;
+use vapoursynth4_rs::frame::{FrameContext, VideoFormat, VideoFrame, VideoFrameMut};
+use vapoursynth4_rs::map::{MapMut, MapRef};
 use vapoursynth4_rs::node::{Filter, Node, VideoNode};
 use vapoursynth4_rs::{ColorFamily, SampleType, core::CoreRef, ffi, key};
 
@@ -62,8 +62,6 @@ pub struct Deblur {
     /// One workspace per concurrently evaluated frame.
     workspace: Mutex<Vec<Workspace>>,
     debug: bool,
-    /// Whether this instance runs the kernels on the device.
-    gpu: bool,
     /// The device pipelines, built once when `gpu` is set.
     engine: Option<Engine>,
     /// Set once the settings line has been written for this instance.
@@ -79,16 +77,10 @@ impl Filter for Deblur {
     const ARGS: &'static CStr = c"clip:vnode:all;method:int:opt;radius:float:opt;strength:float:opt;iterations:int:opt;threshold:float:opt;overshoot:float:opt;gpu:int:opt;debug:int:opt;";
     const RETURN_TYPE: &'static CStr = c"clip:vnode:all;";
 
-    /// `all` is answered by the instance: a `gpu=1` run's frame is device
-    /// memory and a `gpu=0` run's is not.
-    fn gpu_output(&self) -> bool {
-        self.gpu
-    }
-
     fn create(
         input: MapRef,
-        output: MapRef,
-        _data: Option<Box<Self::FilterData>>,
+        mut output: MapMut,
+        _data: Option<&Self::FilterData>,
         mut core: CoreRef,
     ) -> Result<()> {
         let source = read_clip(&input, "Deblur")?;
@@ -157,20 +149,20 @@ impl Filter for Deblur {
         let dependency = source.as_ptr();
         add_filter(
             &mut core,
-            output,
+            &mut output,
             Self::NAME,
             &info,
+            gpu,
             Self {
                 source,
                 params,
                 workspace: Mutex::new(Vec::new()),
                 debug,
-                gpu,
                 engine,
                 reported: AtomicBool::new(false),
             },
             dependency,
-        );
+        )?;
         Ok(())
     }
 
@@ -228,7 +220,7 @@ impl Filter for Deblur {
                 // this filter does not touch come back byte for byte.
                 let mut output = core.copy_frame(&input);
                 if width == 0 || height == 0 {
-                    return Ok(Some(output));
+                    return Ok(Some(output.freeze()));
                 }
 
                 let mut workspace = self.take(width, height)?;
@@ -272,7 +264,7 @@ impl Filter for Deblur {
                 );
                 self.put(workspace);
 
-                Ok(Some(output))
+                Ok(Some(output.freeze()))
             }
             ffi::VSActivationReason::Error => Err(input_failed("Deblur")),
         }
@@ -460,7 +452,7 @@ fn round_ties_even(value: f64) -> f64 {
 /// supplies the code values by index. `width` and `height` are the frame's
 /// own, so a fresh allocation and a copied frame are both read for themselves.
 fn write_plane(
-    output: &mut VideoFrame,
+    output: &mut VideoFrameMut,
     plane: i32,
     convert: &Convert,
     width: usize,
@@ -701,7 +693,7 @@ fn read_plane(
 /// the channel differences instead of clipping each channel on its own.
 fn write_rgb(
     input: &VideoFrame,
-    output: &mut VideoFrame,
+    output: &mut VideoFrameMut,
     convert: &Convert,
     width: usize,
     height: usize,

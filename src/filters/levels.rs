@@ -9,8 +9,8 @@ use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 use vapoursynth4_rs::frame::VideoFormat;
-use vapoursynth4_rs::frame::{Frame, FrameContext, VideoFrame};
-use vapoursynth4_rs::map::{KeyStr, MapRef};
+use vapoursynth4_rs::frame::{FrameContext, VideoFrame};
+use vapoursynth4_rs::map::{KeyStr, MapMut, MapRef};
 use vapoursynth4_rs::node::{Filter, Node, VideoNode};
 use vapoursynth4_rs::{ColorFamily, SampleType, core::CoreRef, ffi, key};
 
@@ -95,7 +95,7 @@ pub struct Levels {
     engine: Option<Map>,
     /// The table uploaded at creation, and its length in samples. Unset when
     /// the curve is rebuilt per frame, which uploads one per frame instead.
-    table: Option<(VideoFrame, u32)>,
+    table: Option<(crate::gpu::SharedFrame, u32)>,
     /// Set once the settings line has been written for this instance.
     reported: AtomicBool,
 }
@@ -109,16 +109,10 @@ impl Filter for Levels {
     const ARGS: &'static CStr = c"clip:vnode:all;black:float:opt;white:float:opt;gamma:float:opt;use_props:int:opt;peak_offset:int:opt;auto_gamma:int:opt;gpu:int:opt;debug:int:opt;";
     const RETURN_TYPE: &'static CStr = c"clip:vnode:all;";
 
-    /// `all` is answered by the instance: a `gpu=1` run's frame is device
-    /// memory and a `gpu=0` run's is not.
-    fn gpu_output(&self) -> bool {
-        self.gpu
-    }
-
     fn create(
         input: MapRef,
-        output: MapRef,
-        _data: Option<Box<Self::FilterData>>,
+        mut output: MapMut,
+        _data: Option<&Self::FilterData>,
         mut core: CoreRef,
     ) -> Result<()> {
         let source = read_clip(&input, "Levels")?;
@@ -201,9 +195,10 @@ impl Filter for Levels {
         let dependency = source.as_ptr();
         add_filter(
             &mut core,
-            output,
+            &mut output,
             Self::NAME,
             &info,
+            gpu,
             Self {
                 source,
                 curve,
@@ -214,7 +209,7 @@ impl Filter for Levels {
                 reported: AtomicBool::new(false),
             },
             dependency,
-        );
+        )?;
         Ok(())
     }
 

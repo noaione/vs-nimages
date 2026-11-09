@@ -19,12 +19,13 @@
 use std::mem::size_of;
 
 use vapoursynth4_rs::core::CoreRef;
-use vapoursynth4_rs::ffi;
+use vapoursynth4_rs::ffi::vulkan::vk;
 use vapoursynth4_rs::frame::VideoFrame;
 use vapoursynth4_rs::{ColorFamily, SampleType};
 
 use crate::error::{NImagesError, Result};
 use crate::histogram::{BINS, Histogram};
+use crate::vulkan::VulkanCoreExt;
 
 use super::shared::{self, PREAMBLE, bytes_of, shader};
 use super::{
@@ -286,12 +287,11 @@ impl Engine {
         let mut readback = core
             .create_gpu_buffer(
                 size,
-                ffi::VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                ffi::VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
-                    | ffi::VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                ffi::VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
-                    | ffi::VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-                    | ffi::VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
+                vk::BufferUsageFlags::TRANSFER_DST,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+                vk::MemoryPropertyFlags::HOST_VISIBLE
+                    | vk::MemoryPropertyFlags::HOST_COHERENT
+                    | vk::MemoryPropertyFlags::HOST_CACHED,
             )
             .map_err(|error| {
                 gpu_error("could not allocate the histogram readback buffer", &error)
@@ -321,16 +321,19 @@ impl Engine {
         let value = self
             .pipeline
             .record(|exec| {
-                let counters = exec.write_plane(&mut counters, 0)?;
+                let counters = exec.write_video_frame(&mut counters, 0)?;
 
                 // SAFETY: the recording is live, the counter plane belongs to a
                 // frame this call owns, and the range stays inside its buffer.
                 unsafe { fill(exec.command_buffer(), counters.buffer(), 0, size, 0) };
                 fill_barrier(exec, self.barrier);
 
-                let source = exec.read_plane(frame, 0)?;
+                let source = exec.read_video_frame(frame, 0)?;
                 let (green, blue) = if luma {
-                    (exec.read_plane(frame, 1)?, exec.read_plane(frame, 2)?)
+                    (
+                        exec.read_video_frame(frame, 1)?,
+                        exec.read_video_frame(frame, 2)?,
+                    )
                 } else {
                     // The Gray and YUV paths count plane 0 alone, so the two luma
                     // bindings carry that plane and the kernel never reads them.
@@ -344,25 +347,18 @@ impl Engine {
                 )?;
                 transfer_barrier(exec, self.barrier);
 
-                let region = ffi::VkBufferCopy2 {
-                    sType: ffi::VK_STRUCTURE_TYPE_BUFFER_COPY_2,
-                    pNext: std::ptr::null(),
-                    srcOffset: 0,
-                    dstOffset: 0,
-                    size,
-                };
-                let info = ffi::VkCopyBufferInfo2 {
-                    sType: ffi::VK_STRUCTURE_TYPE_COPY_BUFFER_INFO_2,
-                    pNext: std::ptr::null(),
-                    srcBuffer: counters.buffer(),
-                    dstBuffer: readback.buffer(),
-                    regionCount: 1,
-                    pRegions: &raw const region,
-                };
+                let region = vk::BufferCopy2::default()
+                    .src_offset(0)
+                    .dst_offset(0)
+                    .size(size);
+                let info = vk::CopyBufferInfo2::default()
+                    .src_buffer(counters.buffer())
+                    .dst_buffer(readback.buffer())
+                    .regions(std::slice::from_ref(&region));
 
                 // SAFETY: the recording is live, both buffers outlive the
                 // submission, and the structure outlives the call.
-                unsafe { copy(exec.command_buffer(), &raw const info) };
+                unsafe { copy(exec.command_buffer(), &info) };
                 Ok(())
             })
             .map_err(|error| gpu_error("could not record the histogram passes", &error))?;

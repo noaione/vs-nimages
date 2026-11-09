@@ -35,8 +35,8 @@ use std::fmt::{Display, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use vapoursynth4_rs::frame::{VideoFormat, VideoFrame};
-use vapoursynth4_rs::map::{KeyStr, MapPropertyError, MapRef};
+use vapoursynth4_rs::frame::{VideoFormat, VideoFrame, VideoFrameMut};
+use vapoursynth4_rs::map::{AppendMode, KeyStr, MapMut, MapPropertyError, MapRef, Value};
 use vapoursynth4_rs::node::{Dependencies, Filter, RequestPattern, VideoNode};
 use vapoursynth4_rs::{ColorFamily, SampleType, VideoInfo, core::CoreRef, ffi, key};
 
@@ -238,25 +238,97 @@ pub(super) fn require_declared_format(info: &VideoInfo, function: &str) -> Resul
 ///
 /// The dependency is taken as a raw node pointer so the caller can move the node
 /// into the filter without cloning it.
-pub(super) fn add_filter<F: Filter>(
+pub(super) fn add_filter<F: Filter<Error = NImagesError>>(
     core: &mut CoreRef<'_>,
-    output: MapRef,
+    output: &mut MapMut<'_>,
     name: &CStr,
     info: &VideoInfo,
+    gpu: bool,
     filter: F,
     source: *mut ffi::VSNode,
-) {
+) -> Result<()> {
     let dependencies = [ffi::VSFilterDependency {
         source,
         request_pattern: RequestPattern::StrictSpatial,
     }];
     let dependencies = Dependencies::new(&dependencies)
         .expect("a single dependency is always a valid dependency list");
-    core.create_video_filter(output, name, info, Box::new(filter), dependencies);
+    let name = name.to_string_lossy();
+    // `create_video_filter` does not pass `VSFilterFlags`, so the node is built
+    // through `VideoNode::new`, which does, and handed to the output map by hand.
+    let node = if gpu {
+        VideoNode::new::<GpuNode<true, F>>(
+            &name,
+            info,
+            GpuNode::<true, F>(filter),
+            &dependencies[..],
+            core,
+        )
+    } else {
+        VideoNode::new::<GpuNode<false, F>>(
+            &name,
+            info,
+            GpuNode::<false, F>(filter),
+            &dependencies[..],
+            core,
+        )
+    };
+    let node =
+        node.ok_or_else(|| NImagesError::new(format!("{name}: the core refused the filter node")))?;
+    output
+        .set(key!(c"clip"), Value::VideoNode(node), AppendMode::Replace)
+        .map_err(|error| {
+            NImagesError::new(format!("{name}: could not hand the node back: {error}"))
+        })
+}
+
+/// A filter instance whose output residency is fixed at creation.
+///
+/// The bindings take `VSFilterFlags::GPUOutput` as a `const`, so the runtime
+/// `gpu` argument decides which of two concrete node types is registered.
+/// Everything but the flag is the instance's own.
+pub(super) struct GpuNode<const GPU: bool, F: Filter>(pub(super) F);
+
+impl<const GPU: bool, F: Filter<Error = NImagesError>> Filter for GpuNode<GPU, F> {
+    type Error = NImagesError;
+    type FrameType = F::FrameType;
+    type FilterData = F::FilterData;
+
+    const NAME: &'static CStr = F::NAME;
+    const ARGS: &'static CStr = F::ARGS;
+    const RETURN_TYPE: &'static CStr = F::RETURN_TYPE;
+    const FLAGS: i32 = if GPU {
+        ffi::VSFilterFlags::GPUOutput as i32
+    } else {
+        0
+    };
+
+    fn create(
+        _input: MapRef,
+        _output: MapMut,
+        _data: Option<&Self::FilterData>,
+        _core: CoreRef,
+    ) -> std::result::Result<(), Self::Error> {
+        Err(NImagesError::new(
+            "a GpuNode is built by add_filter, not registered directly",
+        ))
+    }
+
+    fn get_frame(
+        &self,
+        n: i32,
+        activation_reason: ffi::VSActivationReason,
+        frame_data: *mut *mut std::ffi::c_void,
+        frame_ctx: vapoursynth4_rs::frame::FrameContext,
+        core: CoreRef,
+    ) -> std::result::Result<Option<Self::FrameType>, Self::Error> {
+        self.0
+            .get_frame(n, activation_reason, frame_data, frame_ctx, core)
+    }
 }
 
 /// The stride and height of one plane.
-fn plane_shape(frame: &VideoFrame, plane: i32) -> Result<(usize, usize)> {
+fn plane_shape<S>(frame: &VideoFrame<S>, plane: i32) -> Result<(usize, usize)> {
     let stride = usize::try_from(frame.stride(plane))
         .map_err(|_| NImagesError::new(format!("plane {plane} has a negative stride")))?;
     let height = usize::try_from(frame.frame_height(plane))
@@ -401,7 +473,7 @@ impl MappingTable {
 pub(super) fn device_table(
     core: &CoreRef<'_>,
     table: &MappingTable,
-) -> Result<Option<(VideoFrame, u32)>> {
+) -> Result<Option<(crate::gpu::SharedFrame, u32)>> {
     let Some(words) = table.device_words() else {
         return Ok(None);
     };
@@ -412,7 +484,7 @@ pub(super) fn device_table(
 /// Rewrites every sample of one plane through `table`.
 fn map_plane(
     source: &VideoFrame,
-    output: &mut VideoFrame,
+    output: &mut VideoFrameMut,
     plane: i32,
     table: &MappingTable,
 ) -> Result<()> {
@@ -561,7 +633,7 @@ pub(super) fn map_frame(
         map_plane(source, &mut output, plane, table)?;
     }
 
-    Ok(output)
+    Ok(output.freeze())
 }
 
 /// Reports a frame whose input failed to generate.

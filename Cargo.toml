@@ -9,7 +9,7 @@ keywords = ["vapoursynth", "image-manipulation", "image-analyzer"]
 description = "A collection of analyzer and tooling to manipulate images with VapourSynth"
 repository = "https://github.com/noaione/vs-nimages"
 homepage = "https://github.com/noaione/vs-nimages"
-rust-version = "1.88.0"
+rust-version = "1.95.0"
 
 [lib]
 # `cdylib` is the VapourSynth plugin; `rlib` exists so the integration tests in
@@ -17,10 +17,11 @@ rust-version = "1.88.0"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# Pinned to custom build that has Vulkan stuff
-vapoursynth4-rs = { git = "https://github.com/noaione/vapoursynth4-rs", rev = "685c29dd287332a1c62214acb50c5c7abd597365", default-features = false, features = [
+# Upstream carries the Vulkan half: `vulkan` enables the ash-based
+# `VSVULKANAPI` table, which `src/vulkan.rs` wraps.
+vapoursynth4-rs = { version = "0.6.0", default-features = false, features = [
     "vs-43", # >=R80
-    "vs-vulkan", # >=R80
+    "vulkan", # >=R80
     "vsscript-44", # required by the binding, not used here
 ] }
 

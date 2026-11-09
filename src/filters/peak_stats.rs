@@ -4,8 +4,8 @@ use std::ffi::{CStr, c_void};
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
-use vapoursynth4_rs::frame::{Frame, FrameContext, VideoFrame};
-use vapoursynth4_rs::map::{AppendMode, KeyStr, MapRef, Value};
+use vapoursynth4_rs::frame::{FrameContext, VideoFrame};
+use vapoursynth4_rs::map::{AppendMode, KeyStr, MapMut, MapRef, Value};
 use vapoursynth4_rs::node::{Filter, Node, VideoNode};
 use vapoursynth4_rs::{core::CoreRef, ffi, key};
 
@@ -36,8 +36,6 @@ pub struct PeakStats {
     source: VideoNode,
     options: PeakOptions,
     debug: bool,
-    /// Whether this instance counts on the device.
-    gpu: bool,
     /// The device kernel, built once when `gpu` is set.
     engine: Option<Engine>,
     /// Set once the settings line has been written for this instance.
@@ -53,16 +51,10 @@ impl Filter for PeakStats {
     const ARGS: &'static CStr = c"clip:vnode:all;upper_limit:int:opt;peak_percentage:float:opt;peak_prominence:float:opt;skip_white:int:opt;gpu:int:opt;debug:int:opt;";
     const RETURN_TYPE: &'static CStr = c"clip:vnode:all;";
 
-    /// `all` is answered by the instance: a `gpu=1` run's frame is device
-    /// memory and a `gpu=0` run's is not.
-    fn gpu_output(&self) -> bool {
-        self.gpu
-    }
-
     fn create(
         input: MapRef,
-        output: MapRef,
-        _data: Option<Box<Self::FilterData>>,
+        mut output: MapMut,
+        _data: Option<&Self::FilterData>,
         mut core: CoreRef,
     ) -> Result<()> {
         let source = read_clip(&input, "PeakStats")?;
@@ -118,19 +110,19 @@ impl Filter for PeakStats {
         let dependency = source.as_ptr();
         add_filter(
             &mut core,
-            output,
+            &mut output,
             Self::NAME,
             &info,
+            gpu,
             Self {
                 source,
                 options,
                 debug,
-                gpu,
                 engine,
                 reported: AtomicBool::new(false),
             },
             dependency,
-        );
+        )?;
         Ok(())
     }
 
@@ -202,7 +194,7 @@ impl Filter for PeakStats {
                     format_args!("black={} white={} ", peaks.black, peaks.white),
                 );
 
-                Ok(Some(output))
+                Ok(Some(output.freeze()))
             }
             ffi::VSActivationReason::Error => Err(input_failed("PeakStats")),
         }
@@ -210,7 +202,7 @@ impl Filter for PeakStats {
 }
 
 /// Writes one integer property, replacing anything already there.
-fn set_property(properties: &mut MapRef<'_>, name: &KeyStr, value: u16) -> Result<()> {
+fn set_property(properties: &mut MapMut<'_>, name: &KeyStr, value: u16) -> Result<()> {
     properties
         .set(name, Value::Int(i64::from(value)), AppendMode::Replace)
         .map_err(|error| NImagesError::property(name, error))

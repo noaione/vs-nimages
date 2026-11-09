@@ -11,17 +11,45 @@ pub(crate) mod histogram;
 pub(super) mod shared;
 
 use std::ffi::CStr;
-use std::ptr;
+use std::ops::Deref;
 pub(crate) mod map;
 use vapoursynth4_rs::core::CoreRef;
 use vapoursynth4_rs::ffi;
+use vapoursynth4_rs::ffi::vulkan::vk;
 use vapoursynth4_rs::frame::VideoFrame;
 use vapoursynth4_rs::key;
 use vapoursynth4_rs::map::{AppendMode, Value};
 use vapoursynth4_rs::node::VideoNode;
-use vapoursynth4_rs::vulkan::{ComputePipeline, ExecContext, ExecPool, VulkanError};
 
 use crate::error::{NImagesError, Result};
+use crate::vulkan::{ComputePipeline, ExecContext, ExecPool, VulkanCoreExt, VulkanError};
+
+/// A GPU frame a filter instance keeps for read-only reuse.
+///
+/// The table and tap frames are filled once in `create` and never written
+/// again, and every read of them goes through the core's own thread-safe
+/// accessors.  The bindings' frame is `Send` but not `Sync`, so this says so
+/// once for exactly that use.
+pub(crate) struct SharedFrame(VideoFrame);
+
+// SAFETY: the frame is immutable from the moment the filter instance is
+// built.  A recording only reads it, and the core hands read-only frames to
+// every worker thread of a filter by design.
+unsafe impl Sync for SharedFrame {}
+
+impl SharedFrame {
+    pub(crate) fn new(frame: VideoFrame) -> Self {
+        Self(frame)
+    }
+}
+
+impl Deref for SharedFrame {
+    type Target = VideoFrame;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
 
 /// The entry point a recording needs between two dispatches that touch the same
 /// plane.
@@ -29,8 +57,7 @@ use crate::error::{NImagesError, Result};
 /// Resolved once at filter creation: a core that does not export it cannot run a
 /// kernel with an intra-recording dependency, and the error says so before the
 /// first frame rather than after a wrong picture.
-pub(crate) type BarrierFn =
-    unsafe extern "system" fn(ffi::VkCommandBuffer, *const ffi::VkDependencyInfo);
+pub(crate) type BarrierFn = unsafe extern "system" fn(vk::CommandBuffer, *const vk::DependencyInfo);
 
 /// One compute pipeline and the pool it records on, built once per instance.
 pub(crate) struct Device {
@@ -133,10 +160,10 @@ pub(crate) fn compute_barrier(exec: &mut ExecContext<'_>, barrier: BarrierFn) {
     barrier_between(
         exec,
         barrier,
-        ffi::VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-        ffi::VK_ACCESS_2_SHADER_WRITE_BIT,
-        ffi::VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-        ffi::VK_ACCESS_2_SHADER_READ_BIT | ffi::VK_ACCESS_2_SHADER_WRITE_BIT,
+        vk::PipelineStageFlags2::COMPUTE_SHADER,
+        vk::AccessFlags2::SHADER_WRITE,
+        vk::PipelineStageFlags2::COMPUTE_SHADER,
+        vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE,
     );
 }
 
@@ -148,10 +175,10 @@ pub(crate) fn fill_barrier(exec: &mut ExecContext<'_>, barrier: BarrierFn) {
     barrier_between(
         exec,
         barrier,
-        ffi::VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-        ffi::VK_ACCESS_2_TRANSFER_WRITE_BIT,
-        ffi::VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-        ffi::VK_ACCESS_2_SHADER_READ_BIT | ffi::VK_ACCESS_2_SHADER_WRITE_BIT,
+        vk::PipelineStageFlags2::TRANSFER,
+        vk::AccessFlags2::TRANSFER_WRITE,
+        vk::PipelineStageFlags2::COMPUTE_SHADER,
+        vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE,
     );
 }
 
@@ -160,10 +187,10 @@ pub(crate) fn transfer_barrier(exec: &mut ExecContext<'_>, barrier: BarrierFn) {
     barrier_between(
         exec,
         barrier,
-        ffi::VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-        ffi::VK_ACCESS_2_SHADER_WRITE_BIT,
-        ffi::VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-        ffi::VK_ACCESS_2_TRANSFER_READ_BIT,
+        vk::PipelineStageFlags2::COMPUTE_SHADER,
+        vk::AccessFlags2::SHADER_WRITE,
+        vk::PipelineStageFlags2::TRANSFER,
+        vk::AccessFlags2::TRANSFER_READ,
     );
 }
 
@@ -171,34 +198,21 @@ pub(crate) fn transfer_barrier(exec: &mut ExecContext<'_>, barrier: BarrierFn) {
 fn barrier_between(
     exec: &mut ExecContext<'_>,
     barrier: BarrierFn,
-    src_stage: ffi::VkPipelineStageFlags2,
-    src_access: ffi::VkAccessFlags2,
-    dst_stage: ffi::VkPipelineStageFlags2,
-    dst_access: ffi::VkAccessFlags2,
+    src_stage: vk::PipelineStageFlags2,
+    src_access: vk::AccessFlags2,
+    dst_stage: vk::PipelineStageFlags2,
+    dst_access: vk::AccessFlags2,
 ) {
-    let memory = ffi::VkMemoryBarrier2 {
-        sType: ffi::VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
-        pNext: ptr::null(),
-        srcStageMask: src_stage,
-        srcAccessMask: src_access,
-        dstStageMask: dst_stage,
-        dstAccessMask: dst_access,
-    };
-    let dependency = ffi::VkDependencyInfo {
-        sType: ffi::VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-        pNext: ptr::null(),
-        dependencyFlags: 0,
-        memoryBarrierCount: 1,
-        pMemoryBarriers: &raw const memory,
-        bufferMemoryBarrierCount: 0,
-        pBufferMemoryBarriers: ptr::null(),
-        imageMemoryBarrierCount: 0,
-        pImageMemoryBarriers: ptr::null(),
-    };
+    let memory = vk::MemoryBarrier2::default()
+        .src_stage_mask(src_stage)
+        .src_access_mask(src_access)
+        .dst_stage_mask(dst_stage)
+        .dst_access_mask(dst_access);
+    let dependency = vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&memory));
 
     // SAFETY: the recording is live and owned by this thread, and the call only
     // records a command before reading the structure above.
-    unsafe { barrier(exec.command_buffer(), &raw const dependency) };
+    unsafe { barrier(exec.command_buffer(), &dependency) };
 }
 
 /// Allocates a `GRAY32` frame for a kernel's intermediate plane.
@@ -211,13 +225,17 @@ pub(crate) fn gray32_frame(
     height: i32,
     prop_src: Option<&VideoFrame>,
 ) -> Result<VideoFrame> {
-    let format = core.query_video_format(
+    let Some(format) = core.query_video_format(
         ffi::VSColorFamily::Gray,
         ffi::VSSampleType::Integer,
         32,
         0,
         0,
-    );
+    ) else {
+        return Err(NImagesError::new(
+            "gpu: the core does not know the GRAY32 format",
+        ));
+    };
     core.new_gpu_video_frame(&format, width, height, prop_src)
         .ok_or_else(|| NImagesError::new("gpu: the core could not allocate a device frame"))
 }
@@ -268,7 +286,7 @@ fn transfer(core: &CoreRef, node: &VideoNode, function: &CStr) -> Result<VideoNo
 ///
 /// A dispatch binds frames, so a tap table a kernel reads is a frame too. The
 /// values are copied as their `f32` bit patterns, which is what the kernel reads.
-pub(crate) fn upload_floats(core: &CoreRef, values: &[f32]) -> Result<VideoFrame> {
+pub(crate) fn upload_floats(core: &CoreRef, values: &[f32]) -> Result<SharedFrame> {
     let words: Vec<u32> = values.iter().map(|value| value.to_bits()).collect();
     upload_words(core, &words)
 }
@@ -278,7 +296,7 @@ pub(crate) fn upload_floats(core: &CoreRef, values: &[f32]) -> Result<VideoFrame
 /// A dispatch binds frames, so a tap table or a lookup table a kernel indexes
 /// is a frame too. The host is the only writer here, so the copy is recorded
 /// once and the frame's producer pair is what later recordings wait on.
-pub(crate) fn upload_words(core: &CoreRef, words: &[u32]) -> Result<VideoFrame> {
+pub(crate) fn upload_words(core: &CoreRef, words: &[u32]) -> Result<SharedFrame> {
     let bytes = words.len().saturating_mul(size_of::<u32>());
     if bytes == 0 {
         return Err(NImagesError::new("gpu: a table cannot be empty"));
@@ -289,9 +307,9 @@ pub(crate) fn upload_words(core: &CoreRef, words: &[u32]) -> Result<VideoFrame> 
     let mut staging = core
         .create_gpu_buffer(
             size,
-            ffi::VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-            ffi::VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | ffi::VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-            ffi::VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+            vk::BufferUsageFlags::TRANSFER_SRC,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
         )
         .map_err(|error| gpu_error("could not allocate a staging buffer", &error))?;
 
@@ -312,13 +330,17 @@ pub(crate) fn upload_words(core: &CoreRef, words: &[u32]) -> Result<VideoFrame> 
         }
     }
 
-    let format = core.query_video_format(
+    let Some(format) = core.query_video_format(
         ffi::VSColorFamily::Gray,
         ffi::VSSampleType::Integer,
         32,
         0,
         0,
-    );
+    ) else {
+        return Err(NImagesError::new(
+            "gpu: the core does not know the GRAY32 format",
+        ));
+    };
     let width = i32::try_from(words.len())
         .map_err(|_| NImagesError::new("gpu: the table is too wide for one row"))?;
     let mut frame = core
@@ -336,26 +358,19 @@ pub(crate) fn upload_words(core: &CoreRef, words: &[u32]) -> Result<VideoFrame> 
         .ok_or_else(|| NImagesError::new("gpu: the core did not resolve vkCmdCopyBuffer2"))?;
 
     pool.record(|exec| {
-        let destination = exec.write_plane(&mut frame, 0)?;
-        let region = ffi::VkBufferCopy2 {
-            sType: ffi::VK_STRUCTURE_TYPE_BUFFER_COPY_2,
-            pNext: ptr::null(),
-            srcOffset: 0,
-            dstOffset: 0,
-            size,
-        };
-        let info = ffi::VkCopyBufferInfo2 {
-            sType: ffi::VK_STRUCTURE_TYPE_COPY_BUFFER_INFO_2,
-            pNext: ptr::null(),
-            srcBuffer: staging.buffer(),
-            dstBuffer: destination.buffer(),
-            regionCount: 1,
-            pRegions: &raw const region,
-        };
+        let destination = exec.write_video_frame(&mut frame, 0)?;
+        let region = vk::BufferCopy2::default()
+            .src_offset(0)
+            .dst_offset(0)
+            .size(size);
+        let info = vk::CopyBufferInfo2::default()
+            .src_buffer(staging.buffer())
+            .dst_buffer(destination.buffer())
+            .regions(std::slice::from_ref(&region));
 
         // SAFETY: the recording is live, both buffers are declared on it, and
         // the structure outlives the call.
-        unsafe { copy(exec.command_buffer(), &raw const info) };
+        unsafe { copy(exec.command_buffer(), &info) };
         // SAFETY: the submission reads the staging buffer, so ownership passes
         // to the recording for exactly as long as that submission runs.
         unsafe { exec.uses_buffer(staging) };
@@ -363,7 +378,7 @@ pub(crate) fn upload_words(core: &CoreRef, words: &[u32]) -> Result<VideoFrame> 
     })
     .map_err(|error| gpu_error("could not upload the table", &error))?;
 
-    Ok(frame)
+    Ok(SharedFrame::new(frame))
 }
 
 /// Turns a Vulkan failure into a message that names the step.
