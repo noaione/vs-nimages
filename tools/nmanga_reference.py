@@ -1,24 +1,16 @@
-"""Load the unchanged nmanga book functions without importing its CLI stack."""
+"""Use nmanga's public page analysis and levelling policy as the reference."""
 
 from __future__ import annotations
 
-import ast
 import importlib
 import sys
-from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, NamedTuple
 
-from PIL import Image, ImageFilter
+from PIL import Image
 
 
 class BookReference:
-    """The reference's file analyzer, consensus and page resolver.
-
-    Only the selected definitions are compiled from the CLI source. Their bodies
-    are unchanged; bindings come from the real autolevel module and Pillow.
-    Missing or newly required definitions fail rather than selecting a local copy.
-    """
+    """The original file analyzer and resolver, with no copied policy code."""
 
     def __init__(self, path: Path) -> None:
         path = path.resolve()
@@ -26,30 +18,25 @@ class BookReference:
         self.autolevel = importlib.import_module("nmanga.autolevel")
         if Path(self.autolevel.__file__).resolve() != path / "nmanga" / "autolevel.py":
             raise RuntimeError("nmanga was already imported from a different checkout")
-        source_path = path / "nmanga" / "cli" / "autolevel.py"
-        names = {
-            "_BookPeakPage",
-            "_ResolvedPageLevels",
-            "_analyze_book_peak_page",
-            "_book_peak_consensus",
-            "_resolve_book_peak_page",
-            "_resolve_book_peak_pages",
-        }
-        source = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
-        definitions = [node for node in source.body if getattr(node, "name", None) in names]
-        if len(definitions) != len(names):
-            raise RuntimeError("nmanga book policy moved; update the reference loader")
-        namespace: dict[str, Any] = {
-            "__name__": "nmanga_book_reference",
-            "NamedTuple": NamedTuple,
-            "Sequence": Sequence,
-            "Path": Path,
-            "Image": Image,
-            "ImageFilter": ImageFilter,
-            "_LocalPeakAnalysis": self.autolevel._LocalPeakAnalysis,
-            "_find_local_peak_analysis": self.autolevel._find_local_peak_analysis,
-            "book_peak": self.autolevel.book_peak,
-        }
-        exec(compile(ast.Module(body=definitions, type_ignores=[]), str(source_path), "exec"), namespace)
-        self.analyze_page = namespace["_analyze_book_peak_page"]
-        self.resolve_pages = namespace["_resolve_book_peak_pages"]
+        for name in ("analyze_book_peak_page", "resolve_book_peaks", "LevellingPolicy"):
+            if not hasattr(self.autolevel, name):
+                raise RuntimeError(f"nmanga is missing its public {name} reference")
+
+    def analyze_page(self, path, upper_limit, peak_min_pct, peak_prom_pct, no_white, median_filter=True):
+        if median_filter:
+            return self.autolevel.analyze_book_peak_page(
+                path, upper_limit=upper_limit, peak_min_pct=peak_min_pct,
+                peak_prom_pct=peak_prom_pct, no_white=no_white,
+            )
+        with Image.open(path) as image:
+            analysis = self.autolevel._find_local_peak_analysis(
+                image, upper_limit=upper_limit, peak_percentage=peak_min_pct,
+                peak_prominence=peak_prom_pct, skip_white_check=no_white, median_filter=False,
+            )
+        return path, analysis
+
+    def resolve_pages(self, pages, offset, lower, upper, tolerance=6):
+        policy = self.autolevel.LevellingPolicy(
+            lower_limit=lower, upper_limit=upper, peak_offset=offset, book_peak_tolerance=tolerance,
+        )
+        return self.autolevel.resolve_book_peaks(pages, policy)

@@ -237,6 +237,7 @@ def check_frame_peaks(frames: dict, fixtures: dict) -> None:
         clip = clip_of(frame_from_info(info))
         arguments = {
             "upper_limit": case["upper_limit"],
+            "median_filter": case["median_filter"],
             "peak_percentage": case["peak_percentage"] if case["peak_percentage"] is not None else 0.0,
             "skip_white": int(case["skip_white"]),
         }
@@ -267,6 +268,7 @@ def check_histogram_peaks(fixtures: dict) -> None:
         clip = clip_of(page)
         arguments = {
             "upper_limit": case["upper_limit"],
+            "median_filter": False,
             "peak_percentage": case["peak_percentage"] if case["peak_percentage"] is not None else 0.0,
             "skip_white": int(case["skip_white"]),
         }
@@ -466,6 +468,12 @@ def check_levels_from_properties() -> None:
     shifted = array_of(core.nimages.Levels(clip, black=13, white=245, gamma=1.0))
     same(offset.tolist(), shifted.tolist(), "peak_offset is a code value")
 
+    # nmanga derives gamma from the raw peak and then shifts the curve endpoint.
+    for peak_offset in (-4, 1, 6, 120):
+        adjusted = array_of(core.nimages.Levels(stats, use_props=True, peak_offset=peak_offset, auto_gamma=True))
+        expected = array_of(core.nimages.Levels(clip, black=12 + peak_offset, white=245, gamma=gamma))
+        same(adjusted.tolist(), expected.tolist(), f"raw peak gamma before offset {peak_offset}")
+
     # A frame with no peak at all still levels, from the defaults.
     flat = clip_of(np.full((16, 16), 200, dtype=np.uint8))
     flat_stats = core.nimages.PeakStats(flat, skip_white=1)
@@ -499,7 +507,8 @@ def check_book_peaks(fixtures: dict) -> None:
         source = core.std.SetFrameProps(source, NImagesCustom=37)
         stats = core.nimages.PeakStats(
             source, book_peak_fallback=1, levelling_lower_limit=case["lower"],
-            levelling_upper_limit=case["upper"], peak_offset=case["offset"], **case["parameters"])
+            levelling_upper_limit=case["upper"], peak_offset=case["offset"],
+            book_peak_tolerance=case["tolerance"], **case["parameters"])
         # Reverse order proves the first output request does not choose consensus.
         for n in reversed(range(len(arrays))):
             props = props_of(stats, n)
@@ -542,6 +551,17 @@ def check_book_peaks(fixtures: dict) -> None:
         same(props["NImagesBookPeakUsed"], 1, f"{bits}-bit book fallback")
         same(props["NImagesLevelEligible"], 1, f"{bits}-bit fallback eligibility")
         same(array_of(stats, 2).tolist(), dark.tolist(), f"{bits}-bit pixels survive")
+        book = round(12 * scale)
+        tolerance = 6 * maximum // 255
+        relative_source = core.std.Splice([
+            core.std.BlankClip(width=9, height=7, format=format_, length=1, color=[level])
+            for level in [book, book, book, book + tolerance, book + tolerance + 1]])
+        relative = core.nimages.PeakStats(relative_source, book_peak_fallback=1)
+        same(props_of(relative, 3)["NImagesBookPeakUsed"], 0, f"{bits}-bit relative tolerance is inclusive")
+        same(props_of(relative, 3)["NImagesBlackLevel"], book + tolerance, f"{bits}-bit at-tolerance local peak")
+        same(props_of(relative, 4)["NImagesBookPeakUsed"], 1, f"{bits}-bit above-tolerance uses book")
+        same(props_of(relative, 4)["NImagesBlackLevel"], book, f"{bits}-bit relative fallback level")
+        same(props_of(relative, 4)["NImagesBlackPeakFound"], 1, f"{bits}-bit qualified dark tone stays qualified")
         if bits > 8:
             lower = 8 * maximum // 255
             upper = (55 * maximum + 254) // 255
@@ -573,6 +593,10 @@ def check_book_peaks(fixtures: dict) -> None:
     for n in (4, 5):
         same(props_of(color_stats, n)["NImagesBookPeakUsed"], 1, "color fallback uses luma median")
         same(planes_of(color_stats, n), planes_of(color_source, n), "color book scan preserves all planes")
+
+    for tolerance in (-1, 128):
+        expect_error("invalid book tolerance", lambda: core.nimages.PeakStats(
+            anchors[0], book_peak_fallback=1, book_peak_tolerance=tolerance), contains="book_peak_tolerance")
 
     # Book-only properties are absent from the ordinary per-frame mode.
     plain = props_of(core.nimages.PeakStats(anchors[0]))
@@ -844,6 +868,11 @@ def check_errors() -> None:
         contains="half of the sample range",
     )
     expect_error(
+        "Levels offset does not rescue an invalid raw gamma peak",
+        lambda: core.nimages.Levels(gray, black=200, white=255, peak_offset=-100, auto_gamma=1),
+        contains="half of the sample range",
+    )
+    expect_error(
         "Levels peak_offset below zero",
         lambda: core.nimages.Levels(gray, black=0, white=255, peak_offset=-1),
         contains="between 0 and 255",
@@ -1018,6 +1047,73 @@ def check_high_depth_integer_mapping() -> None:
                     expected_posterize_u16(input_values, 5).tolist(),
                     f"{name}: Posterize plane {plane}",
                 )
+
+
+def check_median_peak_parity(gpu: int = 0) -> None:
+    section(f"median luma analysis against numpy, gpu={gpu}")
+    rng = np.random.default_rng(0x6BD2775)
+    for shade, key in ((64, "NImagesBlackLevel"), (191, "NImagesWhiteLevel")):
+        boundary = core.std.BlankClip(width=1, height=1, format=vs.GRAY8, length=1, color=[shade])
+        same(props_of(core.nimages.PeakStats(boundary, gpu=gpu))[key], shade,
+             f"gpu={gpu}: default 64-code ROI includes shade {shade}")
+        same(props_of(core.nimages.PeakStats(boundary, upper_limit=60, gpu=gpu))[key],
+             0 if shade == 64 else 255, f"gpu={gpu}: explicit legacy limit excludes shade {shade}")
+    ringing = np.full((60, 60), 255, dtype=np.uint8)
+    ringing[10:16, 10:16] = 30
+    ringing[::2, ::2] = 0
+    ring_source = clip_of(ringing)
+    for filtered, black in ((False, 0), (True, 30)):
+        props = props_of(core.nimages.PeakStats(ring_source, median_filter=filtered, gpu=gpu))
+        same(props["NImagesBlackLevel"], black, f"gpu={gpu}: ringing removal median={filtered}")
+        same(props["NImagesBlackPeakFound"], 1, f"gpu={gpu}: ringing/ink peak qualifies")
+
+    def region_peak(hist, first, last, total, default):
+        roi = hist[first:last + 1]
+        height = int(roi.max())
+        if height == 0:
+            return default, 0
+        start = int(roi.argmax())
+        end = start
+        while end + 1 < len(roi) and roi[end + 1] == height:
+            end += 1
+        # The global maximum reaches both virtual zero bins, so its prominence
+        # equals its height. Qualification still precedes the fallback.
+        passed = height >= math.ceil(total * 0.01) and height >= math.ceil(total * 0.005)
+        return first + (start + end) // 2, int(passed)
+
+    for bits in range(8, 17):
+        maximum = (1 << bits) - 1
+        dtype = np.uint8 if bits == 8 else np.uint16
+        limit = round_ratio_ties_even(64 * maximum, 255)
+        for family in (vs.GRAY, vs.RGB, vs.YUV):
+            format_ = core.query_video_format(family, vs.INTEGER, bits, 0, 0).id
+            for width, height in ((1, 1), (1, 7), (7, 1), (13, 7), (65, 37)):
+                count = 1 if family == vs.GRAY else 3
+                planes = [rng.integers(0, maximum + 1, (height, width), dtype=dtype) for _ in range(count)]
+                source = clip_of_planes(planes, format_, width=width, height=height)
+                if family == vs.RGB:
+                    red, green, blue = [plane.astype(np.uint64) for plane in planes]
+                    luma = (red * 19595 + green * 38470 + blue * 7471 + 32768) >> 16
+                else:
+                    luma = planes[0]
+                for median_filter in (False, True):
+                    samples = luma
+                    if median_filter:
+                        padded = np.pad(luma, 1, mode="edge")
+                        windows = np.stack([padded[y:y + height, x:x + width] for y in range(3) for x in range(3)])
+                        samples = np.partition(windows, 4, axis=0)[4]
+                    histogram = np.bincount(samples.astype(np.int64).ravel(), minlength=maximum + 1)
+                    black, black_found = region_peak(histogram, 0, limit, width * height, 0)
+                    white, white_found = region_peak(histogram, maximum - limit, maximum, width * height, maximum)
+                    stats = core.nimages.PeakStats(source, peak_percentage=1, peak_prominence=0.5,
+                                                  median_filter=median_filter, gpu=gpu)
+                    props = props_of(stats)
+                    label = f"{bits}-bit family={family} {width}x{height} median={median_filter} gpu={gpu}"
+                    for key, value in (("NImagesBlackLevel", black), ("NImagesWhiteLevel", white),
+                                       ("NImagesBlackPeakFound", black_found), ("NImagesWhitePeakFound", white_found)):
+                        same(props[key], value, f"{label}: {key}")
+                    output = core.std.GPUDownload(stats) if gpu else stats
+                    same(planes_of(output), [plane.tolist() for plane in planes], f"{label}: original pixels")
 
 
 def check_high_depth_analysis() -> None:
@@ -1298,7 +1394,7 @@ def check_debug_logging() -> None:
         fixed = core.nimages.Levels(clip, black=10, white=200, gamma=1.0, debug=1)
 
         settings = (
-            ("PeakStats", stats, "upper_limit=60"),
+            ("PeakStats", stats, "upper_limit=64"),
             ("PeakGrayShades", shades, "threshold=0.01"),
             ("Levels", levels, "use_props=true"),
             ("Posterize", posterize, "bits=4 colors=16"),
@@ -1715,6 +1811,8 @@ def check_device() -> None:
             print(f"  skipped: {reason}")
         return
 
+    check_median_peak_parity(gpu=1)
+
     height, width = 180, 320
     page = ((np.arange(height)[:, None] * 7 + np.arange(width)[None, :]) % 256).astype(np.uint8)
     source = clip_of(page)
@@ -1901,6 +1999,7 @@ def main() -> int:
     check_color_families(posterize)
     check_high_depth_integer_mapping()
     check_high_depth_analysis()
+    check_median_peak_parity()
     check_float_levels()
     check_color_analysis()
     check_unified_level_endpoints()

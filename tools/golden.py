@@ -14,7 +14,7 @@ Ground truth comes from the reference implementation in
 * ``posterize_image_by_bits`` -> 256-entry tables for ``posterize.json``
 
 ``book.json`` calls the file analyzer and resolver from
-``nmanga/cli/autolevel.py`` through ``nmanga_reference.BookReference``.
+``nmanga/autolevel.py`` through ``nmanga_reference.BookReference``.
 
 ``nmanga`` exposes threshold status through ``_find_local_peak_analysis``.
 Automatic gamma uses the reference expression below.
@@ -40,7 +40,7 @@ from typing import Any
 
 import numpy as np
 import scipy
-from PIL import Image
+from PIL import Image, ImageFilter
 
 from nmanga_reference import BookReference
 
@@ -137,7 +137,7 @@ def reference_peaks(
     hist: np.ndarray,
     total_pixels: int,
     *,
-    upper_limit: int = 60,
+    upper_limit: int = 64,
     peak_percentage: float | None = 0.25,
     peak_prominence: float | None = None,
     skip_white: bool = False,
@@ -287,34 +287,35 @@ def filled(hist: np.ndarray, pixels: int, shade: int = 200) -> np.ndarray:
 def peak_parameters() -> list[dict[str, Any]]:
     """The parameter sets every peak histogram case is evaluated under."""
     return [
-        {"label": "default", "upper_limit": 60, "peak_percentage": 0.25, "peak_prominence": None, "skip_white": False},
+        {"label": "default", "upper_limit": 64, "peak_percentage": 0.25, "peak_prominence": None, "skip_white": False},
         {
             "label": "no-height",
-            "upper_limit": 60,
+            "upper_limit": 64,
             "peak_percentage": None,
             "peak_prominence": None,
             "skip_white": False,
         },
         {
             "label": "prominence",
-            "upper_limit": 60,
+            "upper_limit": 64,
             "peak_percentage": 0.25,
             "peak_prominence": 0.1,
             "skip_white": False,
         },
         {
             "label": "skip-white",
-            "upper_limit": 60,
+            "upper_limit": 64,
             "peak_percentage": 0.25,
             "peak_prominence": None,
             "skip_white": True,
         },
         {"label": "narrow", "upper_limit": 1, "peak_percentage": 0.25, "peak_prominence": None, "skip_white": False},
+        {"label": "legacy-limit", "upper_limit": 60, "peak_percentage": 0.25, "peak_prominence": None, "skip_white": False},
         {"label": "wide", "upper_limit": 255, "peak_percentage": 0.25, "peak_prominence": None, "skip_white": False},
-        {"label": "zero-pct", "upper_limit": 60, "peak_percentage": 0.0, "peak_prominence": None, "skip_white": False},
+        {"label": "zero-pct", "upper_limit": 64, "peak_percentage": 0.0, "peak_prominence": None, "skip_white": False},
         {
             "label": "full-pct",
-            "upper_limit": 60,
+            "upper_limit": 64,
             "peak_percentage": 100.0,
             "peak_prominence": None,
             "skip_white": False,
@@ -433,10 +434,21 @@ def build_book_fixtures(nmanga: Nmanga) -> dict[str, Any]:
         pages += [rng.choice([20, 128, 255], size=(7, 9)).astype(np.uint8), dark, noise]
         sets.append((f"random-{n}", pages))
 
+    anchors = [flat(12) for _ in range(5)]
+    for tolerance in (0, 6, 20):
+        sets.append((f"tolerance-{tolerance}", anchors + [flat(18), flat(19), flat(40), flat(55), flat(0)]))
+    ringing = np.full((60, 60), 255, dtype=np.uint8)
+    ringing[10:16, 10:16] = 30
+    ringing[::2, ::2] = 0
+    sets.append(("ringing", anchors + [ringing]))
+    sets.append(("ringing-unfiltered", anchors + [ringing]))
+
     cases = []
     with TemporaryDirectory(prefix="nimages-golden-book-") as directory:
         root = Path(directory)
         for name, arrays in sets:
+            tolerance = int(name.split("-")[-1]) if name.startswith("tolerance-") else 6
+            median_filter = not name.endswith("-unfiltered")
             paths = []
             records = []
             for n, array in enumerate(arrays):
@@ -450,16 +462,17 @@ def build_book_fixtures(nmanga: Nmanga) -> dict[str, Any]:
                     "pixels": array.ravel().tolist(),
                 })
             parameters = {
-                "upper_limit": 60,
+                "upper_limit": 64,
+                "median_filter": median_filter,
                 "peak_percentage": 50.0,
                 "peak_prominence": 0.1,
                 "skip_white": False,
             }
             # Match _analyze_book_peak_pages: the real per-file function opens
             # the PNG, converts to L, filters it and scans median.histogram().
-            pages = dict(reference.analyze_page(path, 60, 50.0, 0.1, False) for path in paths)
+            pages = dict(reference.analyze_page(path, 64, 50.0, 0.1, False, median_filter) for path in paths)
             for offset in (0, 4, -4):
-                shared, resolved = reference.resolve_pages(pages, offset, 8, 55)
+                shared, resolved = reference.resolve_pages(pages, offset, 8, 55, tolerance)
                 page_records = []
                 for path, record in zip(paths, records):
                     page = pages[path]
@@ -468,10 +481,10 @@ def build_book_fixtures(nmanga: Nmanga) -> dict[str, Any]:
                         **record,
                         "darkest_gray": page.darkest_gray,
                         "expect": {
-                            "black": page.analysis.black_level if result.black_level is None else result.black_level,
+                            "black": page.black_level if result.black_level is None else result.black_level,
                             "white": result.white_level,
-                            "black_found": page.analysis.black_peak_found,
-                            "white_found": page.analysis.white_peak_found,
+                            "black_found": page.black_peak_found,
+                            "white_found": page.white_peak_found,
                             "eligible": result.black_level is not None,
                             "used_book_peak": result.used_book_peak,
                         },
@@ -481,6 +494,7 @@ def build_book_fixtures(nmanga: Nmanga) -> dict[str, Any]:
                     "lower": 8,
                     "upper": 55,
                     "offset": offset,
+                    "tolerance": tolerance,
                     "parameters": parameters,
                     "consensus": shared,
                     "pages": page_records,
@@ -519,6 +533,7 @@ def build_peak_fixtures(nmanga: Nmanga) -> dict[str, Any]:
                     peak_percentage=params["peak_percentage"],
                     peak_prominence=params["peak_prominence"],
                     skip_white_check=params["skip_white"],
+                    median_filter=False,
                 )
                 expected = (black, white, black_found, white_found)
                 actual = (want.black_level, want.white_level, want.black_peak_found, want.white_peak_found)
@@ -1042,6 +1057,8 @@ def build_frame_fixtures(nmanga: Nmanga) -> dict[str, Any]:
         path = FRAMES / f"{name}.bin"
         payload = np.asarray(image, dtype=np.uint8).tobytes()
         path.write_bytes(payload)
+        with image.filter(ImageFilter.MedianFilter(size=3)) as median:
+            median_hist = hist_of(median).tolist()
         index[name] = {
             "width": image.width,
             "height": image.height,
@@ -1049,48 +1066,56 @@ def build_frame_fixtures(nmanga: Nmanga) -> dict[str, Any]:
             "bytes": len(payload),
             "sha256": hashlib.sha256(payload).hexdigest(),
             "hist": hist_of(image).tolist(),
+            "median_hist": median_hist,
         }
 
     # Peak expectations for the real frames, so the integration tests have
     # ground truth that covers actual stride-padded reads.
     peak_cases: list[dict[str, Any]] = []
     for name, image in frame_images():
-        hist = hist_of(image)
         total = image.width * image.height
-        for params in peak_parameters():
-            black, white, black_found, white_found = reference_peaks(
-                hist,
-                total,
-                upper_limit=params["upper_limit"],
-                peak_percentage=params["peak_percentage"],
-                peak_prominence=params["peak_prominence"],
-                skip_white=params["skip_white"],
-            )
-            want = nmanga._find_local_peak_analysis(
-                image,
-                upper_limit=params["upper_limit"],
-                peak_percentage=params["peak_percentage"],
-                peak_prominence=params["peak_prominence"],
-                skip_white_check=params["skip_white"],
-            )
-            expected = (black, white, black_found, white_found)
-            actual = (want.black_level, want.white_level, want.black_peak_found, want.white_peak_found)
-            if actual != expected:
-                raise AssertionError(f"frame {name}/{params['label']}: nmanga={actual} reference={expected}")
-            peak_cases.append({
-                "name": f"{name}/{params['label']}",
-                "frame": name,
-                "upper_limit": params["upper_limit"],
-                "peak_percentage": params["peak_percentage"],
-                "peak_prominence": params["peak_prominence"],
-                "skip_white": params["skip_white"],
-                "expect": {
-                    "black": black,
-                    "white": white,
-                    "black_found": black_found,
-                    "white_found": white_found,
-                },
-            })
+        for median_filter in (True, False):
+            if median_filter:
+                with image.filter(ImageFilter.MedianFilter(size=3)) as median:
+                    hist = hist_of(median)
+            else:
+                hist = hist_of(image)
+            for params in peak_parameters():
+                black, white, black_found, white_found = reference_peaks(
+                    hist,
+                    total,
+                    upper_limit=params["upper_limit"],
+                    peak_percentage=params["peak_percentage"],
+                    peak_prominence=params["peak_prominence"],
+                    skip_white=params["skip_white"],
+                )
+                want = nmanga._find_local_peak_analysis(
+                    image,
+                    upper_limit=params["upper_limit"],
+                    peak_percentage=params["peak_percentage"],
+                    peak_prominence=params["peak_prominence"],
+                    skip_white_check=params["skip_white"],
+                    median_filter=median_filter,
+                )
+                expected = (black, white, black_found, white_found)
+                actual = (want.black_level, want.white_level, want.black_peak_found, want.white_peak_found)
+                if actual != expected:
+                    raise AssertionError(f"frame {name}/{params['label']}: nmanga={actual} reference={expected}")
+                peak_cases.append({
+                    "name": f"{name}/{params['label']}/median-{int(median_filter)}",
+                    "median_filter": median_filter,
+                    "frame": name,
+                    "upper_limit": params["upper_limit"],
+                    "peak_percentage": params["peak_percentage"],
+                    "peak_prominence": params["peak_prominence"],
+                    "skip_white": params["skip_white"],
+                    "expect": {
+                        "black": black,
+                        "white": white,
+                        "black_found": black_found,
+                        "white_found": white_found,
+                    },
+                })
 
     shade_cases: list[dict[str, Any]] = []
     for name, image in frame_images():
@@ -1193,7 +1218,7 @@ def main() -> int:
 
     manifest = {
         "generator": "tools/golden.py",
-        "reference": "nao-manga-rls/nmanga/autolevel.py, nmanga/cli/autolevel.py and nmanga/deblur.py",
+        "reference": "nao-manga-rls/nmanga/autolevel.py and nmanga/deblur.py",
         "seed": SEED,
         "versions": {
             "python": sys.version.split()[0],

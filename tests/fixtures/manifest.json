@@ -1,6 +1,6 @@
 {
   "generator": "tools/golden.py",
-  "reference": "nao-manga-rls/nmanga/autolevel.py, nmanga/cli/autolevel.py and nmanga/deblur.py",
+  "reference": "nao-manga-rls/nmanga/autolevel.py and nmanga/deblur.py",
   "seed": 20240607,
   "versions": {
     "python": "3.12.10",

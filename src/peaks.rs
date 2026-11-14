@@ -37,7 +37,7 @@ pub struct PeakOptions {
 impl Default for PeakOptions {
     fn default() -> Self {
         Self {
-            upper_limit: 60,
+            upper_limit: 64,
             peak_percentage: Some(0.25),
             peak_prominence: None,
             skip_white: false,

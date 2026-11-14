@@ -55,8 +55,11 @@ divisible by the format's subsampling factor.
 | `deblur` | `deblur_deconv` | `Deblur(method=0)` |
 | `deblur-unsharp` | `deblur_edge_sharp` | `Deblur(method=1)` |
 
-both sides use `upper_limit=60`, `peak_percentage=0.25`, white peaks skipped,
-`threshold=0.01` and `bits=4`, which are the `nmanga` orchestrator defaults.
+the historical rows below use `upper_limit=60`, unfiltered peak analysis,
+`peak_percentage=0.25`, white peaks skipped, `threshold=0.01` and `bits=4`.
+the current `tools/bench.py` uses the updated `upper_limit=64` and median-based
+peak analysis on both sides. the private page sets are absent here, so these
+older real-page rows have not been refreshed for that change.
 
 the two deblur workflows share `radius=0.8`, `iterations=6`, `threshold=2` and
 `overshoot=0`, and each runs the `strength` its own method defaults to, `0.65`

@@ -56,7 +56,8 @@ to frames as properties, and each filter scans only its requested frame.
 The current `find_local_peak` implementation:
 
 1. Converts non-`L` Pillow images to grayscale.
-2. Builds a 256-bin histogram over values 0 through 255.
+2. Takes a replicated-edge 3x3 median of luma by default, then builds its
+   256-bin histogram. `median_filter=False` skips that median.
 3. Searches the inclusive black region `0..=upper_limit`.
 4. Pads the region with one zero bin at each end so shade 0 and the upper
    boundary can be detected as peaks.
@@ -111,8 +112,8 @@ else   -> round(Q * ((x - b) / (w - b)) ** (1 / g))
 For the current Pillow path, `Q` is 255. The same mapping is applied to every
 processed band.
 
-The existing automatic gamma calculation must be ported separately and tested
-as part of the compatibility suite:
+Automatic gamma is derived from the raw black peak before `peak_offset`,
+matching `nmanga.gamma_correction`. The offset shifts the curve endpoint only:
 
 ```text
 black_normalized = black_level / 255
@@ -169,14 +170,22 @@ Python surface should remain equivalent to the following design.
 ```python
 stats = core.nimages.PeakStats(
     clip,
-    upper_limit=60,
+    upper_limit=64,
+    median_filter=True,
     peak_percentage=0.25,
     peak_prominence=0.1,
     skip_white=False,
 )
 ```
 
-Input and output pixels are unchanged. The returned frames contain:
+Input and output pixels are unchanged.
+
+`median_filter=True` counts a 3x3 median of luma with replicated edge samples.
+RGB is converted to the reference's fixed-point luma before the median; YUV
+uses plane 0. `median_filter=False` counts the original luma. Peaks and the
+darkest-shade guard always read the same histogram, on both CPU and Vulkan.
+`PeakGrayShades` and `Posterize` continue to count unfiltered samples.
+The returned frames contain:
 
 | Property | Type | Meaning |
 |---|---:|---|
@@ -193,10 +202,13 @@ strictly between `levelling_lower_limit=8` and `levelling_upper_limit=55`.
 Those limits use 8-bit-equivalent units; `peak_offset=0` uses native code units
 and affects eligibility only. Pass the same offset to `Levels` when applying it.
 
-A page keeps its qualified local peak inside those bounds. A qualified peak
-at or below the lower bound is excluded. Otherwise, a majority peak replaces
-the local black level only if the minimum of the page's 3x3 median-filtered
-luma is at or below the upper bound. The median extends edge samples. White
+A page keeps its qualified local peak inside those bounds unless it exceeds
+the book peak by more than `book_peak_tolerance=6`. The tolerance is in
+8-bit-equivalent units, validated in `0..=127`, and the offset cancels from the
+relative comparison. A qualified peak at or below the lower bound is excluded
+unless the reference's too-high test rejects it. Otherwise, a majority peak
+replaces the local black level only if the histogram's darkest occupied bin is
+at or below the upper bound. White
 levels and local threshold flags remain unchanged. With no consensus, pages
 without a usable local peak are excluded. The prepass fails at creation on a
 source error or mixed bit depths. Results never depend on frame request order.

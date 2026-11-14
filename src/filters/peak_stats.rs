@@ -26,7 +26,7 @@ const MIN_UPPER_LIMIT: i64 = 1;
 /// Upper bound of `upper_limit`, the last shade in its 8-bit-equivalent units.
 const MAX_UPPER_LIMIT: i64 = 255;
 /// Default `upper_limit`, matching `nmanga`.
-const DEFAULT_UPPER_LIMIT: i64 = 60;
+const DEFAULT_UPPER_LIMIT: i64 = 64;
 /// Default `peak_percentage`, matching `nmanga`.
 const DEFAULT_PEAK_PERCENTAGE: f64 = 0.25;
 
@@ -38,7 +38,7 @@ pub struct PeakStats {
     options: PeakOptions,
     /// Immutable results from the opt-in whole-clip prepass.
     book: Option<Vec<BookResult>>,
-    book_settings: (i64, i64, i64),
+    book_settings: super::book_peak::Settings,
     debug: bool,
     /// The device kernel, built once when `gpu` is set.
     engine: Option<Engine>,
@@ -52,7 +52,7 @@ impl Filter for PeakStats {
     type FilterData = ();
 
     const NAME: &'static CStr = c"PeakStats";
-    const ARGS: &'static CStr = c"clip:vnode:all;upper_limit:int:opt;peak_percentage:float:opt;peak_prominence:float:opt;skip_white:int:opt;book_peak_fallback:int:opt;levelling_lower_limit:int:opt;levelling_upper_limit:int:opt;peak_offset:int:opt;gpu:int:opt;debug:int:opt;";
+    const ARGS: &'static CStr = c"clip:vnode:all;upper_limit:int:opt;median_filter:int:opt;peak_percentage:float:opt;peak_prominence:float:opt;skip_white:int:opt;book_peak_fallback:int:opt;book_peak_tolerance:int:opt;levelling_lower_limit:int:opt;levelling_upper_limit:int:opt;peak_offset:int:opt;gpu:int:opt;debug:int:opt;";
     const RETURN_TYPE: &'static CStr = c"clip:vnode:all;";
 
     fn create(
@@ -101,20 +101,26 @@ impl Filter for PeakStats {
             ));
         }
         let offset = read_int(&input, key!(c"peak_offset"))?.unwrap_or(0);
+        let tolerance = read_int(&input, key!(c"book_peak_tolerance"))?.unwrap_or(6);
+        if !(0..=127).contains(&tolerance) {
+            return Err(NImagesError::new(
+                "PeakStats: book_peak_tolerance must be between 0 and 127",
+            ));
+        }
+        let settings = super::book_peak::Settings {
+            lower: lower as u8,
+            upper: upper as u8,
+            offset,
+            tolerance: tolerance as u8,
+            median: read_int(&input, key!(c"median_filter"))?.unwrap_or(1) != 0,
+        };
 
         let gpu = read_int(&input, key!(c"gpu"))?.unwrap_or(0) != 0;
         if gpu {
             gpu::require_device(&core)?;
         }
         let book = if book_enabled {
-            Some(super::book_peak::scan(
-                &source,
-                &core,
-                &options,
-                lower as u8,
-                upper as u8,
-                offset,
-            )?)
+            Some(super::book_peak::scan(&source, &core, &options, settings)?)
         } else {
             None
         };
@@ -150,7 +156,7 @@ impl Filter for PeakStats {
                 source,
                 options,
                 book,
-                book_settings: (lower, upper, offset),
+                book_settings: settings,
                 debug,
                 engine,
                 reported: AtomicBool::new(false),
@@ -183,15 +189,17 @@ impl Filter for PeakStats {
                 let line = format!(
                     "PeakStats: upper_limit={} peak_percentage={:?} peak_prominence={:?} \
                      skip_white={} book_peak_fallback={} levelling_lower_limit={} \
-                     levelling_upper_limit={} peak_offset={} input={settings}",
+                     levelling_upper_limit={} peak_offset={} book_peak_tolerance={} median_filter={} input={settings}",
                     options.upper_limit,
                     options.peak_percentage,
                     options.peak_prominence,
                     options.skip_white,
                     self.book.is_some(),
-                    self.book_settings.0,
-                    self.book_settings.1,
-                    self.book_settings.2,
+                    self.book_settings.lower,
+                    self.book_settings.upper,
+                    self.book_settings.offset,
+                    self.book_settings.tolerance,
+                    self.book_settings.median,
                 );
                 report_settings_once(self.debug, &self.reported, &mut core, line);
 
@@ -212,7 +220,10 @@ impl Filter for PeakStats {
                     result.peaks
                 } else {
                     let histogram = match &self.engine {
-                        Some(engine) => engine.count(&core, &input)?,
+                        Some(engine) => {
+                            engine.count_filtered(&core, &input, self.book_settings.median)?
+                        }
+                        None if self.book_settings.median => super::median::histogram(&input)?,
                         None => analyzer_histogram(&input)?,
                     };
                     trace.mark("histogram", mark);

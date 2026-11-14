@@ -385,6 +385,7 @@ struct FrameInfo {
     file: String,
     bytes: usize,
     hist: Vec<u64>,
+    median_hist: Vec<u64>,
 }
 
 #[derive(Deserialize)]
@@ -396,6 +397,7 @@ struct FramePeakCase {
     peak_prominence: Option<f64>,
     skip_white: bool,
     expect: PeakExpect,
+    median_filter: bool,
 }
 
 #[derive(Deserialize)]
@@ -442,6 +444,18 @@ fn frame_histograms_ignore_stride_padding() {
     assert!(fixtures.frames.len() >= 10, "the fixture set was truncated");
     for info in fixtures.frames.values() {
         let _ = load_frame(info);
+        let bytes = std::fs::read(fixtures_dir().join(&info.file)).expect("frame fixture");
+        let (padded, stride) = pad_rows(&bytes, info.width, info.height);
+        let median = vs_nimages::median::histogram(info.width, info.height, 255, |x, y| {
+            u16::from(padded[y * stride + x])
+        })
+        .expect("median fixture");
+        assert_eq!(
+            median.counts(),
+            info.median_hist,
+            "{}: complete Pillow median histogram",
+            info.file
+        );
     }
 }
 
@@ -455,7 +469,15 @@ fn frame_peak_fixtures_match_the_reference() {
             .frames
             .get(&case.frame)
             .unwrap_or_else(|| panic!("{}: no frame named {}", case.name, case.frame));
-        let histogram = load_frame(info);
+        let mut histogram = load_frame(info);
+        if case.median_filter {
+            let bytes = std::fs::read(fixtures_dir().join(&info.file)).expect("frame fixture");
+            let (padded, stride) = pad_rows(&bytes, info.width, info.height);
+            histogram = vs_nimages::median::histogram(info.width, info.height, 255, |x, y| {
+                u16::from(padded[y * stride + x])
+            })
+            .expect("median frame fixture");
+        }
         let result = peaks::find_local_peak(
             &histogram,
             &PeakOptions {

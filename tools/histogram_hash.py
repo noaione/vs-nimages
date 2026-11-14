@@ -178,12 +178,13 @@ def cases() -> list[Case]:
     table: list[Case] = []
 
     stats = {
-        "defaults": {"upper_limit": 60, "peak_percentage": 0.25},
-        "skip-white": {"upper_limit": 60, "skip_white": 1},
-        "prominence": {"upper_limit": 60, "peak_prominence": 1.0},
+        "defaults": {"upper_limit": 64, "peak_percentage": 0.25},
+        "skip-white": {"upper_limit": 64, "skip_white": 1},
+        "prominence": {"upper_limit": 64, "peak_prominence": 1.0},
         "upper-1": {"upper_limit": 1},
         "upper-255": {"upper_limit": 255},
-        "dense": {"upper_limit": 60, "peak_percentage": 1.0},
+        "median-off": {"upper_limit": 64, "median_filter": 0},
+        "dense": {"upper_limit": 64, "peak_percentage": 1.0},
     }
     for name, arguments in stats.items():
         table.append(Case(f"stats/gray8/{name}", lambda: gray(97, 65), dict(arguments)))

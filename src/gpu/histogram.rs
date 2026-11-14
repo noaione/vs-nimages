@@ -6,7 +6,8 @@
 //! shade ordering, the property arrays and `copy_frame` stay where they were,
 //! which is why the two engines cannot disagree about what a histogram means.
 //!
-//! One kernel serves both analyzers. 8 bit counts into a workgroup's own 1 KB
+//! PeakStats can count a 3x3 median of luma; the other consumers keep raw
+//! counting. One kernel serves both analyzers. 8 bit counts into a workgroup's own 1 KB
 //! table and drains it once per workgroup, because a page of flat tones points
 //! most pixels at one bin and a per-sample `atomicAdd` serializes on it. 9 to
 //! 16 bit cannot hold 256 KB of bins in shared memory, so those depths count
@@ -61,9 +62,11 @@ struct HistogramPush {
     /// `1` counts the reference's luma of the three source planes, `0` counts
     /// plane 0 alone.
     luma: u32,
+    height: u32,
+    median: u32,
 }
 
-const _: () = assert!(size_of::<HistogramPush>() / size_of::<u32>() == 8);
+const _: () = assert!(size_of::<HistogramPush>() / size_of::<u32>() == 10);
 
 const HISTOGRAM_BODY: &str = r#"
 #define LOCAL_BINS 256u
@@ -78,6 +81,8 @@ layout(push_constant) uniform Params {
     uint bins;
     uint bytes;
     uint luma;
+    uint height;
+    uint median;
 } p;
 
 layout(std430, set = 0, binding = 0) readonly buffer Src0 { uint words[]; } src0;
@@ -128,7 +133,7 @@ uint sample2(uint x, uint y) {
     return byte2(offset);
 }
 
-uint bin_of(uint x, uint y) {
+uint shade(uint x, uint y) {
     uint value = sample0(x, y);
     if (p.luma == 1u) {
         // The reference's `convert("L")`: BT.601 luma at 16 bit fixed point
@@ -136,6 +141,32 @@ uint bin_of(uint x, uint y) {
         value = (value * 19595u + sample1(x, y) * 38470u + sample2(x, y) * 7471u + 32768u) >> 16u;
     }
     return min(value, p.bins - 1u);
+}
+
+void sort2(inout uint a, inout uint b) {
+    uint low = min(a, b);
+    b = max(a, b);
+    a = low;
+}
+
+uint bin_of(uint x, uint y) {
+    if (p.median == 0u) {
+        return shade(x, y);
+    }
+    uint left = x == 0u ? 0u : x - 1u;
+    uint right = min(x + 1u, p.width - 1u);
+    uint top = y == 0u ? 0u : y - 1u;
+    uint bottom = min(y + 1u, p.height - 1u);
+    uint a = shade(left, top), b = shade(x, top), c = shade(right, top);
+    uint d = shade(left, y), e = shade(x, y), f = shade(right, y);
+    uint g = shade(left, bottom), h = shade(x, bottom), i = shade(right, bottom);
+    sort2(b, c); sort2(e, f); sort2(h, i);
+    sort2(a, b); sort2(d, e); sort2(g, h);
+    sort2(b, c); sort2(e, f); sort2(h, i);
+    sort2(a, d); sort2(f, i); sort2(e, h);
+    sort2(d, g); sort2(b, e); sort2(c, f);
+    sort2(e, h); sort2(e, c); sort2(g, e); sort2(e, c);
+    return e;
 }
 
 void main() {
@@ -213,6 +244,16 @@ impl Engine {
     /// submission value, so another thread's recording does not serialize this
     /// one.
     pub(crate) fn count(&self, core: &CoreRef, frame: &VideoFrame) -> Result<Histogram> {
+        self.count_filtered(core, frame, false)
+    }
+
+    /// Counts a median of luma for PeakStats, or the original samples for other consumers.
+    pub(crate) fn count_filtered(
+        &self,
+        core: &CoreRef,
+        frame: &VideoFrame,
+        median: bool,
+    ) -> Result<Histogram> {
         let format = frame.get_video_format();
         let bits = format.bits_per_sample;
         let family = format.color_family;
@@ -316,6 +357,8 @@ impl Engine {
             bins,
             bytes,
             luma: u32::from(luma),
+            height,
+            median: u32::from(median),
         };
 
         let value = self

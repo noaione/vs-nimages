@@ -1,7 +1,7 @@
 //! Replays the sibling's book policy and Pillow median fixtures without a core.
 
 use serde::Deserialize;
-use vs_nimages::book_peak::{BookOptions, BookPage, consensus, has_dark_median};
+use vs_nimages::book_peak::{BookOptions, BookPage, consensus};
 use vs_nimages::histogram::Histogram;
 use vs_nimages::peaks::{PeakOptions, find_local_peak};
 
@@ -16,6 +16,7 @@ struct Case {
     lower: i64,
     upper: i64,
     offset: i64,
+    tolerance: i64,
     parameters: Parameters,
     consensus: Option<u16>,
     pages: Vec<Page>,
@@ -27,6 +28,7 @@ struct Parameters {
     peak_percentage: Option<f64>,
     peak_prominence: Option<f64>,
     skip_white: bool,
+    median_filter: bool,
 }
 
 #[derive(Deserialize)]
@@ -55,12 +57,13 @@ fn book_resolution_matches_nmanga_and_pillow() {
     )
     .expect("book fixtures");
     let fixtures: Fixtures = serde_json::from_str(&data).expect("book fixture schema");
-    assert_eq!(fixtures.cases.len(), 54);
+    assert!(fixtures.cases.len() >= 69);
     for case in fixtures.cases {
         let options = BookOptions {
             lower: case.lower,
             upper: case.upper,
             offset: case.offset,
+            tolerance: case.tolerance,
         };
         let peak_options = PeakOptions {
             upper_limit: case.parameters.upper_limit,
@@ -72,19 +75,22 @@ fn book_resolution_matches_nmanga_and_pillow() {
             .pages
             .iter()
             .map(|page| {
-                let histogram =
-                    Histogram::from_plane(&page.pixels, page.width, page.width, page.height)
-                        .expect("fixture dimensions");
-                let has_dark =
-                    has_dark_median(page.width, page.height, case.upper as u16, |x, y| {
+                let histogram = if case.parameters.median_filter {
+                    vs_nimages::median::histogram(page.width, page.height, 255, |x, y| {
                         u16::from(page.pixels[y * page.width + x])
-                    });
-                assert_eq!(
-                    has_dark,
-                    page.darkest_gray <= case.upper as u16,
-                    "{}: Pillow median",
-                    case.name
-                );
+                    })
+                    .expect("median fixture")
+                } else {
+                    Histogram::from_plane(&page.pixels, page.width, page.width, page.height)
+                        .expect("fixture dimensions")
+                };
+                let darkest = histogram
+                    .counts()
+                    .iter()
+                    .position(|&count| count != 0)
+                    .unwrap_or(255) as u16;
+                assert_eq!(darkest, page.darkest_gray, "{}: Pillow median", case.name);
+                let has_dark = darkest <= case.upper as u16;
                 BookPage {
                     peaks: find_local_peak(&histogram, &peak_options),
                     has_dark,
@@ -136,11 +142,9 @@ fn empty_and_extreme_inputs_are_total() {
         lower: 8,
         upper: 55,
         offset: i64::MAX,
+        tolerance: 6,
     };
     assert_eq!(consensus(&[], options), None);
-    assert!(!has_dark_median(0, 0, 55, |_, _| panic!(
-        "empty image must not read"
-    )));
     let histogram = Histogram::from_plane(&[12], 1, 1, 1).expect("one pixel");
     let peaks = find_local_peak(&histogram, &PeakOptions::default());
     let page = BookPage {

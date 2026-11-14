@@ -4,14 +4,21 @@
 
 **Added**:
 - `PeakStats(book_peak_fallback=True)` scans the whole clip for a strict
-  majority black peak and applies the reference's page eligibility and 3×3
-  median dark-content guard. `NImagesBookPeakUsed` and `NImagesLevelEligible`
+  majority black peak and applies the reference's page eligibility and
+  histogram dark-content guard. `book_peak_tolerance=6` also replaces qualified
+  local peaks more than that amount above the book peak. `NImagesBookPeakUsed` and `NImagesLevelEligible`
   expose each page's decision.
 
 **Changed**:
 - `PeakStats`'s `NImagesBlackPeakFound` and `NImagesWhitePeakFound` report
   whether the height and prominence thresholds passed, matching the updated
-  `nmanga` analysis. An unthresholded fallback still supplies the same levels.
+  `nmanga` analysis. An unthresholded fallback still reports its selected local
+  level with a false found flag.
+- `PeakStats` analyzes a 3×3 median of luma by default and searches through
+  gray(64), matching `nmanga`. `median_filter=False` restores raw analysis;
+  `gpu=1` applies the same median on the device. Pixels remain unchanged.
+- `Levels(auto_gamma=True)` calculates gamma from the raw black peak before
+  `peak_offset`, matching Pillow's curve at nonzero offsets.
 
 ### [0.3.0] (2026-11-09)
 

@@ -2,8 +2,8 @@
 //!
 //! The crate is split in two halves:
 //!
-//! * safe, VapourSynth-free algorithm modules ([`deblur`], [`gray_shades`],
-//!   [`histogram`], [`levels`], [`peaks`], [`posterize`]) that hold all of the
+//! * safe, VapourSynth-free algorithm modules ([`book_peak`], [`deblur`], [`gray_shades`],
+//!   [`histogram`], [`levels`], [`median`], [`peaks`], [`posterize`]) that hold all of the
 //!   behaviour, so they can be tested without a core
 //! * the filter layer in [`filters`] and the device layer in `gpu`, the two
 //!   places that touch the plugin API
@@ -25,6 +25,7 @@ pub mod deblur;
 pub mod gray_shades;
 pub mod histogram;
 pub mod levels;
+pub mod median;
 pub mod peaks;
 pub mod posterize;
 pub mod round;

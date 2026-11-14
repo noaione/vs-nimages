@@ -69,10 +69,10 @@ def digest(planes) -> str:
 def run_reference(paths: list[Path], args) -> dict:
     reference = BookReference(args.nmanga_path)
     # Exclude lazy scipy/numpy imports from the measurement.
-    reference.analyze_page(paths[0], 60, 0.25, None, args.no_white)
+    reference.analyze_page(paths[0], 64, 0.25, None, args.no_white)
 
     def analyze(path: Path):
-        return reference.analyze_page(path, 60, 0.25, None, args.no_white)
+        return reference.analyze_page(path, 64, 0.25, None, args.no_white)
 
     start = time.perf_counter()
     pages = dict(parallel(analyze, paths, args.worker_threads))
@@ -83,13 +83,13 @@ def run_reference(paths: list[Path], args) -> dict:
         page = pages[path]
         levels = resolved[path]
         eligible = levels.black_level is not None
-        black = page.analysis.black_level if not eligible else levels.black_level
+        black = page.black_level if not eligible else levels.black_level
         record = {
             "name": path.name,
             "black": black,
             "white": levels.white_level,
-            "black_found": int(page.analysis.black_peak_found),
-            "white_found": int(page.analysis.white_peak_found),
+            "black_found": int(page.black_peak_found),
+            "white_found": int(page.white_peak_found),
             "eligible": int(eligible),
             "used_book_peak": int(levels.used_book_peak),
         }
@@ -142,7 +142,7 @@ def run_native(paths: list[Path], args) -> dict:
     start = time.perf_counter()
     source = core.imgseqs.Read(files=[str(path) for path in paths], mismatch=True, prefetch=0)
     stats = core.nimages.PeakStats(
-        source, upper_limit=60, peak_percentage=0.25, skip_white=int(args.no_white),
+        source, upper_limit=64, peak_percentage=0.25, skip_white=int(args.no_white),
         book_peak_fallback=1, levelling_lower_limit=8, levelling_upper_limit=55,
         peak_offset=args.peak_offset, gpu=gpu,
     )

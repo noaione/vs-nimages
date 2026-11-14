@@ -362,12 +362,17 @@ fn resolve(
     auto_gamma: bool,
     max_sample: u16,
 ) -> Result<Resolved> {
+    let gamma_black = black;
     let black = black.checked_add(peak_offset).ok_or_else(|| {
         NImagesError::new("Levels: black point plus peak_offset exceeds the integer range")
     })?;
     check_endpoints(black, white, max_sample)?;
     let gamma = if auto_gamma {
-        automatic_gamma_for_range(black as u16, max_sample).ok_or_else(gamma_domain_error)?
+        let gamma_black = u16::try_from(gamma_black)
+            .ok()
+            .filter(|&value| value <= max_sample)
+            .ok_or_else(gamma_domain_error)?;
+        automatic_gamma_for_range(gamma_black, max_sample).ok_or_else(gamma_domain_error)?
     } else {
         gamma
     };

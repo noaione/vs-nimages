@@ -15,12 +15,12 @@
 //! pages differ in size works and so does a clip whose dimensions are not known
 //! until a frame is asked for. Every row walk uses the frame's own stride and
 //! stops after the samples the plane holds, so stride padding is never read or
-//! written, and an RGB frame's interleaved channels are stepped over rather than
-//! mixed.
+//! written, and RGB channels are read from their separate plane buffers.
 
 mod book_peak;
 mod deblur;
 mod levels;
+mod median;
 mod peak_gray_shades;
 mod peak_stats;
 mod posterize;

@@ -283,55 +283,61 @@ A clean-room reimplementation of `find_local_peak` reproduced `nmanga`'s output
 This is the algorithm the Rust port must implement, and it is the basis for the
 golden-vector generator.
 
-### 3.9 Book consensus and page eligibility (2026-11-14)
+### 3.9 Median analysis and book policy (2026-11-14)
 
-Reference commits `2815fe8` and `4ec5e45` replace the image-to-array histogram
-with Pillow's histogram and add book fallback. The local levels agree with the
-existing Rust detector; the changed threshold flags are covered in §3.7.
+Reference `6bd2775` moves page analysis and policy into `nmanga.autolevel`.
+`PeakStats` now matches its default `upper_limit=64` and `median_filter=True`.
+The 3×3 median replicates image edges and follows RGB-to-luma conversion;
+YUV uses plane 0. It changes only the analysis histogram, not output pixels.
+`median_filter=False` retains raw luma analysis. `PeakGrayShades` and Lloyd-Max
+`Posterize` continue counting unfiltered samples.
 
-`PeakStats(book_peak_fallback=True)` scans the entire source synchronously at
-creation. It votes only with qualified local black peaks strictly inside the
-levelling bounds after `peak_offset`, and requires a strict majority among
-those votes. A tie or an empty vote set has no consensus. Qualified peaks at or
-below the lower bound exclude the page. A page without a usable local peak can
-use the consensus only if its 3×3 median-filtered luma reaches the upper bound
-or below. That guard excludes isolated dark noise on otherwise bright pages.
+Both peaks and the darkest-shade guard read one histogram. The host keeps three
+padded luma rows and uses a 19-comparison median selection network. Its complete
+histograms match Pillow fixtures; all binary windows and 10,000 native-range
+windows verify the selection network. Vulkan uses the same network before
+incrementing a bin, with per-frame dimensions and replicated boundaries.
 
-The prepass keeps one immutable result per frame. It uses host luma for every
-family and for a device input, downloading the latter for analysis. Device
-output remains resident. One bit depth is required because votes use native
-sample units; dimensions and family may vary. Limits scale from 8-bit units,
-while the offset stays in native units. `NImagesBookPeakUsed` identifies a
-replacement, and `NImagesLevelEligible` tells the caller when to apply levels.
-Excluded pages retain their local properties; `Levels` does not apply this
-policy by itself.
+The opt-in `book_peak_fallback=True` prepass still scans the source synchronously
+at creation and stores immutable decisions. Votes are qualified local black
+peaks inside the offset bounds; a strict majority among those votes supplies
+the book peak. The relative tolerance does not change the vote set.
+`book_peak_tolerance=6` then rejects a local peak above `book + tolerance`, even
+when it is qualified and inside the absolute bounds. Tolerance uses
+8-bit-equivalent units and is validated in `0..=127`; offsets cancel from this
+relative comparison. A rejected/unqualified peak can inherit the majority only
+when the same analysis histogram contains a shade at or below the upper bound.
+Qualified already-black pages stay excluded according to `LevellingPolicy`.
 
-`tools/nmanga_reference.py` loads the unchanged file analyzer and book policy
-from the sibling CLI source without importing unrelated CLI dependencies.
-`tools/golden.py` writes generated pages to temporary PNG files and calls those
-functions, including `convert("L")`, `MedianFilter(size=3)`, the first occupied
-`median.histogram()` bin, and the reference's cleanup. The histogram-only oracle
-uses the same padded SciPy search as nmanga. Aligning the generator this way
-leaves all peak and book fixture values unchanged.
+The prepass runs on the host, downloading device input if necessary, while
+output preserves the requested residency. It requires a finite clip with one
+bit depth and allows changing dimensions and family. Bounds and tolerance
+scale to native depth, while reported peaks and offsets use native code units.
+`NImagesBookPeakUsed` reports inheritance and `NImagesLevelEligible` controls
+whether a caller applies `Levels`; the latter filter does not apply policy.
 
-`tests/fixtures/book.json` freezes 54 books covering strict majority, ties,
-empty votes, offsets, both bounds, median edge replication, noise and changing
-dimensions. Rust replays the same data without a core. The plugin validator also
-checks 8–16-bit native levels, color luma, source errors at creation, mixed-depth
-rejection, property and pixel preservation, repeated and asynchronous requests,
-and host/device input parity.
+`tools/nmanga_reference.py` now imports the public `analyze_book_peak_page`,
+`LevellingPolicy` and `resolve_book_peaks` directly. No AST extraction or copied
+book policy remains. `tools/golden.py` calls that file analyzer on temporary PNG
+pages and freezes 69 books covering tolerance 0/6/20, both sides of the relative
+boundary, ringing, median on/off, offsets, absolute bounds and variable sizes.
+Frame fixtures freeze both raw and complete Pillow median histograms and their
+peak results. Histogram-only fixtures explicitly disable the median because
+bin counts alone carry no spatial information.
 
-[The book benchmark](BOOK_PEAK_BENCH.md) measures 24-page synthetic lossless books
-through the original Python file analyzer/resolver and native CPU/Vulkan,
-including the book scan and eligible level application. Every repeated run at
-offset 0 agrees on all decisions and output hashes. The private real-page sets
-are absent; the historical results in `BENCH.md` are unchanged.
+The plugin validator compares both engines with an independent NumPy luma and
+median oracle at every integer depth from 8 through 16, in Gray/RGB/YUV,
+including one-pixel axes, odd dimensions and raw mode. It also checks all book
+fixtures, asynchronous requests, source errors and original pixel preservation.
 
-The benchmark also confirms a pre-existing nonzero-offset difference: Pillow
-computes gamma from the raw black peak, while native `Levels(auto_gamma=True)`
-uses the shifted black point. At offset 1, all eight diagnostic page decisions
-agree but only four output hashes agree. This is a gamma-policy choice to resolve
-before claiming nonzero-offset pixel parity in the nmanga migration.
+`Levels(auto_gamma=True)` now derives gamma from the unshifted black peak, then
+applies `peak_offset` to the curve endpoint. This removes the previous
+nonzero-offset difference from Pillow. Invalid raw gamma inputs still fail even
+when an offset would put the adjusted endpoint into the gamma domain.
+[The book benchmark](BOOK_PEAK_BENCH.md) records the current reference/native
+comparison with median analysis and tolerance enabled, plus nonzero-offset
+pixel parity. The real-page sets are absent; the older `BENCH.md` table remains
+a historical raw-analysis measurement.
 
 ---
 
@@ -379,7 +385,7 @@ Measured behaviour of the reference:
 | **128 … 254** | **`ValueError: math domain error`** |
 | **255** | **`ZeroDivisionError`** |
 
-The default `upper_limit = 60` keeps callers safe, but `upper_limit` may be up to
+The default `upper_limit = 64` keeps callers safe, but `upper_limit` may be up to
 255, and `peak_offset` moves the black point too. The plugin must reject
 `adjusted_black >= 128` (or clamp) with a clear message rather than producing NaN.
 
@@ -592,8 +598,9 @@ Each milestone ends with something executable and verifiable.
 - Fixture payload: raw `GRAY8` planes in `tests/fixtures/frames/*.bin`, plus
   `manifest.json`, `peaks.json`, `shades.json`, `levels.json`, `posterize.json` and
   `frames.json`. Histograms are deduplicated into a table per file.
-- Current contents: 288 peak cases over 36 histograms, 65 gray-shade cases, 13
-  level tables, 8 posterize tables, and 13 frames with 104 peak and 26 shade cases.
+- Current contents: 324 peak cases over 36 histograms, 69 books, 65 gray-shade
+  cases, 13 level tables, 8 posterize tables, and 13 frames with 234 peak cases
+  (median on/off) and 26 shade cases.
 - Locked here: rounding mode, empty-array representation, `*PeakFound`
   derivation, `upper_limit` and gamma validation, and the §5 shade-binning fix.
 

@@ -63,7 +63,8 @@ per-pixel channel offset; it leaves `YUV` chroma unchanged.
 ```py
 stats = core.nimages.PeakStats(
     clip,
-    upper_limit=60,
+    upper_limit=64,
+    median_filter=True,
     peak_percentage=0.25,
     peak_prominence=0.1,
     skip_white=False,
@@ -72,11 +73,13 @@ stats = core.nimages.PeakStats(
 
 | argument | default | meaning |
 | --- | --- | --- |
-| `upper_limit` | `60` | search limit in 8-bit-equivalent values, from 1 to 255 |
+| `upper_limit` | `64` | search limit in 8-bit-equivalent values, from 1 to 255 |
+| `median_filter` | `true` | analyze a 3×3 median of luma with replicated borders; pixels pass through unchanged |
 | `peak_percentage` | `0.25` | minimum peak height as a percent of the frame |
 | `peak_prominence` | `unset` | minimum peak prominence as a percent of the frame |
 | `skip_white` | `false` | skip white detection and use the sample maximum |
 | `book_peak_fallback` | `false` | scan the whole clip at creation for a majority black peak |
+| `book_peak_tolerance` | `6` | replace a local peak more than this above the book peak; 8-bit-equivalent units, from 0 to 127 |
 | `levelling_lower_limit` | `8` | exclusive lower bound for usable local peaks, in 8-bit-equivalent units; book mode only |
 | `levelling_upper_limit` | `55` | exclusive upper bound for usable local peaks and inclusive median dark-content limit, in 8-bit-equivalent units; book mode only |
 | `peak_offset` | `0` | native code-value offset for book eligibility; pass the same value to `Levels` |
@@ -88,9 +91,15 @@ as `NImagesBlackLevel`, `NImagesWhiteLevel`, `NImagesBlackPeakFound`, and
 including when an unthresholded fallback supplies a level. peak levels use the
 input's native sample range.
 
-book mode takes a strict majority among usable local black peaks. it keeps a
-usable local peak and excludes an already-black page. other pages use the book
-peak only when their 3×3 median-filtered luma contains dark content. ties have
+the median runs after RGB-to-luma conversion and reads plane 0 for YUV.
+`median_filter=False` analyzes the original luma. `PeakGrayShades` and
+`Posterize` always count their original samples.
+
+book mode takes a strict majority among qualified black peaks inside the
+levelling bounds. a local peak more than `book_peak_tolerance` above that
+majority uses the book peak too, even when it passes the thresholds and bounds.
+already-black pages are excluded. fallback also requires a dark sample in the
+same histogram that supplied the peaks. ties have
 no consensus. the scan reads every frame before the filter call returns, on the
 host even with `gpu=1`, and requires a finite clip with one bit depth. page
 dimensions and color family may vary.
@@ -134,7 +143,7 @@ leveled = core.nimages.Levels(clip, black=12, white=245, gamma=1.18)
 | `gamma` | `1.0` | curve gamma |
 | `use_props` | `false` | read black and white from `PeakStats` frame properties |
 | `peak_offset` | `0` | add this value to the detected black point |
-| `auto_gamma` | `false` | derive gamma from the detected black point |
+| `auto_gamma` | `false` | derive gamma from the raw black point, before `peak_offset` |
 
 integer endpoints use native code values. `GRAYS` and `RGBS` endpoints use 8-bit
 code values, converted to the 0–1 float range. float clips use fixed endpoints

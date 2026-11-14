@@ -144,6 +144,7 @@ def cases() -> list[Case]:
         "identity": {"black": 0, "white": 255, "gamma": 1.0},
         "peak-offset": {"black": 16, "white": 238, "gamma": 1.2, "peak_offset": 6},
         "auto-gamma": {"black": 10, "white": 240, "auto_gamma": 1},
+        "auto-gamma-offset": {"black": 10, "white": 240, "auto_gamma": 1, "peak_offset": 6},
     }
     table: list[Case] = []
     for name, arguments in levels.items():

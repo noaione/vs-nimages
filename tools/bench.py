@@ -37,7 +37,7 @@ FIXTURES = REPO_ROOT / "tests" / "fixtures"
 
 # The default `upper_limit`, `peak_percentage` and `skip_white` the nmanga
 # orchestrator action uses, so both pipelines run the same operation.
-UPPER_LIMIT = 60
+UPPER_LIMIT = 64
 PEAK_PERCENTAGE = 0.25
 SHADE_THRESHOLD = 0.01
 POSTERIZE_BITS = 4

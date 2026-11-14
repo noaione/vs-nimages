@@ -1,4 +1,4 @@
-//! Book consensus and page eligibility from `nmanga.cli.autolevel`.
+//! Book consensus and page eligibility from `nmanga.autolevel.LevellingPolicy`.
 
 use crate::peaks::PeakResult;
 
@@ -8,6 +8,8 @@ pub struct BookOptions {
     pub lower: i64,
     pub upper: i64,
     pub offset: i64,
+    /// Maximum excess above the book peak, in native sample units.
+    pub tolerance: i64,
 }
 
 /// One page's local analysis and median-filtered dark-content guard.
@@ -32,15 +34,23 @@ impl BookOptions {
         peaks.black_found && self.lower < level && level < self.upper
     }
 
-    /// Keeps usable local peaks and uses the consensus on eligible fallback pages.
+    /// The absolute limit or a dark tone above the book's usual ink.
+    fn too_high(&self, peak: u16, book: Option<u16>) -> bool {
+        i64::from(peak).saturating_add(self.offset) >= self.upper
+            || book.is_some_and(|book| {
+                i64::from(peak) > i64::from(book).saturating_add(self.tolerance)
+            })
+    }
+
+    /// Applies the reference's local/relative limits before the darkest-bin guard.
     pub fn resolve(&self, page: BookPage, consensus: Option<u16>) -> BookResult {
+        let too_high = self.too_high(page.peaks.black, consensus);
         let mut result = BookResult {
             peaks: page.peaks,
-            eligible: self.usable(page.peaks),
+            eligible: self.usable(page.peaks) && !too_high,
             used_book_peak: false,
         };
-        let level = i64::from(page.peaks.black).saturating_add(self.offset);
-        if result.eligible || (page.peaks.black_found && level <= self.lower) {
+        if result.eligible || (page.peaks.black_found && !too_high) {
             return result;
         }
         if let Some(black) = consensus.filter(|_| page.has_dark) {
@@ -73,34 +83,4 @@ pub fn consensus(pages: &[BookPage], options: BookOptions) -> Option<u16> {
         .filter(|page| options.usable(page.peaks) && page.peaks.black == candidate)
         .count();
     (count > total / 2).then_some(candidate)
-}
-
-/// Whether a replicated-edge 3x3 median contains a sample at or below `limit`.
-/// Only the threshold matters: five low samples make the median low, so no
-/// sorted window or full median image is needed.
-pub fn has_dark_median(
-    width: usize,
-    height: usize,
-    limit: u16,
-    sample: impl Fn(usize, usize) -> u16,
-) -> bool {
-    if width == 0 || height == 0 {
-        return false;
-    }
-    for y in 0..height {
-        let rows = [y.saturating_sub(1), y, y.saturating_add(1).min(height - 1)];
-        for x in 0..width {
-            let columns = [x.saturating_sub(1), x, x.saturating_add(1).min(width - 1)];
-            let mut low = 0;
-            for row in rows {
-                for column in columns {
-                    low += u8::from(sample(column, row) <= limit);
-                }
-            }
-            if low >= 5 {
-                return true;
-            }
-        }
-    }
-    false
 }
