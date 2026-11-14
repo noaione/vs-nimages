@@ -6,6 +6,11 @@ same pages.
 `sandbox/` holds the pages and is a private working tree, so it is not committed.
 `tools/bench.py` runs both pipelines and refreshes the results block below.
 
+[the book peak benchmark](BOOK_PEAK_BENCH.md) measures the whole-book fallback
+path, including the creation-time scan, eligibility decisions and exact output
+pixels. its reproducible synthetic books are separate from the private page
+sets and the historical results below.
+
 ## what is compared
 
 two pipelines over one image list:

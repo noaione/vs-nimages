@@ -2,7 +2,16 @@
 
 ### unreleased
 
-nothing yet.
+**Added**:
+- `PeakStats(book_peak_fallback=True)` scans the whole clip for a strict
+  majority black peak and applies the reference's page eligibility and 3×3
+  median dark-content guard. `NImagesBookPeakUsed` and `NImagesLevelEligible`
+  expose each page's decision.
+
+**Changed**:
+- `PeakStats`'s `NImagesBlackPeakFound` and `NImagesWhitePeakFound` report
+  whether the height and prominence thresholds passed, matching the updated
+  `nmanga` analysis. An unthresholded fallback still supplies the same levels.
 
 ### [0.3.0] (2026-11-09)
 

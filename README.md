@@ -76,11 +76,37 @@ stats = core.nimages.PeakStats(
 | `peak_percentage` | `0.25` | minimum peak height as a percent of the frame |
 | `peak_prominence` | `unset` | minimum peak prominence as a percent of the frame |
 | `skip_white` | `false` | skip white detection and use the sample maximum |
+| `book_peak_fallback` | `false` | scan the whole clip at creation for a majority black peak |
+| `levelling_lower_limit` | `8` | exclusive lower bound for usable local peaks, in 8-bit-equivalent units; book mode only |
+| `levelling_upper_limit` | `55` | exclusive upper bound for usable local peaks and inclusive median dark-content limit, in 8-bit-equivalent units; book mode only |
+| `peak_offset` | `0` | native code-value offset for book eligibility; pass the same value to `Levels` |
 
-`0.25` means `0.25` percent. `peak_percentage` alone does not change the selected
-peak; use `peak_prominence` to exclude peaks. results are attached to each frame
+`0.25` means `0.25` percent. if no peak passes the thresholds, the tallest local
+peak still supplies the level. results are attached to each frame
 as `NImagesBlackLevel`, `NImagesWhiteLevel`, `NImagesBlackPeakFound`, and
-`NImagesWhitePeakFound`. peak levels use the input's native sample range.
+`NImagesWhitePeakFound`. the found flags report whether the thresholds passed,
+including when an unthresholded fallback supplies a level. peak levels use the
+input's native sample range.
+
+book mode takes a strict majority among usable local black peaks. it keeps a
+usable local peak and excludes an already-black page. other pages use the book
+peak only when their 3×3 median-filtered luma contains dark content. ties have
+no consensus. the scan reads every frame before the filter call returns, on the
+host even with `gpu=1`, and requires a finite clip with one bit depth. page
+dimensions and color family may vary.
+
+book mode also writes `NImagesBookPeakUsed` and `NImagesLevelEligible`. bypass
+levels on excluded pages, which retain their local levels:
+
+```py
+stats = core.nimages.PeakStats(clip, book_peak_fallback=True)
+leveled = core.nimages.Levels(stats, use_props=True, auto_gamma=True)
+
+def select_levels(n, f):
+    return leveled if f.props["NImagesLevelEligible"] else stats
+
+output = core.std.FrameEval(stats, select_levels, prop_src=stats)
+```
 
 ### `PeakGrayShades`
 

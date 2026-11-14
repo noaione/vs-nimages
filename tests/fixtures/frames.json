@@ -3779,8 +3779,8 @@
       "expect": {
         "black": 23,
         "white": 241,
-        "black_found": true,
-        "white_found": true
+        "black_found": false,
+        "white_found": false
       }
     },
     {
@@ -3849,7 +3849,7 @@
       "expect": {
         "black": 0,
         "white": 254,
-        "black_found": true,
+        "black_found": false,
         "white_found": true
       }
     },
@@ -3891,8 +3891,8 @@
       "expect": {
         "black": 30,
         "white": 200,
-        "black_found": true,
-        "white_found": true
+        "black_found": false,
+        "white_found": false
       }
     },
     {
@@ -4003,8 +4003,8 @@
       "expect": {
         "black": 30,
         "white": 225,
-        "black_found": true,
-        "white_found": true
+        "black_found": false,
+        "white_found": false
       }
     },
     {
@@ -4451,8 +4451,8 @@
       "expect": {
         "black": 13,
         "white": 249,
-        "black_found": true,
-        "white_found": true
+        "black_found": false,
+        "white_found": false
       }
     },
     {
@@ -4563,7 +4563,7 @@
       "expect": {
         "black": 52,
         "white": 255,
-        "black_found": true,
+        "black_found": false,
         "white_found": false
       }
     },
@@ -4676,7 +4676,7 @@
         "black": 0,
         "white": 222,
         "black_found": false,
-        "white_found": true
+        "white_found": false
       }
     },
     {
@@ -4787,8 +4787,8 @@
       "expect": {
         "black": 32,
         "white": 196,
-        "black_found": true,
-        "white_found": true
+        "black_found": false,
+        "white_found": false
       }
     },
     {
@@ -4899,8 +4899,8 @@
       "expect": {
         "black": 3,
         "white": 224,
-        "black_found": true,
-        "white_found": true
+        "black_found": false,
+        "white_found": false
       }
     }
   ],

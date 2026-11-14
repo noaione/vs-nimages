@@ -52,9 +52,9 @@ pub struct PeakResult {
     pub black: u16,
     /// Selected white level in source sample units.
     pub white: u16,
-    /// Whether a black peak was found, rather than falling back to 0.
+    /// Whether a black peak passed the height and prominence thresholds.
     pub black_found: bool,
-    /// Whether a white peak was found, rather than falling back to the sample maximum.
+    /// Whether a white peak passed the height and prominence thresholds.
     pub white_found: bool,
 }
 
@@ -250,25 +250,30 @@ fn select<C: CountSequence>(
 }
 
 /// Analyses one padded region of interest, returning a bin index in
-/// `first..=last`.
+/// `first..=last` and whether the thresholded pass found a peak.
 fn analyse_region(
     counts: &[u64],
     first: u16,
     last: u16,
     options: &PeakOptions,
     total_pixels: u64,
-) -> Option<usize> {
-    let region = counts.get(usize::from(first)..=usize::from(last))?;
+) -> (Option<usize>, bool) {
+    let Some(region) = counts.get(usize::from(first)..=usize::from(last)) else {
+        return (None, false);
+    };
     let padded = PaddedCounts::new(region);
 
     let minimum_height = minimum_count(total_pixels, options.peak_percentage);
     let minimum_prominence = minimum_count(total_pixels, options.peak_prominence);
     let use_prominence = options.peak_prominence.is_some();
 
-    let found = select(&padded, minimum_height, minimum_prominence, use_prominence)
-        .or_else(|| select(&padded, 0, 0, false));
+    let qualified = select(&padded, minimum_height, minimum_prominence, use_prominence);
+    let found = qualified.or_else(|| select(&padded, 0, 0, false));
 
-    found.map(|index| usize::from(first) + index)
+    (
+        found.map(|index| usize::from(first) + index),
+        qualified.is_some(),
+    )
 }
 
 /// Scales the public 8-bit-equivalent limit to a native sample maximum.
@@ -296,27 +301,28 @@ pub fn find_local_peak(histogram: &Histogram, options: &PeakOptions) -> PeakResu
     let max_value = histogram.max_value();
     let upper_limit = scale_upper_limit(options.upper_limit, max_value);
 
-    let black_index = analyse_region(counts, 0, upper_limit, options, total_pixels);
+    let (black_index, black_found) = analyse_region(counts, 0, upper_limit, options, total_pixels);
     let black = black_index.map_or(0, |index| index.min(usize::from(max_value)) as u16);
 
     if options.skip_white {
         return PeakResult {
             black,
             white: max_value,
-            black_found: black_index.is_some(),
+            black_found,
             white_found: false,
         };
     }
 
     let white_first = max_value - upper_limit;
-    let white_index = analyse_region(counts, white_first, max_value, options, total_pixels);
+    let (white_index, white_found) =
+        analyse_region(counts, white_first, max_value, options, total_pixels);
     let white = white_index.map_or(max_value, |index| index.min(usize::from(max_value)) as u16);
 
     PeakResult {
         black,
         white,
-        black_found: black_index.is_some(),
-        white_found: white_index.is_some(),
+        black_found,
+        white_found,
     }
 }
 
@@ -493,7 +499,7 @@ mod tests {
         let small = histogram(&[(10, 9), (20, 10), (200, 981)], 1000);
         let result = find_local_peak(&small, &options);
         assert_eq!(result.black, 20, "the fallback still picks the tallest");
-        assert!(result.black_found);
+        assert!(!result.black_found);
     }
 
     #[test]
@@ -516,58 +522,29 @@ mod tests {
     }
 
     #[test]
-    fn the_height_threshold_only_matters_together_with_prominence() {
-        // The tallest peak always clears a height threshold if any peak does,
-        // and the fallback ignores the thresholds, so `peak_percentage` alone
-        // cannot change the answer. Combined with a prominence threshold it can,
-        // by emptying the first pass and letting the fallback run.
-        let counts = &[(10u8, 4000u64), (20, 50), (200, 46)];
-        let total = 4096;
-
-        let height_only = PeakOptions {
-            upper_limit: 60,
-            peak_percentage: Some(50.0), // needs 2048 pixels
-            peak_prominence: None,
-            skip_white: true,
-        };
-        // Nothing clears 2048, so the fallback picks the tallest: 10.
-        assert_eq!(
-            find_local_peak(&histogram(counts, total), &height_only).black,
-            10
-        );
-
-        // With prominence the first pass is not empty, so the height threshold
-        // removes the otherwise-winning bin 20.
-        let combined_low = PeakOptions {
-            peak_percentage: Some(0.25), // needs 11 pixels -> 4000 and 50 qualify
-            peak_prominence: Some(0.1),  // needs 5
-            ..height_only
-        };
-        assert_eq!(
-            find_local_peak(&histogram(counts, total), &combined_low).black,
-            10
-        );
-
-        let combined_high = PeakOptions {
-            peak_percentage: Some(50.0), // needs 2048 -> only 4000 qualifies
-            ..combined_low
-        };
-        assert_eq!(
-            find_local_peak(&histogram(counts, total), &combined_high).black,
-            10,
-            "only the tallest clears the height, so it wins either way"
-        );
-
-        // Emptying the first pass is what makes the difference observable.
-        let starved = PeakOptions {
-            peak_percentage: Some(50.0),
-            peak_prominence: Some(50.0), // needs 2048 prominence, nothing has it
-            ..combined_low
-        };
-        assert_eq!(
-            find_local_peak(&histogram(counts, total), &starved).black,
-            10
-        );
+    fn thresholds_change_status_without_losing_the_fallback_level() {
+        let histogram = histogram(&[(10, 10), (245, 20), (128, 970)], 1000);
+        for (height, prominence, black_found, white_found) in [
+            (None, None, true, true),
+            (Some(1.0), None, true, true),
+            (Some(1.1), None, false, true),
+            (None, Some(2.0), false, true),
+            (Some(2.1), Some(2.1), false, false),
+        ] {
+            let result = find_local_peak(
+                &histogram,
+                &PeakOptions {
+                    peak_percentage: height,
+                    peak_prominence: prominence,
+                    ..PeakOptions::default()
+                },
+            );
+            assert_eq!((result.black, result.white), (10, 245));
+            assert_eq!(
+                (result.black_found, result.white_found),
+                (black_found, white_found)
+            );
+        }
     }
 
     #[test]

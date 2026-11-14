@@ -9,6 +9,7 @@ use vapoursynth4_rs::map::{AppendMode, KeyStr, MapMut, MapRef, Value};
 use vapoursynth4_rs::node::{Filter, Node, VideoNode};
 use vapoursynth4_rs::{core::CoreRef, ffi, key};
 
+use crate::book_peak::BookResult;
 use crate::error::{NImagesError, Result};
 use crate::gpu;
 use crate::gpu::histogram::Engine;
@@ -35,6 +36,9 @@ const DEFAULT_PEAK_PERCENTAGE: f64 = 0.25;
 pub struct PeakStats {
     source: VideoNode,
     options: PeakOptions,
+    /// Immutable results from the opt-in whole-clip prepass.
+    book: Option<Vec<BookResult>>,
+    book_settings: (i64, i64, i64),
     debug: bool,
     /// The device kernel, built once when `gpu` is set.
     engine: Option<Engine>,
@@ -48,7 +52,7 @@ impl Filter for PeakStats {
     type FilterData = ();
 
     const NAME: &'static CStr = c"PeakStats";
-    const ARGS: &'static CStr = c"clip:vnode:all;upper_limit:int:opt;peak_percentage:float:opt;peak_prominence:float:opt;skip_white:int:opt;gpu:int:opt;debug:int:opt;";
+    const ARGS: &'static CStr = c"clip:vnode:all;upper_limit:int:opt;peak_percentage:float:opt;peak_prominence:float:opt;skip_white:int:opt;book_peak_fallback:int:opt;levelling_lower_limit:int:opt;levelling_upper_limit:int:opt;peak_offset:int:opt;gpu:int:opt;debug:int:opt;";
     const RETURN_TYPE: &'static CStr = c"clip:vnode:all;";
 
     fn create(
@@ -68,8 +72,7 @@ impl Filter for PeakStats {
             )));
         }
 
-        // A height threshold cannot change the result on its own, so there is no
-        // reason to make it optional here. See docs/FINDINGS.md §3.7.
+        // Zero disables the height threshold; threshold status stays observable.
         let peak_percentage =
             read_float(&input, key!(c"peak_percentage"))?.unwrap_or(DEFAULT_PEAK_PERCENTAGE);
         let peak_percentage =
@@ -89,15 +92,44 @@ impl Filter for PeakStats {
         };
         let debug = read_int(&input, key!(c"debug"))?.unwrap_or(0) != 0;
 
+        let book_enabled = read_int(&input, key!(c"book_peak_fallback"))?.unwrap_or(0) != 0;
+        let lower = read_int(&input, key!(c"levelling_lower_limit"))?.unwrap_or(8);
+        let upper = read_int(&input, key!(c"levelling_upper_limit"))?.unwrap_or(55);
+        if !(0..=255).contains(&lower) || !(0..=255).contains(&upper) || lower >= upper {
+            return Err(NImagesError::new(
+                "PeakStats: levelling limits must satisfy 0 <= lower < upper <= 255",
+            ));
+        }
+        let offset = read_int(&input, key!(c"peak_offset"))?.unwrap_or(0);
+
         let gpu = read_int(&input, key!(c"gpu"))?.unwrap_or(0) != 0;
-        let (source, engine) = if gpu {
+        if gpu {
             gpu::require_device(&core)?;
+        }
+        let book = if book_enabled {
+            Some(super::book_peak::scan(
+                &source,
+                &core,
+                &options,
+                lower as u8,
+                upper as u8,
+                offset,
+            )?)
+        } else {
+            None
+        };
+        let (source, engine) = if gpu {
             let source = if source.residency() == ffi::VSNodeResidency::GPU {
                 source
             } else {
                 gpu::upload(&core, &source)?
             };
-            (source, Some(Engine::new(&core)?))
+            let engine = if book_enabled {
+                None
+            } else {
+                Some(Engine::new(&core)?)
+            };
+            (source, engine)
         } else {
             let source = if source.residency() == ffi::VSNodeResidency::GPU {
                 gpu::download(&core, &source)?
@@ -117,6 +149,8 @@ impl Filter for PeakStats {
             Self {
                 source,
                 options,
+                book,
+                book_settings: (lower, upper, offset),
                 debug,
                 engine,
                 reported: AtomicBool::new(false),
@@ -148,24 +182,45 @@ impl Filter for PeakStats {
                 let options = &self.options;
                 let line = format!(
                     "PeakStats: upper_limit={} peak_percentage={:?} peak_prominence={:?} \
-                     skip_white={} input={settings}",
+                     skip_white={} book_peak_fallback={} levelling_lower_limit={} \
+                     levelling_upper_limit={} peak_offset={} input={settings}",
                     options.upper_limit,
                     options.peak_percentage,
                     options.peak_prominence,
                     options.skip_white,
+                    self.book.is_some(),
+                    self.book_settings.0,
+                    self.book_settings.1,
+                    self.book_settings.2,
                 );
                 report_settings_once(self.debug, &self.reported, &mut core, line);
 
                 let mark = Instant::now();
-                let histogram = match &self.engine {
-                    Some(engine) => engine.count(&core, &input)?,
-                    None => analyzer_histogram(&input)?,
+                let book_result = match &self.book {
+                    Some(book) => Some(
+                        usize::try_from(n)
+                            .ok()
+                            .and_then(|n| book.get(n))
+                            .ok_or_else(|| {
+                                NImagesError::new("PeakStats: frame is outside the scanned book")
+                            })?,
+                    ),
+                    None => None,
                 };
-                trace.mark("histogram", mark);
-
-                let mark = Instant::now();
-                let peaks = find_local_peak(&histogram, &self.options);
-                trace.mark("peaks", mark);
+                let peaks = if let Some(result) = book_result {
+                    trace.mark("peaks", mark);
+                    result.peaks
+                } else {
+                    let histogram = match &self.engine {
+                        Some(engine) => engine.count(&core, &input)?,
+                        None => analyzer_histogram(&input)?,
+                    };
+                    trace.mark("histogram", mark);
+                    let mark = Instant::now();
+                    let peaks = find_local_peak(&histogram, &self.options);
+                    trace.mark("peaks", mark);
+                    peaks
+                };
 
                 let mark = Instant::now();
                 let mut output = core.copy_frame(&input);
@@ -175,6 +230,18 @@ impl Filter for PeakStats {
                     })?;
                     set_property(&mut properties, key!(c"NImagesBlackLevel"), peaks.black)?;
                     set_property(&mut properties, key!(c"NImagesWhiteLevel"), peaks.white)?;
+                    if let Some(result) = book_result {
+                        set_property(
+                            &mut properties,
+                            key!(c"NImagesBookPeakUsed"),
+                            u16::from(result.used_book_peak),
+                        )?;
+                        set_property(
+                            &mut properties,
+                            key!(c"NImagesLevelEligible"),
+                            u16::from(result.eligible),
+                        )?;
+                    }
                     set_property(
                         &mut properties,
                         key!(c"NImagesBlackPeakFound"),

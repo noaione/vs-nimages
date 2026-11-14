@@ -251,23 +251,21 @@ white_roi = hist[(255 - upper_limit) ..= 255]       -> white = 255 - upper_limit
 - `upper_limit` is not validated by the function; the CLI clamps it to `1..=255`.
   The plugin must validate it (`255 - upper_limit` must stay in range).
 
-### 3.7 `peak_percentage` alone is a no-op
+### 3.7 Threshold status and the unthresholded fallback
 
-Found while writing the fixture cases. The first pass keeps peaks with
-`height >= h` and, when requested, `prominence >= p`; when it keeps nothing, the
-fallback reruns with **both** thresholds removed. Because the height test is
-monotone, if the tallest peak fails it then every peak fails it, so the first
-pass is empty and the fallback returns the tallest peak anyway. `peak_percentage`
-therefore cannot change the selected black or white level on its own.
+The zero-padded region gives a tallest peak prominence equal to its height:
+there is no taller sample to stop either walk, and both walks reach a zero.
+If any peak passes both thresholds, a tallest peak does too. Otherwise the
+unthresholded pass selects the same tallest peak. Ties retain the lowest bin,
+and a plateau reports its center rounded down. Thresholds therefore affect
+qualification rather than the selected local level.
 
-It does matter when a prominence threshold is also set, because it can empty the
-first pass and hand the decision to the fallback, which ignores prominence. Both
-behaviours are covered by fixtures (`height-below-threshold-fallback`,
-`prominence-changes-the-winner`, `prominence-empties-the-pass`) and by
-`peaks::tests::the_height_threshold_only_matters_together_with_prominence`.
-
-`*PeakFound` is also weaker than it looks: it is false only when the region of
-interest has no non-zero bin at all, since the fallback finds any peak.
+The 2026-11-14 reference adds `_find_local_peak_analysis`, which exposes the
+thresholded pass separately. `PeakStats` now follows it: `*PeakFound` is false
+when only the unthresholded fallback found a level, as well as when the region
+is empty. The black and white levels remain unchanged. A zero height threshold
+is expressed as `peak_percentage=0` at the plugin boundary; an omitted value
+still means the default 0.25 percent.
 
 ### 3.8 End-to-end equivalence
 
@@ -284,6 +282,56 @@ A clean-room reimplementation of `find_local_peak` reproduced `nmanga`'s output
 
 This is the algorithm the Rust port must implement, and it is the basis for the
 golden-vector generator.
+
+### 3.9 Book consensus and page eligibility (2026-11-14)
+
+Reference commits `2815fe8` and `4ec5e45` replace the image-to-array histogram
+with Pillow's histogram and add book fallback. The local levels agree with the
+existing Rust detector; the changed threshold flags are covered in §3.7.
+
+`PeakStats(book_peak_fallback=True)` scans the entire source synchronously at
+creation. It votes only with qualified local black peaks strictly inside the
+levelling bounds after `peak_offset`, and requires a strict majority among
+those votes. A tie or an empty vote set has no consensus. Qualified peaks at or
+below the lower bound exclude the page. A page without a usable local peak can
+use the consensus only if its 3×3 median-filtered luma reaches the upper bound
+or below. That guard excludes isolated dark noise on otherwise bright pages.
+
+The prepass keeps one immutable result per frame. It uses host luma for every
+family and for a device input, downloading the latter for analysis. Device
+output remains resident. One bit depth is required because votes use native
+sample units; dimensions and family may vary. Limits scale from 8-bit units,
+while the offset stays in native units. `NImagesBookPeakUsed` identifies a
+replacement, and `NImagesLevelEligible` tells the caller when to apply levels.
+Excluded pages retain their local properties; `Levels` does not apply this
+policy by itself.
+
+`tools/nmanga_reference.py` loads the unchanged file analyzer and book policy
+from the sibling CLI source without importing unrelated CLI dependencies.
+`tools/golden.py` writes generated pages to temporary PNG files and calls those
+functions, including `convert("L")`, `MedianFilter(size=3)`, the first occupied
+`median.histogram()` bin, and the reference's cleanup. The histogram-only oracle
+uses the same padded SciPy search as nmanga. Aligning the generator this way
+leaves all peak and book fixture values unchanged.
+
+`tests/fixtures/book.json` freezes 54 books covering strict majority, ties,
+empty votes, offsets, both bounds, median edge replication, noise and changing
+dimensions. Rust replays the same data without a core. The plugin validator also
+checks 8–16-bit native levels, color luma, source errors at creation, mixed-depth
+rejection, property and pixel preservation, repeated and asynchronous requests,
+and host/device input parity.
+
+[The book benchmark](BOOK_PEAK_BENCH.md) measures 24-page synthetic lossless books
+through the original Python file analyzer/resolver and native CPU/Vulkan,
+including the book scan and eligible level application. Every repeated run at
+offset 0 agrees on all decisions and output hashes. The private real-page sets
+are absent; the historical results in `BENCH.md` are unchanged.
+
+The benchmark also confirms a pre-existing nonzero-offset difference: Pillow
+computes gamma from the raw black peak, while native `Levels(auto_gamma=True)`
+uses the shifted black point. At offset 1, all eight diagnostic page decisions
+agree but only four output hashes agree. This is a gamma-policy choice to resolve
+before claiming nonzero-offset pixel parity in the nmanga migration.
 
 ---
 
@@ -500,9 +548,9 @@ the same algorithm in numpy and compares it against the built plugin for an
    In a VapourSynth graph the clip is already `GRAY8`, so the decision belongs
    upstream — but the Milestone 4 wrapper must replace `nmanga`'s
    `force_gray`-driven branching explicitly rather than silently lose it.
-2. **`*PeakFound` has no Python counterpart**, so golden vectors for it must come
-   from the reimplementation in §3, not from `nmanga` (§9.1 records the
-   invariant this creates).
+2. **`*PeakFound` records threshold qualification.** The 2026-11-14
+   `_find_local_peak_analysis` entry point exposes both flags, so the generator
+   checks them against `nmanga` along with the levels.
 3. **`peak_offset` units.** The plugin contract must be
    `black_percent = (black_level + peak_offset) / 255 * 100`, matching the
    orchestrator action. The CLI's `create_magick_params` adds the offset *after*
@@ -514,9 +562,9 @@ the same algorithm in numpy and compares it against the built plugin for an
    `value <= 0 and value >= 100` is a conjunction of opposites that never fires,
    so `0` reaches `ceil(total * 0 / 100) = 0` and simply disables the height
    filter. The fixtures record `0.0` as accepted and equivalent to `None`; the
-   filter layer should accept `0 <= x <= 100` and document `None` as the explicit
-   way to disable a threshold. Note §3.7: the height threshold is a no-op on its
-   own either way.
+   filter layer accepts `0 <= x <= 100`. Pass `0` to disable a threshold in
+   the plugin; `None` leaves its default in effect. Thresholds affect the
+   qualification flags described in §3.7.
 5. **Empty `NImagesGrayShades`** — resolved by decision 2: both arrays are always
    present, empty when nothing qualifies.
 6. **`total_pixels` for 1×1 frames** makes the default 0.25% threshold `ceil(1 *
@@ -702,8 +750,7 @@ Recorded after review; these are now part of the contract.
 
 ### 9.1 Invariant accepted with decision 4
 
-`nmanga` does not expose the `*PeakFound` flags, so those expected values come
-from the reference implementation inside `tools/golden.py` rather than from
-`nmanga`. The generator asserts `nmanga` parity for black and white on every
-case and refuses to emit fixtures on any mismatch, so only the two flags rest on
-the reference implementation.
+The 2026-11-14 reference exposes both threshold flags through
+`_find_local_peak_analysis`. The generator now checks all four peak values
+against that entry point before writing fixtures. Cases too large to build as
+images still use the independent reference over their histogram.

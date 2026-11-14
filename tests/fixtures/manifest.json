@@ -1,14 +1,15 @@
 {
   "generator": "tools/golden.py",
-  "reference": "nao-manga-rls/nmanga/autolevel.py and nmanga/deblur.py",
+  "reference": "nao-manga-rls/nmanga/autolevel.py, nmanga/cli/autolevel.py and nmanga/deblur.py",
   "seed": 20240607,
   "versions": {
-    "python": "3.12.12",
+    "python": "3.12.10",
     "numpy": "2.5.3",
     "scipy": "1.18.1",
-    "pillow": "12.3.0"
+    "pillow": "13.0.0"
   },
   "files": [
+    "book.json",
     "deblur.json",
     "frames.json",
     "levels.json",

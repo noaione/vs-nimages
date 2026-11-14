@@ -237,7 +237,7 @@ def check_frame_peaks(frames: dict, fixtures: dict) -> None:
         clip = clip_of(frame_from_info(info))
         arguments = {
             "upper_limit": case["upper_limit"],
-            "peak_percentage": case["peak_percentage"],
+            "peak_percentage": case["peak_percentage"] if case["peak_percentage"] is not None else 0.0,
             "skip_white": int(case["skip_white"]),
         }
         if case["peak_prominence"] is not None:
@@ -267,7 +267,7 @@ def check_histogram_peaks(fixtures: dict) -> None:
         clip = clip_of(page)
         arguments = {
             "upper_limit": case["upper_limit"],
-            "peak_percentage": case["peak_percentage"],
+            "peak_percentage": case["peak_percentage"] if case["peak_percentage"] is not None else 0.0,
             "skip_white": int(case["skip_white"]),
         }
         if case["peak_prominence"] is not None:
@@ -471,6 +471,130 @@ def check_levels_from_properties() -> None:
     flat_stats = core.nimages.PeakStats(flat, skip_white=1)
     same(props_of(flat_stats)["NImagesBlackPeakFound"], 0, "a flat frame has no black peak")
     array_of(core.nimages.Levels(flat_stats, use_props=True))  # must not raise
+
+
+def check_book_peaks(fixtures: dict) -> None:
+    section("whole-clip book peak fallback")
+    keys = {
+        "black": "NImagesBlackLevel", "white": "NImagesWhiteLevel",
+        "black_found": "NImagesBlackPeakFound", "white_found": "NImagesWhitePeakFound",
+        "eligible": "NImagesLevelEligible", "used_book_peak": "NImagesBookPeakUsed",
+    }
+    # At the default 0.25%, nine connected dark pixels fail the height test
+    # on a 64x64 page but survive the median guard; one isolated pixel does not.
+    anchor = np.full((64, 64), 12, dtype=np.uint8)
+    patch = np.full((64, 64), 255, dtype=np.uint8)
+    patch[30:33, 30:33] = 20
+    noise = np.full((64, 64), 255, dtype=np.uint8)
+    noise[31, 31] = 20
+    defaults = core.nimages.PeakStats(clip_of_frames([anchor, anchor, patch, noise]), book_peak_fallback=1)
+    same(props_of(defaults, 2)["NImagesBlackLevel"], 12, "default book peak replaces a weak local peak")
+    same(props_of(defaults, 2)["NImagesBlackPeakFound"], 0, "default book fallback preserves threshold failure")
+    same(props_of(defaults, 2)["NImagesBookPeakUsed"], 1, "default connected dark content uses book peak")
+    same(props_of(defaults, 3)["NImagesLevelEligible"], 0, "default isolated dark noise is excluded")
+    for case in fixtures["cases"]:
+        arrays = [np.array(page["pixels"], dtype=np.uint8).reshape(page["height"], page["width"])
+                  for page in case["pages"]]
+        source = core.std.Splice([clip_of(array) for array in arrays], mismatch=True)
+        source = core.std.SetFrameProps(source, NImagesCustom=37)
+        stats = core.nimages.PeakStats(
+            source, book_peak_fallback=1, levelling_lower_limit=case["lower"],
+            levelling_upper_limit=case["upper"], peak_offset=case["offset"], **case["parameters"])
+        # Reverse order proves the first output request does not choose consensus.
+        for n in reversed(range(len(arrays))):
+            props = props_of(stats, n)
+            for key, prop in keys.items():
+                same(props[prop], int(case["pages"][n]["expect"][key]), f"{case['name']} {n}: {key}")
+            same(props["NImagesCustom"], 37, "book scan preserves source properties")
+            same(array_of(stats, n).tolist(), arrays[n].tolist(), "book scan leaves pixels alone")
+        if case["name"] == "majority-and-guards/offset-0":
+            leveled = core.nimages.Levels(stats, use_props=True, auto_gamma=True)
+
+            def choose(n, f):
+                del n
+                return leveled if f.props["NImagesLevelEligible"] else stats
+
+            output = core.std.FrameEval(stats, choose, prop_src=stats)
+            for n, page in enumerate(case["pages"]):
+                expected = array_of(leveled if page["expect"]["eligible"] else source, n)
+                same(array_of(output, n).tolist(), expected.tolist(), "book mode bypasses excluded pages")
+            futures = [(n, stats.get_frame_async(n)) for n in (10, 0, 5, 3, 10, 1)]
+            for n, future in futures:
+                with future.result() as frame:
+                    same(int(frame.props["NImagesBlackLevel"]), case["pages"][n]["expect"]["black"],
+                         f"book asynchronous frame {n}")
+
+    # Native code units and threshold failure hold at every supported depth.
+    for bits in range(8, 17):
+        maximum = (1 << bits) - 1
+        scale = maximum / 255
+        dtype = np.uint8 if bits == 8 else np.uint16
+        format_ = core.query_video_format(vs.GRAY, vs.INTEGER, bits, 0, 0).id
+        pages = [np.full((7, 9), round(12 * scale), dtype=dtype) for _ in range(2)]
+        dark = np.full((7, 9), maximum, dtype=dtype)
+        dark[2:5, 3:6] = round(20 * scale)
+        pages.append(dark)
+        clips = [clip_of_planes([page], format_, width=9, height=7) for page in pages]
+        stats = core.nimages.PeakStats(core.std.Splice(clips), book_peak_fallback=1, peak_percentage=50)
+        props = props_of(stats, 2)
+        same(props["NImagesBlackLevel"], round(12 * scale), f"{bits}-bit book peak uses native units")
+        same(props["NImagesBlackPeakFound"], 0, f"{bits}-bit fallback keeps failed threshold status")
+        same(props["NImagesBookPeakUsed"], 1, f"{bits}-bit book fallback")
+        same(props["NImagesLevelEligible"], 1, f"{bits}-bit fallback eligibility")
+        same(array_of(stats, 2).tolist(), dark.tolist(), f"{bits}-bit pixels survive")
+        if bits > 8:
+            lower = 8 * maximum // 255
+            upper = (55 * maximum + 254) // 255
+            levels = [round(12 * scale)] * 3 + [lower, lower + 1, upper - 1, upper]
+            boundary_source = core.std.Splice([
+                core.std.BlankClip(width=9, height=7, format=format_, length=1, color=[level])
+                for level in levels])
+            boundaries = core.nimages.PeakStats(boundary_source, book_peak_fallback=1)
+            # An exact upper bound can use the book peak: the local bound is
+            # exclusive, while the median guard is inclusive.
+            for n, eligible in ((3, 0), (4, 1), (5, 1), (6, int(55 * maximum % 255 == 0))):
+                same(props_of(boundaries, n)["NImagesLevelEligible"], eligible,
+                     f"{bits}-bit fractional boundary frame {n}")
+
+    # RGB median checks luma, while YUV ignores chroma. Family may vary per page.
+    anchors = [clip_of(np.full((7, 9), 12, dtype=np.uint8)) for _ in range(2)]
+    red_dark = np.full((7, 9), 20, dtype=np.uint8)
+    bright = np.full((7, 9), 200, dtype=np.uint8)
+    colored = clip_of_planes([red_dark, bright, bright], vs.RGB24, width=9, height=7)
+    gray_rgb = clip_of_planes([red_dark] * 3, vs.RGB24, width=9, height=7)
+    # A low threshold makes gray_rgb own its peak; starve it with a sparse patch instead.
+    patch = np.full((7, 9), 255, dtype=np.uint8)
+    patch[2:5, 3:6] = 20
+    sparse_rgb = clip_of_planes([patch] * 3, vs.RGB24, width=9, height=7)
+    sparse_yuv = clip_of_planes([patch, bright, bright], vs.YUV444P8, width=9, height=7)
+    color_source = core.std.Splice(anchors + [colored, gray_rgb, sparse_rgb, sparse_yuv], mismatch=True)
+    color_stats = core.nimages.PeakStats(color_source, book_peak_fallback=1, peak_percentage=50)
+    same(props_of(color_stats, 2)["NImagesLevelEligible"], 0, "RGB guard uses luma rather than red")
+    for n in (4, 5):
+        same(props_of(color_stats, n)["NImagesBookPeakUsed"], 1, "color fallback uses luma median")
+        same(planes_of(color_stats, n), planes_of(color_source, n), "color book scan preserves all planes")
+
+    # Book-only properties are absent from the ordinary per-frame mode.
+    plain = props_of(core.nimages.PeakStats(anchors[0]))
+    check("NImagesLevelEligible" not in plain and "NImagesBookPeakUsed" not in plain,
+          "ordinary PeakStats does not add book decisions")
+    for lower, upper in ((-1, 55), (8, 256), (55, 55), (60, 55)):
+        expect_error("invalid book bounds", lambda: core.nimages.PeakStats(
+            anchors[0], book_peak_fallback=1, levelling_lower_limit=lower, levelling_upper_limit=upper),
+            contains="levelling limits")
+    wide = core.std.BlankClip(width=9, height=7, format=vs.GRAY16, length=1)
+    expect_error("mixed book depths", lambda: core.nimages.PeakStats(
+        core.std.Splice([anchors[0], wide], mismatch=True), book_peak_fallback=1), contains="same bit depth")
+
+    def fail(n, f):
+        if n == 1:
+            raise vs.Error("intentional book source failure")
+        return f
+
+    broken_blank = core.std.BlankClip(width=9, height=7, format=vs.GRAY8, length=2)
+    broken = core.std.ModifyFrame(broken_blank, broken_blank, fail)
+    expect_error("book source error at creation", lambda: core.nimages.PeakStats(
+        broken, book_peak_fallback=1), contains="book scan frame 1")
 
 
 def check_property_preservation() -> None:
@@ -1640,6 +1764,21 @@ def check_device() -> None:
     for name in DEVICE_FILTERS:
         compare(name, host[name], device[name])
 
+    # The book prepass runs on the host for both CPU and device-resident inputs.
+    # Its immutable decisions must survive upload and repeated device pulls.
+    anchor = np.full((7, 9), 12, dtype=np.uint8)
+    fallback = np.full((7, 9), 255, dtype=np.uint8)
+    fallback[2:5, 3:6] = 20
+    book_source = clip_of_frames([anchor, anchor, fallback])
+    book_host = core.nimages.PeakStats(book_source, book_peak_fallback=1, peak_percentage=50)
+    for input_ in (book_source, core.std.GPUUpload(book_source)):
+        book_device = core.nimages.PeakStats(input_, book_peak_fallback=1, peak_percentage=50, gpu=1)
+        for n in (2, 0, 1, 2):
+            same(props_of(book_device, n), props_of(book_host, n), f"gpu=1 book frame {n}: decisions")
+            same(planes_of(core.std.GPUDownload(book_device), n), planes_of(book_host, n),
+                 f"gpu=1 book frame {n}: pixels")
+        check(resident(book_device), "book mode preserves device residency")
+
     # RGB reaches the luma readers and Deblur's three-plane write, which a gray
     # page cannot see.
     host_rgb = build(rgb, 0)
@@ -1751,6 +1890,7 @@ def main() -> int:
     check_posterize(posterize)
     check_lloyd_posterize()
     check_levels_from_properties()
+    check_book_peaks(load("book.json"))
     check_property_preservation()
     check_analysis_leaves_pixels_alone()
     check_geometry()

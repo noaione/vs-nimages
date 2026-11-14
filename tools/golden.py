@@ -13,11 +13,13 @@ Ground truth comes from the reference implementation in
 * ``apply_levels``         -> 256-entry tables for ``levels.json``
 * ``posterize_image_by_bits`` -> 256-entry tables for ``posterize.json``
 
-``nmanga`` does not expose the ``*PeakFound`` flags or an automatic-gamma
-helper, so those expected values come from the reference implementation below.
+``book.json`` calls the file analyzer and resolver from
+``nmanga/cli/autolevel.py`` through ``nmanga_reference.BookReference``.
+
+``nmanga`` exposes threshold status through ``_find_local_peak_analysis``.
+Automatic gamma uses the reference expression below.
 Every case that can be built as an image is validated against ``nmanga`` first
-and generation aborts on any disagreement, so only the flags and the gamma
-values rest on the reference alone.
+and generation aborts on any disagreement, including the threshold status.
 
 Usage::
 
@@ -33,11 +35,14 @@ import json
 import math
 import sys
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 import numpy as np
 import scipy
 from PIL import Image
+
+from nmanga_reference import BookReference
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = REPO_ROOT / "tests" / "fixtures"
@@ -109,34 +114,23 @@ def prominence(x: np.ndarray, peak: int) -> int:
     return height - max(left_min, right_min)
 
 
-def _select_peak(
-    padded: np.ndarray,
-    total_pixels: int,
-    peak_percentage: float | None,
-    peak_prominence: float | None,
-) -> tuple[int, bool]:
-    """Returns ``(roi_index, found)`` for one padded region of interest."""
-    min_pixels = math.ceil(total_pixels * (peak_percentage / 100.0)) if peak_percentage is not None else 0
-    min_prominence = math.ceil(total_pixels * (peak_prominence / 100.0)) if peak_prominence is not None else 0
+def _find_histogram_peak_with_status(
+    hist: np.ndarray, min_pix_count: int, min_prominence: int
+) -> tuple[int | None, bool]:
+    """Match nmanga's padded SciPy search, including its threshold status."""
+    from scipy import signal
 
-    def best(height: int, prom: int, use_prominence: bool) -> tuple[int, bool]:
-        candidates: list[tuple[int, int]] = []
-        for peak in local_maxima(padded):
-            if int(padded[peak]) < height:
-                continue
-            if use_prominence and prominence(padded, peak) < prom:
-                continue
-            candidates.append((peak, int(padded[peak])))
-        if not candidates:
-            return -1, False
-        tallest = max(count for _, count in candidates)
-        # First (lowest-bin) candidate on a tie, matching numpy.argmax.
-        return next(peak for peak, count in candidates if count == tallest) - 1, True
-
-    index, found = best(min_pixels, min_prominence, peak_prominence is not None)
-    if not found:
-        index, found = best(0, 0, False)
-    return index, found
+    padded = np.zeros(len(hist) + 2, dtype=np.float64)
+    padded[1:-1] = hist
+    peaks, properties = signal.find_peaks(
+        padded, height=min_pix_count, prominence=min_prominence if min_prominence > 0 else None
+    )
+    passed = bool(peaks.size)
+    if peaks.size == 0:
+        peaks, properties = signal.find_peaks(padded, height=0)
+    if peaks.size == 0:
+        return None, False
+    return int(peaks[properties["peak_heights"].argmax()]) - 1, passed
 
 
 def reference_peaks(
@@ -148,22 +142,22 @@ def reference_peaks(
     peak_prominence: float | None = None,
     skip_white: bool = False,
 ) -> tuple[int, int, bool, bool]:
-    """Reference ``find_local_peak`` plus the two ``*PeakFound`` flags."""
-    black_roi = hist[0 : upper_limit + 1]
-    black, black_found = _select_peak(
-        np.concatenate(([0], black_roi, [0])), total_pixels, peak_percentage, peak_prominence
+    """nmanga's local analysis over counts, including non-image u64 fixtures."""
+    if upper_limit < 0:
+        return 0, 255, False, False
+    min_pix_count = math.ceil(total_pixels * (peak_percentage / 100.0)) if peak_percentage is not None else 0
+    min_prominence = math.ceil(total_pixels * (peak_prominence / 100.0)) if peak_prominence is not None else 0
+    black_peak, black_found = _find_histogram_peak_with_status(
+        hist[: min(256, upper_limit + 1)], min_pix_count, min_prominence
     )
-    if not black_found:
-        black = 0
-
+    black = 0 if black_peak is None else black_peak
     if skip_white:
         return black, 255, black_found, False
-
-    white_roi = hist[255 - upper_limit : 256]
-    white_index, white_found = _select_peak(
-        np.concatenate(([0], white_roi, [0])), total_pixels, peak_percentage, peak_prominence
+    white_start = max(0, 255 - upper_limit)
+    white_peak, white_found = _find_histogram_peak_with_status(
+        hist[white_start:], min_pix_count, min_prominence
     )
-    white = 255 - upper_limit + white_index if white_found else 255
+    white = 255 if white_peak is None else white_start + white_peak
     return black, white, black_found, white_found
 
 
@@ -220,6 +214,7 @@ class Nmanga:
             ) from error
         self.module = sys.modules["nmanga.autolevel"]
         self.deblur = sys.modules["nmanga.deblur"]
+        self.path = path
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.module, name)
@@ -380,17 +375,14 @@ def peak_histograms() -> list[tuple[str, np.ndarray, int]]:
     # Prominence. 0.1% of a 4096 pixel frame is ceil(4.096) = 5.
     add("prominence-pass", filled(sparse(b10=2000, b9=100, b11=100), total))
 
-    # A high massif makes the tallest peak barely stand out, so it fails a
-    # prominence threshold while a shorter isolated peak passes. This is the one
-    # construction where the prominence argument changes which peak wins rather
-    # than only shrinking the candidate set.
+    # Keep the historical fixture name. Zero padding makes a global maximum's
+    # prominence equal its height even on a massif, so it still wins.
     massif = sparse(**{f"b{shade}": 2999 for shade in range(0, 21)})
     massif[10] = 3000
     massif[40] = 2500
     add("prominence-changes-the-winner", massif)
 
-    # Every peak fails prominence, so the first pass is empty and the fallback
-    # runs without any thresholds.
+    # A full ROI massif still reaches the virtual zero bins on both sides.
     massif_only = sparse(**{f"b{shade}": 2999 for shade in range(0, 61)})
     massif_only[10] = 3000
     add("prominence-empties-the-pass", massif_only)
@@ -410,6 +402,90 @@ def peak_histograms() -> list[tuple[str, np.ndarray, int]]:
     add("u64-single-bin", sparse(b12=(1 << 48)))
 
     return cases
+
+
+def build_book_fixtures(nmanga: Nmanga) -> dict[str, Any]:
+    """Run nmanga's exact file analyzer and resolver on generated PNG pages."""
+    reference = BookReference(nmanga.path)
+
+    def flat(value: int) -> np.ndarray:
+        return np.full((7, 9), value, dtype=np.uint8)
+
+    noise = flat(255)
+    noise[3, 4] = 20
+    dark = flat(255)
+    dark[2:5, 3:6] = 20
+    edge = flat(255)
+    edge[:2, :2] = 20
+    sets = [
+        ("majority-and-guards", [flat(12), flat(12), flat(20), flat(0), flat(8),
+                                 flat(55), flat(60), flat(128), flat(255), noise, dark, edge]),
+        ("tie", [flat(12), flat(20), dark]),
+        ("exactly-half", [flat(12), flat(12), flat(20), flat(30), dark]),
+        ("no-usable-peaks", [flat(0), flat(8), flat(55), dark, noise]),
+        ("one-vote", [flat(12), dark, noise]),
+        ("variable-dimensions", [flat(12), np.full((1, 1), 12, dtype=np.uint8),
+                                 np.array([[20, 255, 255]], dtype=np.uint8), dark]),
+    ]
+    rng = np.random.default_rng(SEED)
+    for n in range(12):
+        pages = [flat(int(value)) for value in rng.choice([0, 8, 12, 12, 20, 55, 60, 255], size=6)]
+        pages += [rng.choice([20, 128, 255], size=(7, 9)).astype(np.uint8), dark, noise]
+        sets.append((f"random-{n}", pages))
+
+    cases = []
+    with TemporaryDirectory(prefix="nimages-golden-book-") as directory:
+        root = Path(directory)
+        for name, arrays in sets:
+            paths = []
+            records = []
+            for n, array in enumerate(arrays):
+                path = root / f"{n:03d}.png"
+                with Image.fromarray(array) as image:
+                    image.save(path)
+                paths.append(path)
+                records.append({
+                    "width": array.shape[1],
+                    "height": array.shape[0],
+                    "pixels": array.ravel().tolist(),
+                })
+            parameters = {
+                "upper_limit": 60,
+                "peak_percentage": 50.0,
+                "peak_prominence": 0.1,
+                "skip_white": False,
+            }
+            # Match _analyze_book_peak_pages: the real per-file function opens
+            # the PNG, converts to L, filters it and scans median.histogram().
+            pages = dict(reference.analyze_page(path, 60, 50.0, 0.1, False) for path in paths)
+            for offset in (0, 4, -4):
+                shared, resolved = reference.resolve_pages(pages, offset, 8, 55)
+                page_records = []
+                for path, record in zip(paths, records):
+                    page = pages[path]
+                    result = resolved[path]
+                    page_records.append({
+                        **record,
+                        "darkest_gray": page.darkest_gray,
+                        "expect": {
+                            "black": page.analysis.black_level if result.black_level is None else result.black_level,
+                            "white": result.white_level,
+                            "black_found": page.analysis.black_peak_found,
+                            "white_found": page.analysis.white_peak_found,
+                            "eligible": result.black_level is not None,
+                            "used_book_peak": result.used_book_peak,
+                        },
+                    })
+                cases.append({
+                    "name": f"{name}/offset-{offset}",
+                    "lower": 8,
+                    "upper": 55,
+                    "offset": offset,
+                    "parameters": parameters,
+                    "consensus": shared,
+                    "pages": page_records,
+                })
+    return {"cases": cases}
 
 
 def build_peak_fixtures(nmanga: Nmanga) -> dict[str, Any]:
@@ -437,15 +513,17 @@ def build_peak_fixtures(nmanga: Nmanga) -> dict[str, Any]:
             if image is None:
                 reference_only += 1
             else:
-                want = nmanga.find_local_peak(
+                want = nmanga._find_local_peak_analysis(
                     image,
                     upper_limit=params["upper_limit"],
                     peak_percentage=params["peak_percentage"],
                     peak_prominence=params["peak_prominence"],
                     skip_white_check=params["skip_white"],
                 )
-                if (want[0], want[1]) != (black, white):
-                    raise AssertionError(f"{case_name}: nmanga={want[:2]} reference={(black, white)}")
+                expected = (black, white, black_found, white_found)
+                actual = (want.black_level, want.white_level, want.black_peak_found, want.white_peak_found)
+                if actual != expected:
+                    raise AssertionError(f"{case_name}: nmanga={actual} reference={expected}")
 
             cases.append({
                 "name": case_name,
@@ -988,15 +1066,17 @@ def build_frame_fixtures(nmanga: Nmanga) -> dict[str, Any]:
                 peak_prominence=params["peak_prominence"],
                 skip_white=params["skip_white"],
             )
-            want = nmanga.find_local_peak(
+            want = nmanga._find_local_peak_analysis(
                 image,
                 upper_limit=params["upper_limit"],
                 peak_percentage=params["peak_percentage"],
                 peak_prominence=params["peak_prominence"],
                 skip_white_check=params["skip_white"],
             )
-            if (want[0], want[1]) != (black, white):
-                raise AssertionError(f"frame {name}/{params['label']}: nmanga={want[:2]} reference={(black, white)}")
+            expected = (black, white, black_found, white_found)
+            actual = (want.black_level, want.white_level, want.black_peak_found, want.white_peak_found)
+            if actual != expected:
+                raise AssertionError(f"frame {name}/{params['label']}: nmanga={actual} reference={expected}")
             peak_cases.append({
                 "name": f"{name}/{params['label']}",
                 "frame": name,
@@ -1105,6 +1185,7 @@ def main() -> int:
     outputs: dict[str, Any] = {}
     outputs["frames.json"] = build_frame_fixtures(nmanga)
     outputs["peaks.json"] = build_peak_fixtures(nmanga)
+    outputs["book.json"] = build_book_fixtures(nmanga)
     outputs["shades.json"] = build_shade_fixtures(nmanga)
     outputs["levels.json"] = build_level_fixtures(nmanga)
     outputs["posterize.json"] = build_posterize_fixtures(nmanga)
@@ -1112,7 +1193,7 @@ def main() -> int:
 
     manifest = {
         "generator": "tools/golden.py",
-        "reference": "nao-manga-rls/nmanga/autolevel.py and nmanga/deblur.py",
+        "reference": "nao-manga-rls/nmanga/autolevel.py, nmanga/cli/autolevel.py and nmanga/deblur.py",
         "seed": SEED,
         "versions": {
             "python": sys.version.split()[0],
@@ -1153,6 +1234,7 @@ def main() -> int:
         print(f"wrote {name} ({len(data):,} bytes)")
 
     print(f"peak cases: {len(outputs['peaks.json']['cases'])}")
+    print(f"book cases: {len(outputs['book.json']['cases'])}")
     print(f"shade cases: {len(outputs['shades.json']['cases'])}")
     print(f"levels cases: {len(outputs['levels.json']['cases'])}")
     print(f"posterize cases: {len(outputs['posterize.json']['cases'])}")

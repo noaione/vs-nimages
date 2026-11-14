@@ -20,6 +20,7 @@ mod gpu;
 mod luma;
 mod vulkan;
 
+pub mod book_peak;
 pub mod deblur;
 pub mod gray_shades;
 pub mod histogram;

@@ -182,8 +182,29 @@ Input and output pixels are unchanged. The returned frames contain:
 |---|---:|---|
 | `NImagesBlackLevel` | integer | Selected black peak, in source sample units |
 | `NImagesWhiteLevel` | integer | Selected white peak, in source sample units |
-| `NImagesBlackPeakFound` | integer boolean | Whether a black peak was found |
-| `NImagesWhitePeakFound` | integer boolean | Whether a white peak was found |
+| `NImagesBlackPeakFound` | integer boolean | Whether a black peak passed both thresholds |
+| `NImagesWhitePeakFound` | integer boolean | Whether a white peak passed both thresholds |
+
+`book_peak_fallback=True` opts into a synchronous whole-clip prepass at filter
+creation. It requires a finite clip with one integer bit depth; dimensions and
+color family may vary. The prepass retains only per-frame analysis, not pixels.
+It takes a strict majority of qualified black peaks whose offset value lies
+strictly between `levelling_lower_limit=8` and `levelling_upper_limit=55`.
+Those limits use 8-bit-equivalent units; `peak_offset=0` uses native code units
+and affects eligibility only. Pass the same offset to `Levels` when applying it.
+
+A page keeps its qualified local peak inside those bounds. A qualified peak
+at or below the lower bound is excluded. Otherwise, a majority peak replaces
+the local black level only if the minimum of the page's 3x3 median-filtered
+luma is at or below the upper bound. The median extends edge samples. White
+levels and local threshold flags remain unchanged. With no consensus, pages
+without a usable local peak are excluded. The prepass fails at creation on a
+source error or mixed bit depths. Results never depend on frame request order.
+
+Book mode adds `NImagesBookPeakUsed` and `NImagesLevelEligible` integer booleans.
+An excluded frame keeps its local levels and has `NImagesLevelEligible=0`;
+callers bypass `Levels` for that frame. Outside book mode these two properties
+are not written and the level selection is unchanged.
 
 Example property access:
 
@@ -470,8 +491,9 @@ implementation scans the native bins directly and allocates no ROI copy.
   behavior of `numpy.argmax`.
 - If no candidate qualifies, repeat peak selection without the height or
   prominence thresholds.
-- If no fallback candidate exists, return black 0 or the sample maximum and set
-  the corresponding `PeakFound` property to false.
+- The corresponding `PeakFound` property records success of the thresholded
+  pass, even when the fallback returns a level.
+- If no fallback candidate exists, return black 0 or the sample maximum.
 
 ### 7.5 Gray-shade analysis
 

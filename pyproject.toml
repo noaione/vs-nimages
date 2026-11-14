@@ -48,7 +48,7 @@ dev-tests = [
     "numpy>=2.0",
     "vapoursynth-imageseqs>=0.3.0",
 ]
-# `tools/golden.py` only. it imports `nmanga.autolevel` from a sibling checkout,
+# the golden generator and book benchmark import nmanga from a sibling checkout,
 # which needs numpy, scipy and pillow to run the reference implementation.
 golden = [
     "numpy>=2.0",

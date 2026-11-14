@@ -18,6 +18,7 @@
 //! written, and an RGB frame's interleaved channels are stepped over rather than
 //! mixed.
 
+mod book_peak;
 mod deblur;
 mod levels;
 mod peak_gray_shades;
