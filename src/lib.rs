@@ -36,7 +36,7 @@ vapoursynth4_rs::declare_plugin!(
     c"xyz.n4o.nimages",
     c"nimages",
     c"A collection of analyzer and tooling to manipulate images",
-    (0, 3), // VERSION 0.3.0
+    (0, 4), // VERSION 0.4.0
     vapoursynth4_rs::VAPOURSYNTH_API_VERSION,
     0,
     (PeakStats, None),

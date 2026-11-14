@@ -2,6 +2,10 @@
 
 ### unreleased
 
+nothing yet.
+
+### [0.4.0] (2026-11-14)
+
 **Added**:
 - `PeakStats(book_peak_fallback=True)` scans the whole clip for a strict
   majority black peak and applies the reference's page eligibility and
